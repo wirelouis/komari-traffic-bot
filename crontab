@@ -1,0 +1,3 @@
+0 0 * * * python /app/komari_traffic_report.py report_daily
+5 0 * * 1 python /app/komari_traffic_report.py report_weekly
+10 0 1 * * python /app/komari_traffic_report.py report_monthly
