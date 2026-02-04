@@ -63,9 +63,24 @@ mkdir -p data
 ```
 ### 2️⃣ Create .env
 ```
+cp env.example .env
+# Then edit .env as needed.
+
+# Or create .env manually:
 cat > .env <<'ENV'
 # Komari panel base URL (no trailing slash)
 KOMARI_BASE_URL=https://your-komari.example
+
+# Komari API timeout (seconds)
+KOMARI_TIMEOUT_SECONDS=15
+
+# Komari API auth (optional)
+KOMARI_API_TOKEN=
+KOMARI_API_TOKEN_HEADER=Authorization
+KOMARI_API_TOKEN_PREFIX=Bearer
+
+# Komari fetch concurrency
+KOMARI_FETCH_WORKERS=6
 
 # Telegram
 TELEGRAM_BOT_TOKEN=123456:YOUR_BOT_TOKEN
@@ -73,6 +88,9 @@ TELEGRAM_CHAT_ID=123456789
 
 # Container data directory (do not change)
 DATA_DIR=/data
+
+# Statistics timezone (default Asia/Shanghai)
+STAT_TZ=Asia/Shanghai
 
 # Top ranking size
 TOP_N=3
@@ -84,6 +102,10 @@ SAMPLE_RETENTION_HOURS=720
 # History retention
 HISTORY_HOT_DAYS=60
 HISTORY_RETENTION_DAYS=400
+
+# Logging
+LOG_LEVEL=INFO
+LOG_FILE=
 ENV
 ```
 ### 3️⃣ Create crontab
@@ -105,7 +127,7 @@ version: "3.9"
 
 services:
   komari-traffic-bot:
-    image: ghcr.io/wirelouis/komari-traffic-bot:latest
+    image: ghcr.io/wirelouis/komari-traffic-bot:v1.1.0
     env_file: .env
     environment:
       - TZ=Asia/Shanghai
@@ -113,10 +135,15 @@ services:
     volumes:
       - ./data:/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "/app/komari_traffic_report.py", "health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     command: ["python", "/app/komari_traffic_report.py", "listen"]
 
   komari-traffic-cron:
-    image: ghcr.io/wirelouis/komari-traffic-bot:latest
+    image: ghcr.io/wirelouis/komari-traffic-bot:v1.1.0
     env_file: .env
     environment:
       - TZ=Asia/Shanghai

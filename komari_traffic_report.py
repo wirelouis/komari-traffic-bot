@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import json
+import logging
 import os
 import re
 import sys
@@ -9,14 +10,19 @@ import time
 import traceback
 import socket
 import gzip
+import concurrent.futures
+import signal
 from dataclasses import dataclass
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 
 import requests
 import random
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 
-TZ = ZoneInfo("Asia/Shanghai")  # 北京时间
+STAT_TZ = os.environ.get("STAT_TZ", "Asia/Shanghai")
+TZ = ZoneInfo(STAT_TZ)  # 统计时区
 
 KOMARI_BASE_URL = os.environ.get("KOMARI_BASE_URL", "").rstrip("/")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -25,6 +31,11 @@ DATA_DIR = os.environ.get("DATA_DIR", "/var/lib/komari-traffic")
 
 HISTORY_HOT_DAYS = int(os.environ.get("HISTORY_HOT_DAYS", "60"))
 HISTORY_RETENTION_DAYS = int(os.environ.get("HISTORY_RETENTION_DAYS", "400"))
+
+KOMARI_API_TOKEN = os.environ.get("KOMARI_API_TOKEN", "")
+KOMARI_API_TOKEN_HEADER = os.environ.get("KOMARI_API_TOKEN_HEADER", "Authorization")
+KOMARI_API_TOKEN_PREFIX = os.environ.get("KOMARI_API_TOKEN_PREFIX", "Bearer")
+KOMARI_FETCH_WORKERS = int(os.environ.get("KOMARI_FETCH_WORKERS", "6"))
 
 TOP_N = int(os.environ.get("TOP_N", "3"))  # 默认 Top3（日报/周报/月报/Top命令都用它）
 
@@ -37,7 +48,107 @@ HISTORY_PATH = os.path.join(DATA_DIR, "history.json")
 SAMPLES_PATH = os.path.join(DATA_DIR, "samples.json")
 TG_OFFSET_PATH = os.path.join(DATA_DIR, "tg_offset.txt")
 
-TIMEOUT = 15  # Komari API timeout（秒）
+TIMEOUT = int(os.environ.get("KOMARI_TIMEOUT_SECONDS", "15"))  # Komari API timeout（秒）
+
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+LOG_FILE = os.environ.get("LOG_FILE", "").strip()
+
+SHUTTING_DOWN = False
+
+
+def build_http_session() -> requests.Session:
+    retry = Retry(
+        total=3,
+        connect=3,
+        read=3,
+        status=3,
+        backoff_factor=0.5,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset(["GET"]),
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session = requests.Session()
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+
+HTTP_SESSION = build_http_session()
+
+
+def setup_logging():
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if LOG_FILE:
+        handlers.append(logging.FileHandler(LOG_FILE, encoding="utf-8"))
+    logging.basicConfig(
+        level=getattr(logging, LOG_LEVEL, logging.INFO),
+        format="%(asctime)s %(levelname)s %(message)s",
+        handlers=handlers,
+    )
+
+
+def build_komari_headers() -> dict:
+    headers = {"Accept": "application/json"}
+    if KOMARI_API_TOKEN:
+        prefix = KOMARI_API_TOKEN_PREFIX.strip()
+        value = f"{prefix} {KOMARI_API_TOKEN}".strip()
+        headers[KOMARI_API_TOKEN_HEADER] = value
+    return headers
+
+
+def _require_positive_int(name: str, value: int):
+    if value <= 0:
+        raise RuntimeError(f"{name} must be > 0")
+
+
+def validate_config_or_raise():
+    required = {
+        "KOMARI_BASE_URL": KOMARI_BASE_URL,
+        "TELEGRAM_BOT_TOKEN": TELEGRAM_BOT_TOKEN,
+        "TELEGRAM_CHAT_ID": TELEGRAM_CHAT_ID,
+    }
+    missing = [k for k, v in required.items() if not str(v).strip()]
+    if missing:
+        raise RuntimeError("Missing required env: " + ", ".join(missing))
+
+    _require_positive_int("KOMARI_TIMEOUT_SECONDS", TIMEOUT)
+    _require_positive_int("KOMARI_FETCH_WORKERS", KOMARI_FETCH_WORKERS)
+    _require_positive_int("TOP_N", TOP_N)
+    _require_positive_int("SAMPLE_INTERVAL_SECONDS", SAMPLE_INTERVAL_SECONDS)
+    _require_positive_int("SAMPLE_RETENTION_HOURS", SAMPLE_RETENTION_HOURS)
+
+
+def run_healthcheck_or_raise():
+    ensure_dirs()
+
+    test_path = os.path.join(DATA_DIR, ".health_write_test")
+    try:
+        with open(test_path, "w", encoding="utf-8") as f:
+            f.write("ok")
+        os.remove(test_path)
+    except Exception as e:
+        raise RuntimeError(f"DATA_DIR not writable: {DATA_DIR}: {e}")
+
+    for p in [BASELINES_PATH, HISTORY_PATH, SAMPLES_PATH, TG_OFFSET_PATH]:
+        if os.path.exists(p):
+            try:
+                if p == TG_OFFSET_PATH:
+                    _ = load_offset()
+                else:
+                    load_json(p, {})
+            except Exception as e:
+                raise RuntimeError(f"Corrupted file: {p}: {e}")
+
+    try:
+        HTTP_SESSION.get(KOMARI_BASE_URL, timeout=TIMEOUT, headers=build_komari_headers())
+    except Exception as e:
+        raise RuntimeError(f"Komari unreachable: {e}")
+
+
+def _handle_sigterm(signum, _frame):
+    global SHUTTING_DOWN
+    SHUTTING_DOWN = True
+    logging.warning("received signal %s, shutting down gracefully...", signum)
 
 
 # -------------------- 基础工具 --------------------
@@ -102,7 +213,7 @@ def save_json_atomic(path: str, data):
 
 
 def get_json(url: str):
-    r = requests.get(url, timeout=TIMEOUT, headers={"Accept": "application/json"})
+    r = HTTP_SESSION.get(url, timeout=TIMEOUT, headers=build_komari_headers())
     r.raise_for_status()
     return r.json()
 
@@ -191,38 +302,43 @@ def fetch_nodes_and_totals():
     out: list[NodeTotal] = []
     skipped: list[str] = []
 
-    for n in nodes:
-        uuid = n.get("uuid")
-        name = n.get("name") or uuid
+    def fetch_one(node: dict):
+        uuid = node.get("uuid")
+        name = node.get("name") or uuid
         if not uuid:
-            continue
-
+            return None, None
         try:
             recent_resp = get_json(f"{KOMARI_BASE_URL}/api/recent/{uuid}")
         except requests.exceptions.ReadTimeout:
-            skipped.append(f"{name}(timeout)")
-            continue
+            return None, f"{name}(timeout)"
         except requests.exceptions.RequestException as e:
-            skipped.append(f"{name}({type(e).__name__})")
-            continue
+            return None, f"{name}({type(e).__name__})"
         except Exception as e:
-            skipped.append(f"{name}({type(e).__name__})")
-            continue
+            return None, f"{name}({type(e).__name__})"
 
         if not (isinstance(recent_resp, dict) and recent_resp.get("status") == "success"):
-            skipped.append(f"{name}(bad_resp)")
-            continue
+            return None, f"{name}(bad_resp)"
 
         points = recent_resp.get("data", [])
         if not points:
-            skipped.append(f"{name}(empty)")
-            continue
+            return None, f"{name}(empty)"
 
         last = points[-1]
         net = last.get("network", {}) if isinstance(last, dict) else {}
         up = int(net.get("totalUp", 0))
         down = int(net.get("totalDown", 0))
-        out.append(NodeTotal(uuid=uuid, name=name, up=up, down=down))
+        return NodeTotal(uuid=uuid, name=name, up=up, down=down), None
+
+    max_workers = max(1, min(len(nodes), KOMARI_FETCH_WORKERS))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_map = {executor.submit(fetch_one, n): n for n in nodes}
+        for future in concurrent.futures.as_completed(future_map):
+            result, skip = future.result()
+            if skip:
+                skipped.append(skip)
+                continue
+            if result:
+                out.append(result)
 
     return out, skipped
 
@@ -718,7 +834,7 @@ def get_updates(offset: int | None):
     last_exc = None
     for _ in range(5):
         try:
-            r = requests.get(url, params=params, timeout=TIMEOUT + 60)
+            r = HTTP_SESSION.get(url, params=params, timeout=TIMEOUT + 60)
             r.raise_for_status()
             return r.json()
         except (requests.exceptions.ConnectionError,
@@ -779,6 +895,7 @@ def listen_commands():
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         raise RuntimeError("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 未设置")
 
+    logging.info("Komari traffic bot starting (stat_tz=%s)", STAT_TZ)
     offset = load_offset()
 
     # 启动先采一次样
@@ -788,6 +905,9 @@ def listen_commands():
         pass
 
     while True:
+        if SHUTTING_DOWN:
+            logging.warning("shutdown flag set, exiting listen loop")
+            return
         try:
             # 周期采样：哪怕没人发命令，也会积累 /top Nh 所需数据
             try:
@@ -873,6 +993,7 @@ def listen_commands():
         except Exception as e:
             if should_alert("listen", 300):
                 alert_exception("listen_loop", "listen", e)
+            logging.exception("listen loop error")
             time.sleep(3)
 
 
@@ -880,7 +1001,7 @@ def listen_commands():
 
 def main():
     if len(sys.argv) < 2:
-        raise RuntimeError("Usage: report_daily | report_weekly | report_monthly | listen | bootstrap")
+        raise RuntimeError("Usage: report_daily | report_weekly | report_monthly | listen | bootstrap | health | config-validate")
 
     cmd = sys.argv[1].strip().lower()
 
@@ -899,11 +1020,23 @@ def main():
     if cmd == "bootstrap":
         bootstrap_period_baselines()
         return 0
+    if cmd == "config-validate":
+        validate_config_or_raise()
+        print("OK")
+        return 0
+    if cmd == "health":
+        validate_config_or_raise()
+        run_healthcheck_or_raise()
+        print("OK")
+        return 0
 
     raise RuntimeError("Unknown command")
 
 
 if __name__ == "__main__":
+    setup_logging()
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+    signal.signal(signal.SIGINT, _handle_sigterm)
     full_cmd = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else "(none)"
     try:
         sys.exit(main())

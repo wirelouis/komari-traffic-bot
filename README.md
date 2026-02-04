@@ -62,9 +62,24 @@ mkdir -p data
 ```
 ### 2️⃣ 创建 .env 配置文件
 ```
+cp env.example .env
+# 然后按需编辑 .env（或用你喜欢的编辑器修改）
+
+# 或者手动创建 .env：
 cat > .env <<'ENV'
 # Komari 面板地址（不要以 / 结尾）
 KOMARI_BASE_URL=https://your-komari.example
+
+# Komari API 超时（秒）
+KOMARI_TIMEOUT_SECONDS=15
+
+# Komari API 鉴权（可选）
+KOMARI_API_TOKEN=
+KOMARI_API_TOKEN_HEADER=Authorization
+KOMARI_API_TOKEN_PREFIX=Bearer
+
+# Komari 节点并发请求数
+KOMARI_FETCH_WORKERS=6
 
 # Telegram
 TELEGRAM_BOT_TOKEN=123456:YOUR_BOT_TOKEN
@@ -72,6 +87,9 @@ TELEGRAM_CHAT_ID=123456789
 
 # 容器内数据目录（固定）
 DATA_DIR=/data
+
+# 统计时区（默认 Asia/Shanghai）
+STAT_TZ=Asia/Shanghai
 
 # Top 榜数量
 TOP_N=3
@@ -83,6 +101,10 @@ SAMPLE_RETENTION_HOURS=720
 # 历史数据策略
 HISTORY_HOT_DAYS=60
 HISTORY_RETENTION_DAYS=400
+
+# 日志
+LOG_LEVEL=INFO
+LOG_FILE=
 ENV
 ```
 ### 3️⃣ 准备 crontab
@@ -104,7 +126,7 @@ version: "3.9"
 
 services:
   komari-traffic-bot:
-    image: ghcr.io/wirelouis/komari-traffic-bot:latest
+    image: ghcr.io/wirelouis/komari-traffic-bot:v1.1.0
     env_file: .env
     environment:
       - TZ=Asia/Shanghai
@@ -112,10 +134,15 @@ services:
     volumes:
       - ./data:/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "/app/komari_traffic_report.py", "health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     command: ["python", "/app/komari_traffic_report.py", "listen"]
 
   komari-traffic-cron:
-    image: ghcr.io/wirelouis/komari-traffic-bot:latest
+    image: ghcr.io/wirelouis/komari-traffic-bot:v1.1.0
     env_file: .env
     environment:
       - TZ=Asia/Shanghai
