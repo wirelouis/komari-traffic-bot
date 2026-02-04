@@ -53,14 +53,14 @@
 
 ## 🚀 快速部署（docker-compose）
 
-1️⃣ 创建目录
+### 1️⃣ 创建目录
 
 ```
 bash
 mkdir -p komari-traffic && cd komari-traffic
 mkdir -p data
 ```
-2️⃣ 创建 .env 配置文件
+### 2️⃣ 创建 .env 配置文件
 ```
 cat > .env <<'ENV'
 # Komari 面板地址（不要以 / 结尾）
@@ -85,7 +85,7 @@ HISTORY_HOT_DAYS=60
 HISTORY_RETENTION_DAYS=400
 ENV
 ```
-3️⃣ 准备 crontab
+### 3️⃣ 准备 crontab
 ```
 cat > crontab <<'CRON'
 # 每天 00:00：昨日日报
@@ -98,7 +98,7 @@ cat > crontab <<'CRON'
 10 0 1 * * python /app/komari_traffic_report.py report_monthly
 CRON
 ```
-4️⃣ 使用 docker-compose 启动
+### 4️⃣ 使用 docker-compose 启动
 ```
 version: "3.9"
 
@@ -131,7 +131,7 @@ services:
 docker compose up -d
 docker compose ps
 ```
-5️⃣ 初始化（只需一次
+### 5️⃣ 初始化（只需一次
 ```）
 docker compose exec komari-traffic-bot \
   python /app/komari_traffic_report.py bootstrap
