@@ -136,7 +136,7 @@ docker compose up -d
 docker compose exec komari-traffic-bot \
   python /app/komari_traffic_report.py bootstrap
 ```
-### 🤖 Telegram Command Examples
+## 🤖 Telegram Command Examples
 | Command      | Description                 |
 | ------------ | --------------------------- |
 | `/today`     | Today traffic (00:00 → now) |
@@ -146,7 +146,7 @@ docker compose exec komari-traffic-bot \
 | `/top 6h`    | Top in last 6 hours         |
 | `/top week`  | Weekly Top                  |
 | `/top month` | Monthly Top                 |
-### 🕒 Timezone
+## 🕒 Timezone
 
 Statistics timezone: STAT_TZ (default Asia/Shanghai)
 
@@ -154,7 +154,7 @@ Scheduler timezone: container TZ
 
 This ensures daily reports are triggered at local midnight.
 
-### 📦 Data Persistence
+## 📦 Data Persistence
 
 All runtime data is stored in ./data:
 
@@ -168,7 +168,7 @@ Telegram update offset
 
 Upgrades and restarts will not lose data.
 
-### 🔄 Upgrade
+## 🔄 Upgrade
 ```
 docker pull ghcr.io/wirelouis/komari-traffic-bot:latest
 docker compose up -d
