@@ -54,13 +54,17 @@ A **Dockerized traffic statistics extension** for **Komari Probe**, providing:
 
 ## 🚀 Quick Start (docker-compose)
 
-### 1️⃣ Create working directory
-
+### 1️⃣ Create data directory and set permissions (required)
+This container runs as a non-root user (`uid:gid = 10001:10001`) and needs write access to the `data/` directory.
 ```
 bash
 mkdir -p komari-traffic && cd komari-traffic
 mkdir -p data
+sudo chown -R 10001:10001 data
+sudo chmod -R u+rwX,go+rX data
 ```
+> If you encounter `PermissionError: [Errno 13] Permission denied: '/data/...'` in the logs after startup,
+> re-execute the above `chown` / `chmod` commands and restart the container.
 ### 2️⃣ Create .env
 ```
 cp env.example .env
