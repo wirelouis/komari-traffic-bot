@@ -53,7 +53,7 @@
 
 ## 🚀 快速部署（docker-compose）
 
-### 1️⃣ 创建目录
+1️⃣ 创建目录
 
 ```
 bash
@@ -136,16 +136,18 @@ docker compose ps
 docker compose exec komari-traffic-bot \
   python /app/komari_traffic_report.py bootstrap
 ```
-🤖 Telegram 命令示例
-命令	说明
-```/today```	今日流量（00:00 → 当前）
-```/week```	本周流量
-```/month```	本月流量
-```/top```	今日 Top N
-```/top 6h```	最近 6 小时 Top
-```/top week```	本周 Top
-```/top month```	本月 Top
-🕒 关于时区
+## 🤖 Telegram 命令示例
+| 命令           | 说明               |
+| ------------ | ---------------- |
+| `/today`     | 今日流量（00:00 → 当前） |
+| `/week`      | 本周流量             |
+| `/month`     | 本月流量             |
+| `/top`       | 今日 Top N         |
+| `/top 6h`    | 最近 6 小时 Top      |
+| `/top week`  | 本周 Top           |
+| `/top month` | 本月 Top           |
+
+## 🕒 关于时区
 统计口径时区：STAT_TZ（默认 Asia/Shanghai）
 
 定时触发时区：容器 TZ（默认 Asia/Shanghai）
@@ -156,7 +158,7 @@ docker compose exec komari-traffic-bot \
 
 与宿主机系统时区无关
 
-📦 数据说明
+## 📦 数据说明
 所有数据均保存在 ./data 目录中：
 
 baseline（起点快照）
@@ -169,12 +171,12 @@ Telegram offset
 
 升级 / 重启容器不会丢数据。
 
-🔄 升级方式
+## 🔄 升级方式
 ```
 docker pull ghcr.io/wirelouis/komari-traffic-bot:latest
 docker compose up -d
 ```
-⚠️ 常见问题
+## ⚠️ 常见问题
 /top 6h 没数据？
 需要采样积累时间（默认每 5 分钟一次）
 
