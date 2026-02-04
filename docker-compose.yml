@@ -1,0 +1,23 @@
+services:
+  komari-traffic-bot:
+    image: ghcr.io/<你的github用户名或组织>/komari-traffic-bot:latest
+    env_file: .env
+    environment:
+      - TZ=Asia/Shanghai
+      - STAT_TZ=Asia/Shanghai
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    command: ["python", "/app/komari_traffic_report.py", "listen"]
+
+  komari-traffic-cron:
+    image: ghcr.io/<你的github用户名或组织>/komari-traffic-bot:latest
+    env_file: .env
+    environment:
+      - TZ=Asia/Shanghai
+      - STAT_TZ=Asia/Shanghai
+    volumes:
+      - ./data:/data
+      - ./crontab:/app/crontab:ro
+    restart: unless-stopped
+    command: ["supercronic", "/app/crontab"]
