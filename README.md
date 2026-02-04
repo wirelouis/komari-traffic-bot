@@ -126,7 +126,7 @@ version: "3.9"
 
 services:
   komari-traffic-bot:
-    image: ghcr.io/wirelouis/komari-traffic-bot:v1.1.0
+    image: ghcr.io/wirelouis/komari-traffic-bot:latest
     env_file: .env
     environment:
       - TZ=Asia/Shanghai
