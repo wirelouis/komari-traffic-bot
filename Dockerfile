@@ -9,5 +9,9 @@ COPY komari_traffic_report.py /app/komari_traffic_report.py
 RUN chmod +x /app/komari_traffic_report.py
 
 ENV DATA_DIR=/data
+RUN useradd -m -u 10001 appuser \
+    && mkdir -p /data \
+    && chown -R appuser:appuser /data
 VOLUME ["/data"]
+USER appuser
 CMD ["python", "/app/komari_traffic_report.py", "listen"]

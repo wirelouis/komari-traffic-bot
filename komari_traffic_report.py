@@ -11,6 +11,7 @@ import traceback
 import socket
 import gzip
 import concurrent.futures
+import signal
 from dataclasses import dataclass
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
@@ -52,6 +53,8 @@ TIMEOUT = int(os.environ.get("KOMARI_TIMEOUT_SECONDS", "15"))  # Komari API time
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 LOG_FILE = os.environ.get("LOG_FILE", "").strip()
 
+SHUTTING_DOWN = False
+
 
 def build_http_session() -> requests.Session:
     retry = Retry(
@@ -91,6 +94,61 @@ def build_komari_headers() -> dict:
         value = f"{prefix} {KOMARI_API_TOKEN}".strip()
         headers[KOMARI_API_TOKEN_HEADER] = value
     return headers
+
+
+def _require_positive_int(name: str, value: int):
+    if value <= 0:
+        raise RuntimeError(f"{name} must be > 0")
+
+
+def validate_config_or_raise():
+    required = {
+        "KOMARI_BASE_URL": KOMARI_BASE_URL,
+        "TELEGRAM_BOT_TOKEN": TELEGRAM_BOT_TOKEN,
+        "TELEGRAM_CHAT_ID": TELEGRAM_CHAT_ID,
+    }
+    missing = [k for k, v in required.items() if not str(v).strip()]
+    if missing:
+        raise RuntimeError("Missing required env: " + ", ".join(missing))
+
+    _require_positive_int("KOMARI_TIMEOUT_SECONDS", TIMEOUT)
+    _require_positive_int("KOMARI_FETCH_WORKERS", KOMARI_FETCH_WORKERS)
+    _require_positive_int("TOP_N", TOP_N)
+    _require_positive_int("SAMPLE_INTERVAL_SECONDS", SAMPLE_INTERVAL_SECONDS)
+    _require_positive_int("SAMPLE_RETENTION_HOURS", SAMPLE_RETENTION_HOURS)
+
+
+def run_healthcheck_or_raise():
+    ensure_dirs()
+
+    test_path = os.path.join(DATA_DIR, ".health_write_test")
+    try:
+        with open(test_path, "w", encoding="utf-8") as f:
+            f.write("ok")
+        os.remove(test_path)
+    except Exception as e:
+        raise RuntimeError(f"DATA_DIR not writable: {DATA_DIR}: {e}")
+
+    for p in [BASELINES_PATH, HISTORY_PATH, SAMPLES_PATH, TG_OFFSET_PATH]:
+        if os.path.exists(p):
+            try:
+                if p == TG_OFFSET_PATH:
+                    _ = load_offset()
+                else:
+                    load_json(p, {})
+            except Exception as e:
+                raise RuntimeError(f"Corrupted file: {p}: {e}")
+
+    try:
+        HTTP_SESSION.get(KOMARI_BASE_URL, timeout=TIMEOUT, headers=build_komari_headers())
+    except Exception as e:
+        raise RuntimeError(f"Komari unreachable: {e}")
+
+
+def _handle_sigterm(signum, _frame):
+    global SHUTTING_DOWN
+    SHUTTING_DOWN = True
+    logging.warning("received signal %s, shutting down gracefully...", signum)
 
 
 # -------------------- 基础工具 --------------------
@@ -847,6 +905,9 @@ def listen_commands():
         pass
 
     while True:
+        if SHUTTING_DOWN:
+            logging.warning("shutdown flag set, exiting listen loop")
+            return
         try:
             # 周期采样：哪怕没人发命令，也会积累 /top Nh 所需数据
             try:
@@ -940,7 +1001,7 @@ def listen_commands():
 
 def main():
     if len(sys.argv) < 2:
-        raise RuntimeError("Usage: report_daily | report_weekly | report_monthly | listen | bootstrap")
+        raise RuntimeError("Usage: report_daily | report_weekly | report_monthly | listen | bootstrap | health | config-validate")
 
     cmd = sys.argv[1].strip().lower()
 
@@ -959,12 +1020,23 @@ def main():
     if cmd == "bootstrap":
         bootstrap_period_baselines()
         return 0
+    if cmd == "config-validate":
+        validate_config_or_raise()
+        print("OK")
+        return 0
+    if cmd == "health":
+        validate_config_or_raise()
+        run_healthcheck_or_raise()
+        print("OK")
+        return 0
 
     raise RuntimeError("Unknown command")
 
 
 if __name__ == "__main__":
     setup_logging()
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+    signal.signal(signal.SIGINT, _handle_sigterm)
     full_cmd = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else "(none)"
     try:
         sys.exit(main())

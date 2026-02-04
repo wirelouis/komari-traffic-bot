@@ -63,6 +63,10 @@ mkdir -p data
 ```
 ### 2️⃣ Create .env
 ```
+cp env.example .env
+# Then edit .env as needed.
+
+# Or create .env manually:
 cat > .env <<'ENV'
 # Komari panel base URL (no trailing slash)
 KOMARI_BASE_URL=https://your-komari.example
@@ -123,7 +127,7 @@ version: "3.9"
 
 services:
   komari-traffic-bot:
-    image: ghcr.io/wirelouis/komari-traffic-bot:latest
+    image: ghcr.io/wirelouis/komari-traffic-bot:v1.1.0
     env_file: .env
     environment:
       - TZ=Asia/Shanghai
@@ -131,10 +135,15 @@ services:
     volumes:
       - ./data:/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "/app/komari_traffic_report.py", "health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     command: ["python", "/app/komari_traffic_report.py", "listen"]
 
   komari-traffic-cron:
-    image: ghcr.io/wirelouis/komari-traffic-bot:latest
+    image: ghcr.io/wirelouis/komari-traffic-bot:v1.1.0
     env_file: .env
     environment:
       - TZ=Asia/Shanghai
