@@ -131,13 +131,13 @@ def run_healthcheck_or_raise():
     except Exception as e:
         raise RuntimeError(f"DATA_DIR not writable: {DATA_DIR}: {e}")
 
-    for p in [BASELINES_PATH, HISTORY_PATH, SAMPLES_PATH, TG_OFFSET_PATH]:
+    for p in [BASELINES_PATH, HISTORY_PATH, SAMPLES_PATH, TG_OFFSET_PATH, TG_CONFIRM_PATH]:
         if os.path.exists(p):
             try:
                 if p == TG_OFFSET_PATH:
                     _ = load_offset()
                 else:
-                    load_json(p, {})
+                    load_json_strict(p)
             except Exception as e:
                 raise RuntimeError(f"Corrupted file: {p}: {e}")
 
@@ -205,6 +205,15 @@ def load_json(path: str, default):
         return default
     except Exception:
         return default
+
+
+def load_json_strict(path: str):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def parse_date_yyyy_mm_dd(value: str) -> date:
+    return datetime.strptime(value, "%Y-%m-%d").date()
 
 
 def save_json_atomic(path: str, data):
@@ -636,7 +645,7 @@ def _iter_day_baselines_sorted(base: dict):
     return entries
 
 
-def rebuild_period_baselines(since_day: date | None = None) -> tuple[int, int, int]:
+def rebuild_period_baselines(since_day: date | None = None, dry_run: bool = False) -> tuple[int, int, int]:
     """
     从日基线重建 WEEK-/MONTH- 基线。
     returns: (daily_count, week_rebuilt, month_rebuilt)
@@ -659,15 +668,18 @@ def rebuild_period_baselines(since_day: date | None = None) -> tuple[int, int, i
 
         if d == start_of_week(d):
             week_tag = f"WEEK-{d.strftime('%Y-%m-%d')}"
-            base["baselines"][week_tag] = {"nodes": nodes, "ts": ts}
+            if not dry_run:
+                base["baselines"][week_tag] = {"nodes": nodes, "ts": ts}
             week_count += 1
 
         if d == start_of_month(d):
             month_tag = f"MONTH-{d.strftime('%Y-%m-%d')}"
-            base["baselines"][month_tag] = {"nodes": nodes, "ts": ts}
+            if not dry_run:
+                base["baselines"][month_tag] = {"nodes": nodes, "ts": ts}
             month_count += 1
 
-    save_json_atomic(BASELINES_PATH, base)
+    if not dry_run:
+        save_json_atomic(BASELINES_PATH, base)
     return daily_count, week_count, month_count
 
 
@@ -927,8 +939,18 @@ def consume_confirm_action(chat_id: str, action: str, code: str) -> bool:
     return False
 
 
+def parse_chat_ids_env(name: str, default_value: str) -> list[str]:
+    raw = os.environ.get(name, default_value)
+    return [x.strip() for x in raw.split(",") if x.strip()]
+
+
+def is_allowed_chat(chat_id: str) -> bool:
+    allowed = parse_chat_ids_env("TELEGRAM_ALLOWED_CHAT_IDS", str(TELEGRAM_CHAT_ID))
+    return str(chat_id) in allowed
+
+
 def is_admin(chat_id: str) -> bool:
-    admins = [x.strip() for x in os.environ.get("TELEGRAM_ADMIN_CHAT_IDS", str(TELEGRAM_CHAT_ID)).split(",") if x.strip()]
+    admins = parse_chat_ids_env("TELEGRAM_ADMIN_CHAT_IDS", str(TELEGRAM_CHAT_ID))
     return str(chat_id) in admins
 
 
@@ -1053,31 +1075,35 @@ def listen_commands():
 
                 chat = msg.get("chat", {})
                 chat_id = str(chat.get("id", ""))
-                if chat_id != str(TELEGRAM_CHAT_ID):
+                if not is_allowed_chat(chat_id):
                     continue
 
                 text = (msg.get("text") or "").strip()
                 if not text.startswith("/"):
                     continue
 
+                parts = text.split()
+                cmd = parts[0].lower()
+                arg_text = parts[1] if len(parts) > 1 else ""
+
                 now = now_dt()
                 td = today_date()
 
-                if text.startswith("/today"):
+                if cmd == "/today":
                     tag = td.strftime("%Y-%m-%d")
                     run_period_report(start_of_day(td), now, tag, top_only=False)
 
-                elif text.startswith("/week"):
+                elif cmd == "/week":
                     ws = start_of_week(td)
                     tag = f"WEEK-{ws.strftime('%Y-%m-%d')}"
                     run_period_report(start_of_day(ws), now, tag, top_only=False)
 
-                elif text.startswith("/month"):
+                elif cmd == "/month":
                     ms = start_of_month(td)
                     tag = f"MONTH-{ms.strftime('%Y-%m-%d')}"
                     run_period_report(start_of_day(ms), now, tag, top_only=False)
 
-                elif text.startswith("/top"):
+                elif cmd == "/top":
                     scope, hours = parse_top_scope(text)
                     if scope == "today":
                         tag = td.strftime("%Y-%m-%d")
@@ -1095,7 +1121,7 @@ def listen_commands():
                     else:
                         telegram_send("用法：/top  或  /top today|week|month  或  /top 6h")
 
-                elif text.startswith("/archive"):
+                elif cmd == "/archive":
                     if not is_admin(chat_id):
                         telegram_send("⛔ 无权限")
                         continue
@@ -1106,7 +1132,7 @@ def listen_commands():
                         f"如需继续，请发送：/confirm_archive {code}"
                     )
 
-                elif text.startswith("/bootstrap"):
+                elif cmd == "/bootstrap":
                     if not is_admin(chat_id):
                         telegram_send("⛔ 无权限")
                         continue
@@ -1126,7 +1152,7 @@ def listen_commands():
                         f"如需继续，请发送：/confirm_bootstrap {code}"
                     )
 
-                elif text.startswith("/rebuild_baselines"):
+                elif cmd == "/rebuild_baselines":
                     if not is_admin(chat_id):
                         telegram_send("⛔ 无权限")
                         continue
@@ -1137,35 +1163,40 @@ def listen_commands():
                         f"如需继续，请发送：/confirm_rebuild_baselines {code}"
                     )
 
-                elif text.startswith("/confirm_archive"):
+                elif cmd == "/confirm_archive":
                     if not is_admin(chat_id):
                         telegram_send("⛔ 无权限")
                         continue
-                    parts = text.split(maxsplit=1)
-                    code = parts[1].strip() if len(parts) > 1 else ""
+                    code = arg_text.strip()
                     if not consume_confirm_action(chat_id, "archive", code):
                         telegram_send("❌ 确认码无效或已过期")
                         continue
                     archive_and_prune_history()
                     telegram_send("✅ 已执行历史归档压缩")
 
-                elif text.startswith("/confirm_bootstrap"):
+                elif cmd == "/confirm_bootstrap":
                     if not is_admin(chat_id):
                         telegram_send("⛔ 无权限")
                         continue
-                    parts = text.split(maxsplit=1)
-                    code = parts[1].strip() if len(parts) > 1 else ""
+                    code = arg_text.strip()
                     if not consume_confirm_action(chat_id, "bootstrap", code):
                         telegram_send("❌ 确认码无效或已过期")
                         continue
+                    risk, reason = history_has_existing_data_risk()
+                    if risk:
+                        telegram_send(
+                            "⛔ 确认阶段检测到已有历史数据，拒绝执行 bootstrap。\n"
+                            f"原因：{reason}\n"
+                            "请使用 /rebuild_baselines。"
+                        )
+                        continue
                     bootstrap_period_baselines()
 
-                elif text.startswith("/confirm_rebuild_baselines"):
+                elif cmd == "/confirm_rebuild_baselines":
                     if not is_admin(chat_id):
                         telegram_send("⛔ 无权限")
                         continue
-                    parts = text.split(maxsplit=1)
-                    code = parts[1].strip() if len(parts) > 1 else ""
+                    code = arg_text.strip()
                     if not consume_confirm_action(chat_id, "rebuild_baselines", code):
                         telegram_send("❌ 确认码无效或已过期")
                         continue
@@ -1175,7 +1206,7 @@ def listen_commands():
                         f"扫描日基线：{daily_count}，重建 WEEK：{week_count}，重建 MONTH：{month_count}"
                     )
 
-                elif text.startswith("/help") or text.startswith("/start"):
+                elif cmd in ("/help", "/start"):
                     telegram_send(
                         "可用命令：\n"
                         "/today  /week  /month\n"
@@ -1195,12 +1226,11 @@ def listen_commands():
             logging.exception("listen loop error")
             time.sleep(3)
 
-
 # -------------------- main --------------------
 
 def main():
     if len(sys.argv) < 2:
-        raise RuntimeError("Usage: report_daily | report_weekly | report_monthly | listen | bootstrap [--force] | rebuild-baselines | health | config-validate")
+        raise RuntimeError("Usage: report_daily | report_weekly | report_monthly | listen | bootstrap [--force] | rebuild-baselines [--dry-run] [--since YYYY-MM-DD] | health | config-validate")
 
     cmd = sys.argv[1].strip().lower()
 
@@ -1228,9 +1258,31 @@ def main():
         bootstrap_period_baselines()
         return 0
     if cmd == "rebuild-baselines":
-        daily_count, week_count, month_count = rebuild_period_baselines()
+        dry_run = False
+        since_day = None
+        i = 2
+        while i < len(sys.argv):
+            arg = sys.argv[i].strip().lower()
+            if arg == "--dry-run":
+                dry_run = True
+                i += 1
+                continue
+            if arg == "--since":
+                if i + 1 >= len(sys.argv):
+                    raise RuntimeError("--since requires YYYY-MM-DD")
+                try:
+                    since_day = parse_date_yyyy_mm_dd(sys.argv[i + 1].strip())
+                except Exception as e:
+                    raise RuntimeError(f"invalid --since date: {sys.argv[i + 1]} ({e})")
+                i += 2
+                continue
+            raise RuntimeError(f"Unknown rebuild-baselines arg: {sys.argv[i]}")
+
+        daily_count, week_count, month_count = rebuild_period_baselines(since_day=since_day, dry_run=dry_run)
+        mode = "DRY-RUN" if dry_run else "APPLY"
+        since_text = since_day.strftime("%Y-%m-%d") if since_day else "2026-02-01"
         print(
-            "OK rebuilt baselines from daily snapshots (>= 2026-02-01): "
+            f"OK {mode} rebuilt baselines from daily snapshots (>= {since_text}): "
             f"days={daily_count}, week={week_count}, month={month_count}"
         )
         return 0
