@@ -152,7 +152,7 @@ CRON
 version: "3.9"
 
 services:
-  komari-traffic-bot:
+  bot:
     image: ghcr.io/wirelouis/komari-traffic-bot:latest
     env_file: .env
     environment:
@@ -168,7 +168,7 @@ services:
       retries: 3
     command: ["python", "/app/komari_traffic_report.py", "listen"]
 
-  komari-traffic-cron:
+  cron:
     image: ghcr.io/wirelouis/komari-traffic-bot:latest
     env_file: .env
     environment:
@@ -186,7 +186,7 @@ docker compose up -d
 ```
 ### 5️⃣ Initialize baseline (run once)
 ```
-docker compose exec komari-traffic-bot \
+docker compose exec bot \
   python /app/komari_traffic_report.py bootstrap
 ```
 ## 🤖 Telegram Command Examples
