@@ -242,6 +242,7 @@ docker compose up -d
 
 - today per-node deltas (with human-readable units)
 - last 24h top nodes (with human-readable units)
+- last 24h hourly buckets (including peak/valley hour)
 - last 7 days daily totals + per-node aggregate ranking (with human-readable units)
 
 If data is insufficient, AI should explicitly say it cannot determine from current data.
@@ -253,3 +254,6 @@ By default the bot sends a startup message containing: instance label, stats tim
 
 - Use `BOT_INSTANCE_NAME` to set a meaningful instance label (e.g. `hk-vps-prod`).
 - Use `BOT_START_NOTIFY=0` to disable startup notifications.
+
+
+> Note: data is continuously sampled/generated into local files (e.g. samples/history), but it is **not continuously pushed to AI in background**. AI is called only when `/ask` or `/ai` is triggered.

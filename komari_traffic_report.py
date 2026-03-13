@@ -319,7 +319,8 @@ def ask_ai_with_data(question: str, data_pack: dict) -> str:
         "3. 回答使用简洁中文，优先使用 *_human 字段展示人类可读流量单位（如 GiB/TiB），避免输出超长原始整数。\n"
         "4. 涉及“最近 7 天哪个节点流量最高”时，优先使用 last_7_days.node_totals 与 last_7_days.top_nodes。\n"
         "5. 输出为工整纯文本，优先用“结论 / 依据 / 趋势”分段；不要使用 Markdown 标记（如 #、*、**、```）。\n"
-        "6. 不需要原样打印整个 JSON，只引用对结论有用的关键信息。"
+        "6. 若用户问小时级峰谷，优先使用 last_24h_hourly.hours / peak_hour / valley_hour。\n"
+        "7. 不需要原样打印整个 JSON，只引用对结论有用的关键信息。"
     )
     messages = [
         {"role": "system", "content": system_prompt},
@@ -679,6 +680,79 @@ def get_top_last_hours_struct(hours: int, n: int) -> dict | None:
         "reset_warnings": reset_warnings,
     }
 
+
+
+def build_last_24h_hourly_summary() -> dict:
+    """
+    基于 samples.json 构造最近 24 小时按小时分桶的总流量分布，
+    用于回答“小时级峰谷”问题。
+    """
+    ensure_dirs()
+    take_sample_if_due(force=True)
+
+    data = load_samples()
+    samples = sorted(data.get("samples", []), key=lambda x: int(x.get("ts", 0)))
+    if len(samples) < 2:
+        return {
+            "error": "insufficient_samples",
+            "message": "采样点不足，无法计算最近 24 小时小时级分布。",
+        }
+
+    now_ts = int(time.time())
+    from_ts = now_ts - 24 * 3600
+
+    # 从最近一个 <= from_ts 的样本开始累计差分
+    prev = None
+    for s0 in samples:
+        ts0 = int(s0.get("ts", 0))
+        if ts0 <= from_ts:
+            prev = s0
+        else:
+            break
+    if prev is None:
+        prev = samples[0]
+
+    bucket_map: dict[str, dict] = {}
+
+    for cur in samples:
+        cur_ts = int(cur.get("ts", 0))
+        if cur_ts <= int(prev.get("ts", 0)):
+            continue
+        if cur_ts < from_ts:
+            prev = cur
+            continue
+
+        deltas, _resets = compute_delta_from_maps(cur.get("nodes", {}), prev.get("nodes", {}))
+        up = sum(int(v.get("up", 0)) for v in deltas.values())
+        down = sum(int(v.get("down", 0)) for v in deltas.values())
+        total = up + down
+
+        hour_label = datetime.fromtimestamp(cur_ts, TZ).strftime("%Y-%m-%d %H:00")
+        if hour_label not in bucket_map:
+            bucket_map[hour_label] = {"hour": hour_label, "up": 0, "down": 0, "total": 0}
+        bucket_map[hour_label]["up"] += up
+        bucket_map[hour_label]["down"] += down
+        bucket_map[hour_label]["total"] += total
+
+        prev = cur
+
+    hours = list(bucket_map.values())
+    hours.sort(key=lambda x: x["hour"])
+    for h in hours:
+        h["up_human"] = human_bytes(h["up"])
+        h["down_human"] = human_bytes(h["down"])
+        h["total_human"] = human_bytes(h["total"])
+
+    peak_hour = max(hours, key=lambda x: x["total"]) if hours else None
+    valley_hour = min(hours, key=lambda x: x["total"]) if hours else None
+
+    return {
+        "from": datetime.fromtimestamp(from_ts, TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "to": datetime.fromtimestamp(now_ts, TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "hours": hours,
+        "peak_hour": peak_hour,
+        "valley_hour": valley_hour,
+    }
 def build_last_7_days_summary() -> dict:
     """
     使用 history.json + 月归档，构造最近 7 天总量按日汇总，
@@ -774,6 +848,12 @@ def build_ai_data_pack() -> dict:
     except Exception:
         logging.exception("get_top_last_hours_struct error")
         pack["last_24h_top"] = {"error": "failed"}
+
+    try:
+        pack["last_24h_hourly"] = build_last_24h_hourly_summary()
+    except Exception:
+        logging.exception("build_last_24h_hourly_summary error")
+        pack["last_24h_hourly"] = {"error": "failed"}
 
     try:
         pack["last_7_days"] = build_last_7_days_summary()
