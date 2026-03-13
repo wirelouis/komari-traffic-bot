@@ -59,6 +59,9 @@ TIMEOUT = int(os.environ.get("KOMARI_TIMEOUT_SECONDS", "15"))  # Komari API time
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 LOG_FILE = os.environ.get("LOG_FILE", "").strip()
 
+BOT_INSTANCE_NAME = os.environ.get("BOT_INSTANCE_NAME", "").strip()
+BOT_START_NOTIFY = os.environ.get("BOT_START_NOTIFY", "1").strip().lower() not in ("0", "false", "no", "off")
+
 SHUTTING_DOWN = False
 
 
@@ -1343,8 +1346,15 @@ def listen_commands():
         raise RuntimeError("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 未设置")
 
     logging.info("Komari traffic bot starting (stat_tz=%s)", STAT_TZ)
-    if should_alert("bot_start", 60):
-        safe_telegram_send(f"✅ Komari traffic bot 启动于 {socket.gethostname()} ({STAT_TZ})")
+    if BOT_START_NOTIFY and should_alert("bot_start", 60):
+        instance_label = BOT_INSTANCE_NAME or "default"
+        allowed_chats = parse_chat_ids_env("TELEGRAM_ALLOWED_CHAT_IDS", str(TELEGRAM_CHAT_ID))
+        safe_telegram_send(
+            "✅ Komari traffic bot 已启动\n"
+            f"🧩 实例：{instance_label}\n"
+            f"🕒 统计时区：{STAT_TZ}\n"
+            f"💬 可接收命令 chat 数：{len(allowed_chats)}"
+        )
     offset = load_offset()
 
     # 启动先采一次样

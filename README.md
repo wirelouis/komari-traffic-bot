@@ -97,6 +97,13 @@ AI_API_BASE=
 AI_API_KEY=
 AI_MODEL=
 
+# 启动通知（可选）
+# 设为 0 可关闭启动消息
+BOT_START_NOTIFY=1
+
+# 启动通知显示的实例名（可选，建议填机器名/环境名）
+BOT_INSTANCE_NAME=
+
 # 容器内数据目录（固定）
 DATA_DIR=/data
 
@@ -246,3 +253,11 @@ Telegram 偶发断连？
 - 最近 7 天按日总量 + 按节点累计排行（含可读单位）
 
 若数据不足，AI 会明确说明无法判断。
+
+
+## ℹ️ 启动提示说明
+
+默认会发送一条启动提示，内容为“实例名 + 统计时区 + 可接收命令 chat 数”。
+
+- 通过 `BOT_INSTANCE_NAME` 自定义实例标识（如 `hk-vps-prod`）。
+- 通过 `BOT_START_NOTIFY=0` 关闭启动提示。

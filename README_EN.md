@@ -102,6 +102,13 @@ AI_API_BASE=
 AI_API_KEY=
 AI_MODEL=
 
+# Startup notification (optional)
+# Set to 0 to disable startup message
+BOT_START_NOTIFY=1
+
+# Instance label shown in startup message (optional)
+BOT_INSTANCE_NAME=
+
 # Container data directory (do not change)
 DATA_DIR=/data
 
@@ -238,3 +245,11 @@ docker compose up -d
 - last 7 days daily totals + per-node aggregate ranking (with human-readable units)
 
 If data is insufficient, AI should explicitly say it cannot determine from current data.
+
+
+## ℹ️ Startup notification
+
+By default the bot sends a startup message containing: instance label, stats timezone, and number of allowed command chats.
+
+- Use `BOT_INSTANCE_NAME` to set a meaningful instance label (e.g. `hk-vps-prod`).
+- Use `BOT_START_NOTIFY=0` to disable startup notifications.
