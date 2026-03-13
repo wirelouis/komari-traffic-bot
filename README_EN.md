@@ -32,7 +32,8 @@ A **Dockerized traffic statistics extension** for **Komari Probe**, providing:
   - `/top week`, `/top month`
 - **Telegram Commands**
   - `/today`, `/week`, `/month`
-  - `/top [Nh|week|month]`
+  - `/top [Nh|today|week|month]`
+  - `/ask your question (or /ai)`
 - **Stability & Reliability**
   - Slow or failed Komari nodes are skipped automatically
   - Telegram network errors are retried
@@ -89,6 +90,24 @@ KOMARI_FETCH_WORKERS=6
 # Telegram
 TELEGRAM_BOT_TOKEN=123456:YOUR_BOT_TOKEN
 TELEGRAM_CHAT_ID=123456789
+
+# Allowed command chats (optional, comma-separated)
+TELEGRAM_ALLOWED_CHAT_IDS=
+
+# Admin chats (optional, comma-separated)
+TELEGRAM_ADMIN_CHAT_IDS=
+
+# AI (optional, enables /ask and /ai)
+AI_API_BASE=
+AI_API_KEY=
+AI_MODEL=
+
+# Startup notification (optional)
+# Set to 0 to disable startup message
+BOT_START_NOTIFY=1
+
+# Instance label shown in startup message (optional)
+BOT_INSTANCE_NAME=
 
 # Container data directory (do not change)
 DATA_DIR=/data
@@ -177,6 +196,9 @@ docker compose exec komari-traffic-bot \
 | `/top 6h`    | Top in last 6 hours         |
 | `/top week`  | Weekly Top                  |
 | `/top month` | Monthly Top                 |
+| `/ask question` | AI answer based on data pack |
+| `/ai question`  | Alias of `/ask` |
+| `/help`         | Show command help |
 ## 🕒 Timezone
 
 Statistics timezone: STAT_TZ (default Asia/Shanghai)
@@ -204,3 +226,34 @@ Upgrades and restarts will not lose data.
 docker pull ghcr.io/wirelouis/komari-traffic-bot:latest
 docker compose up -d
 ```
+
+
+## 🔐 Admin commands (admin chats only)
+
+- `/archive` -> sends a confirmation code, then execute with `/confirm_archive <code>`
+- `/bootstrap` -> blocked when historical-risk is detected; execute via `/confirm_bootstrap <code>`
+- `/rebuild_baselines` -> sends confirmation code, then execute via `/confirm_rebuild_baselines <code>`
+
+> By default only `TELEGRAM_CHAT_ID` is admin. Set `TELEGRAM_ADMIN_CHAT_IDS` to override.
+
+## 🤖 /ask data scope
+
+`/ask` and `/ai` can only use computed `data_pack` fields, including:
+
+- today per-node deltas (with human-readable units)
+- last 24h top nodes (with human-readable units)
+- last 24h hourly buckets (including peak/valley hour)
+- last 7 days daily totals + per-node aggregate ranking (with human-readable units)
+
+If data is insufficient, AI should explicitly say it cannot determine from current data.
+
+
+## ℹ️ Startup notification
+
+By default the bot sends a startup message containing: instance label, stats timezone, and number of allowed command chats.
+
+- Use `BOT_INSTANCE_NAME` to set a meaningful instance label (e.g. `hk-vps-prod`).
+- Use `BOT_START_NOTIFY=0` to disable startup notifications.
+
+
+> Note: data is continuously sampled/generated into local files (e.g. samples/history), but it is **not continuously pushed to AI in background**. AI is called only when `/ask` or `/ai` is triggered.
