@@ -317,8 +317,9 @@ def ask_ai_with_data(question: str, data_pack: dict) -> str:
         "1. 所有具体数值（例如流量大小、排名）必须直接来自 data_pack，不要自己发明新数字。\n"
         "2. 如果 data_pack 中没有足够信息回答某个问题，请明确说明“无法从当前数据中判断”，不要瞎猜。\n"
         "3. 回答使用简洁中文，优先使用 *_human 字段展示人类可读流量单位（如 GiB/TiB），避免输出超长原始整数。\n"
-        "4. 涉及“最近 7 天哪个节点流量最高”时，优先使用 last_7_days.node_totals 与 top_nodes。\n"
-        "5. 不需要原样打印整个 JSON，只引用对结论有用的关键信息。"
+        "4. 涉及“最近 7 天哪个节点流量最高”时，优先使用 last_7_days.node_totals 与 last_7_days.top_nodes。\n"
+        "5. 输出为工整纯文本，优先用“结论 / 依据 / 趋势”分段；不要使用 Markdown 标记（如 #、*、**、```）。\n"
+        "6. 不需要原样打印整个 JSON，只引用对结论有用的关键信息。"
     )
     messages = [
         {"role": "system", "content": system_prompt},
@@ -333,6 +334,29 @@ def ask_ai_with_data(question: str, data_pack: dict) -> str:
         },
     ]
     return ai_chat(messages)
+
+
+def normalize_ai_answer_for_telegram(text: str) -> str:
+    """
+    将常见 Markdown 回答转换成更适合 Telegram(HTML parse_mode) 的纯文本样式。
+    避免出现大量 * / # 等原样符号影响可读性。
+    """
+    out = (text or "").replace("\r\n", "\n").strip()
+    if not out:
+        return "⚠️ AI 返回为空，请稍后重试。"
+
+    # 标题：### xxx -> 【xxx】
+    out = re.sub(r"(?m)^\s*#{1,6}\s*(.+?)\s*$", lambda m: f"【{m.group(1).strip()}】", out)
+    # 无序列表：* / - -> •
+    out = re.sub(r"(?m)^\s*[-*]\s+", "• ", out)
+    # 去掉常见 Markdown 标记
+    out = re.sub(r"\*\*(.*?)\*\*", r"\1", out)
+    out = re.sub(r"__(.*?)__", r"\1", out)
+    out = out.replace("`", "")
+
+    # 压缩过多空行
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
 
 def should_alert(throttle_key: str, min_interval_seconds: int = 300) -> bool:
     ensure_dirs()
@@ -1535,7 +1559,7 @@ def listen_commands():
 
                     data_pack = build_ai_data_pack()
                     answer = ask_ai_with_data(question, data_pack)
-                    telegram_send(answer)
+                    telegram_send(normalize_ai_answer_for_telegram(answer))
 
                 elif cmd in ("/help", "/start"):
                     telegram_send(
