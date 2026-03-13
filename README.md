@@ -31,7 +31,8 @@
   - `/top week`、`/top month`
 - **交互命令**
   - `/today` `/week` `/month`
-  - `/top [Nh|week|month]`
+  - `/top [Nh|today|week|month]`
+  - `/ask 你的问题（或 /ai）`
 - **稳定性**
   - Komari 节点超时自动跳过，不影响整体报表
   - Telegram 网络异常自动重试
@@ -84,6 +85,17 @@ KOMARI_FETCH_WORKERS=6
 # Telegram
 TELEGRAM_BOT_TOKEN=123456:YOUR_BOT_TOKEN
 TELEGRAM_CHAT_ID=123456789
+
+# 允许接收命令的 chat（可选，逗号分隔）
+TELEGRAM_ALLOWED_CHAT_IDS=
+
+# 管理员 chat（可选，逗号分隔）
+TELEGRAM_ADMIN_CHAT_IDS=
+
+# AI（可选，启用 /ask 与 /ai）
+AI_API_BASE=
+AI_API_KEY=
+AI_MODEL=
 
 # 容器内数据目录（固定）
 DATA_DIR=/data
@@ -173,6 +185,9 @@ docker compose exec komari-traffic-bot \
 | `/top 6h`    | 最近 6 小时 Top      |
 | `/top week`  | 本周 Top           |
 | `/top month` | 本月 Top           |
+| `/ask 问题`   | AI 基于数据包分析回答 |
+| `/ai 问题`    | `/ask` 别名         |
+| `/help`       | 查看命令帮助         |
 
 ## 🕒 关于时区
 统计口径时区：STAT_TZ（默认 Asia/Shanghai）
@@ -212,3 +227,22 @@ Komari 某节点超时？
 
 Telegram 偶发断连？
 已内置自动重试
+
+
+## 🔐 管理员命令（需管理员 chat）
+
+- `/archive` → 先发确认码，再通过 `/confirm_archive <code>` 执行
+- `/bootstrap` → 有历史数据风险时会拒绝；可通过 `/confirm_bootstrap <code>` 执行
+- `/rebuild_baselines` → 先发确认码，再通过 `/confirm_rebuild_baselines <code>` 执行
+
+> 默认管理员为 `TELEGRAM_CHAT_ID`。配置 `TELEGRAM_ADMIN_CHAT_IDS` 后按该列表生效。
+
+## 🤖 /ask 数据范围说明
+
+`/ask` 与 `/ai` 只基于程序计算出的 `data_pack` 回答，主要包含：
+
+- 今日按节点增量（含可读单位）
+- 最近 24 小时 Top（含可读单位）
+- 最近 7 天按日总量 + 按节点累计排行（含可读单位）
+
+若数据不足，AI 会明确说明无法判断。
