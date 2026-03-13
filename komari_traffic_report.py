@@ -269,10 +269,7 @@ def ai_chat(messages: list[dict]) -> str:
     通用 OpenAI 兼容 chat.completions 调用。
     """
     if not ai_enabled():
-        return (
-            "⚠️ AI 未启用：请先配置 AI_API_BASE / AI_API_KEY / AI_MODEL 环境变量。\n"
-            "例如：AI_API_BASE=http://23.82.99.230:8317/v1"
-        )
+        return "⚠️ AI 未启用：请先配置 AI_API_BASE / AI_API_KEY / AI_MODEL 环境变量。"
 
     url = f"{AI_API_BASE}/chat/completions"
     headers = {
@@ -299,7 +296,6 @@ def ai_chat(messages: list[dict]) -> str:
         logging.exception("ai_chat error")
         return f"⚠️ 调用 AI 失败：{type(e).__name__}: {e}"
 
-
 def ask_ai_with_data(question: str, data_pack: dict) -> str:
     """
     给 AI：用户问题 + 经过 Python 计算好的数据包。
@@ -317,10 +313,10 @@ def ask_ai_with_data(question: str, data_pack: dict) -> str:
         "规则：\n"
         "1. 所有具体数值（例如流量大小、排名）必须直接来自 data_pack，不要自己发明新数字。\n"
         "2. 如果 data_pack 中没有足够信息回答某个问题，请明确说明“无法从当前数据中判断”，不要瞎猜。\n"
-        "3. 回答使用简洁的中文，可以有结论 + 若干要点。\n"
-        "4. 不需要原样打印整个 JSON，只引用对结论有用的关键信息。"
+        "3. 回答使用简洁中文，优先使用 *_human 字段展示人类可读流量单位（如 GiB/TiB），避免输出超长原始整数。\n"
+        "4. 涉及“最近 7 天哪个节点流量最高”时，优先使用 last_7_days.node_totals 与 top_nodes。\n"
+        "5. 不需要原样打印整个 JSON，只引用对结论有用的关键信息。"
     )
-
     messages = [
         {"role": "system", "content": system_prompt},
         {
@@ -334,7 +330,6 @@ def ask_ai_with_data(question: str, data_pack: dict) -> str:
         },
     ]
     return ai_chat(messages)
-
 
 def should_alert(throttle_key: str, min_interval_seconds: int = 300) -> bool:
     ensure_dirs()
@@ -553,10 +548,21 @@ def build_today_delta_struct() -> dict | None:
 
     if baseline_nodes is None:
         for n in current:
-            total = int(n.up) + int(n.down)
+            up = int(n.up)
+            down = int(n.down)
+            total = up + down
             result["nodes"].append(
-                {"name": n.name, "up": int(n.up), "down": int(n.down), "total": total}
+                {
+                    "name": n.name,
+                    "up": up,
+                    "down": down,
+                    "total": total,
+                    "up_human": human_bytes(up),
+                    "down_human": human_bytes(down),
+                    "total_human": human_bytes(total),
+                }
             )
+        result["nodes"].sort(key=lambda x: (x["total"], x["down"], x["up"], x["name"].lower()), reverse=True)
         result["note"] = "baseline_missing"
         return result
 
@@ -568,11 +574,19 @@ def build_today_delta_struct() -> dict | None:
         down = int(v.get("down", 0))
         total = up + down
         result["nodes"].append(
-            {"name": v.get("name", ""), "up": up, "down": down, "total": total}
+            {
+                "name": v.get("name", ""),
+                "up": up,
+                "down": down,
+                "total": total,
+                "up_human": human_bytes(up),
+                "down_human": human_bytes(down),
+                "total_human": human_bytes(total),
+            }
         )
+    result["nodes"].sort(key=lambda x: (x["total"], x["down"], x["up"], x["name"].lower()), reverse=True)
     result["note"] = "baseline_ok"
     return result
-
 
 def get_top_last_hours_struct(hours: int, n: int) -> dict | None:
     """
@@ -616,7 +630,15 @@ def get_top_last_hours_struct(hours: int, n: int) -> dict | None:
         down = int(v.get("down", 0))
         total = up + down
         nodes.append(
-            {"name": v.get("name", ""), "up": up, "down": down, "total": total}
+            {
+                "name": v.get("name", ""),
+                "up": up,
+                "down": down,
+                "total": total,
+                "up_human": human_bytes(up),
+                "down_human": human_bytes(down),
+                "total_human": human_bytes(total),
+            }
         )
     nodes.sort(key=lambda x: (x["total"], x["down"], x["up"], x["name"].lower()), reverse=True)
     nodes = nodes[: max(0, int(n))]
@@ -630,19 +652,47 @@ def get_top_last_hours_struct(hours: int, n: int) -> dict | None:
         "reset_warnings": reset_warnings,
     }
 
-
 def build_last_7_days_summary() -> dict:
     """
-    使用 history.json + 月归档，构造最近 7 天总量按日汇总。
+    使用 history.json + 月归档，构造最近 7 天总量按日汇总，
+    并提供按节点累计排行，便于回答“7天哪台机器流量最高”。
     """
     ensure_dirs()
     td = today_date()
     days = []
+    node_totals: dict[str, dict] = {}
+
     for i in range(7, 0, -1):
         d = td - timedelta(days=i)
         summed = history_sum(d, d)
-        total_up = sum(int(v.get("up", 0)) for v in summed.values())
-        total_down = sum(int(v.get("down", 0)) for v in summed.values())
+        total_up = 0
+        total_down = 0
+        day_nodes = []
+
+        for uuid, v in summed.items():
+            name = v.get("name", uuid)
+            up = int(v.get("up", 0))
+            down = int(v.get("down", 0))
+            total = up + down
+            total_up += up
+            total_down += down
+            day_nodes.append({
+                "name": name,
+                "up": up,
+                "down": down,
+                "total": total,
+                "up_human": human_bytes(up),
+                "down_human": human_bytes(down),
+                "total_human": human_bytes(total),
+            })
+
+            if name not in node_totals:
+                node_totals[name] = {"name": name, "up": 0, "down": 0, "total": 0}
+            node_totals[name]["up"] += up
+            node_totals[name]["down"] += down
+            node_totals[name]["total"] += total
+
+        day_nodes.sort(key=lambda x: (x["total"], x["down"], x["up"], x["name"].lower()), reverse=True)
         total = total_up + total_down
         days.append(
             {
@@ -650,11 +700,31 @@ def build_last_7_days_summary() -> dict:
                 "total_up": total_up,
                 "total_down": total_down,
                 "total": total,
+                "total_up_human": human_bytes(total_up),
+                "total_down_human": human_bytes(total_down),
+                "total_human": human_bytes(total),
+                "nodes": day_nodes,
             }
         )
 
-    return {"days": days}
+    node_totals_list = []
+    for v in node_totals.values():
+        node_totals_list.append({
+            "name": v["name"],
+            "up": v["up"],
+            "down": v["down"],
+            "total": v["total"],
+            "up_human": human_bytes(v["up"]),
+            "down_human": human_bytes(v["down"]),
+            "total_human": human_bytes(v["total"]),
+        })
+    node_totals_list.sort(key=lambda x: (x["total"], x["down"], x["up"], x["name"].lower()), reverse=True)
 
+    return {
+        "days": days,
+        "node_totals": node_totals_list,
+        "top_nodes": node_totals_list[: max(0, int(TOP_N))],
+    }
 
 def build_ai_data_pack() -> dict:
     """
