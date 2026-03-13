@@ -40,6 +40,10 @@ KOMARI_FETCH_WORKERS = int(os.environ.get("KOMARI_FETCH_WORKERS", "6"))
 
 TOP_N = int(os.environ.get("TOP_N", "3"))  # 默认 Top3（日报/周报/月报/Top命令都用它）
 
+AI_API_BASE = os.environ.get("AI_API_BASE", "").rstrip("/")
+AI_API_KEY = os.environ.get("AI_API_KEY", "").strip()
+AI_MODEL = os.environ.get("AI_MODEL", "").strip()
+
 # /top Nh 依赖采样快照：bot 运行时自动采样
 SAMPLE_INTERVAL_SECONDS = int(os.environ.get("SAMPLE_INTERVAL_SECONDS", "300"))  # 默认 5 分钟
 SAMPLE_RETENTION_HOURS = int(os.environ.get("SAMPLE_RETENTION_HOURS", "720"))    # 默认保留 30 天采样
@@ -56,6 +60,10 @@ LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 LOG_FILE = os.environ.get("LOG_FILE", "").strip()
 
 SHUTTING_DOWN = False
+
+
+def ai_enabled() -> bool:
+    return bool(AI_API_BASE and AI_API_KEY and AI_MODEL)
 
 
 def build_http_session() -> requests.Session:
@@ -256,6 +264,78 @@ def safe_telegram_send(text: str):
         pass
 
 
+def ai_chat(messages: list[dict]) -> str:
+    """
+    通用 OpenAI 兼容 chat.completions 调用。
+    """
+    if not ai_enabled():
+        return (
+            "⚠️ AI 未启用：请先配置 AI_API_BASE / AI_API_KEY / AI_MODEL 环境变量。\n"
+            "例如：AI_API_BASE=http://23.82.99.230:8317/v1"
+        )
+
+    url = f"{AI_API_BASE}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {AI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": AI_MODEL,
+        "messages": messages,
+        "temperature": 0.3,
+        "max_tokens": 1000,
+    }
+
+    try:
+        r = requests.post(url, headers=headers, json=payload, timeout=60)
+        r.raise_for_status()
+        data = r.json()
+        choices = data.get("choices") or []
+        if not choices:
+            return "⚠️ AI 没有返回内容，请稍后重试。"
+        content = (choices[0].get("message") or {}).get("content") or ""
+        return content.strip() or "⚠️ AI 返回了空结果，请稍后重试。"
+    except Exception as e:
+        logging.exception("ai_chat error")
+        return f"⚠️ 调用 AI 失败：{type(e).__name__}: {e}"
+
+
+def ask_ai_with_data(question: str, data_pack: dict) -> str:
+    """
+    给 AI：用户问题 + 经过 Python 计算好的数据包。
+    所有数值都由 Python 从 Komari / JSON 中算好，AI 只负责解读。
+    """
+    try:
+        data_text = json.dumps(data_pack, ensure_ascii=False)
+    except Exception:
+        logging.exception("serialize data_pack error")
+        data_text = str(data_pack)
+
+    system_prompt = (
+        "你是一个 Komari 流量机器人助手，负责帮用户解读流量统计数据。\n"
+        "你会收到一个 JSON 数据包 data_pack，里面所有数值都已经由程序计算完成。\n"
+        "规则：\n"
+        "1. 所有具体数值（例如流量大小、排名）必须直接来自 data_pack，不要自己发明新数字。\n"
+        "2. 如果 data_pack 中没有足够信息回答某个问题，请明确说明“无法从当前数据中判断”，不要瞎猜。\n"
+        "3. 回答使用简洁的中文，可以有结论 + 若干要点。\n"
+        "4. 不需要原样打印整个 JSON，只引用对结论有用的关键信息。"
+    )
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user",
+            "content": (
+                f"这是当前的 data_pack（JSON 格式）：\n"
+                f"{data_text}\n\n"
+                f"用户问题：{question}\n\n"
+                "请严格根据 data_pack 里的数据进行分析和回答。"
+            ),
+        },
+    ]
+    return ai_chat(messages)
+
+
 def should_alert(throttle_key: str, min_interval_seconds: int = 300) -> bool:
     ensure_dirs()
     state_path = os.path.join(DATA_DIR, f"alert_{throttle_key}.json")
@@ -450,6 +530,161 @@ def top_lines(deltas: dict, n: int) -> list[str]:
             f"（⬇️ {human_bytes(down)} / ⬆️ {human_bytes(up)}）"
         )
     return rows
+
+
+def build_today_delta_struct() -> dict | None:
+    """
+    返回今天各节点增量统计的结构化数据。
+    """
+    td = today_date()
+    tag = td.strftime("%Y-%m-%d")
+    baseline_nodes = get_baseline_nodes(tag)
+    now = now_dt()
+    result = {
+        "date": tag,
+        "now": now.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "nodes": [],
+        "skipped": [],
+        "reset_warnings": [],
+    }
+
+    current, skipped = fetch_nodes_and_totals()
+    result["skipped"] = skipped
+
+    if baseline_nodes is None:
+        for n in current:
+            total = int(n.up) + int(n.down)
+            result["nodes"].append(
+                {"name": n.name, "up": int(n.up), "down": int(n.down), "total": total}
+            )
+        result["note"] = "baseline_missing"
+        return result
+
+    deltas, _new_baseline, reset_warnings = compute_delta_from_nodes(current, baseline_nodes)
+    result["reset_warnings"] = reset_warnings
+
+    for v in deltas.values():
+        up = int(v.get("up", 0))
+        down = int(v.get("down", 0))
+        total = up + down
+        result["nodes"].append(
+            {"name": v.get("name", ""), "up": up, "down": down, "total": total}
+        )
+    result["note"] = "baseline_ok"
+    return result
+
+
+def get_top_last_hours_struct(hours: int, n: int) -> dict | None:
+    """
+    基于 samples.json 计算最近 N 小时的 Top 榜（结构化）。
+    """
+    if hours <= 0:
+        return None
+
+    ensure_dirs()
+    take_sample_if_due(force=True)
+
+    now_ts = int(time.time())
+    target_ts = now_ts - hours * 3600
+    base = get_sample_at_or_before(target_ts)
+    if base is None:
+        return {
+            "hours": hours,
+            "error": "no_base_sample",
+            "message": f"还没有足够的采样历史来计算最近 {hours} 小时的数据。",
+        }
+
+    data = load_samples()
+    samples = data.get("samples", [])
+    if not samples:
+        return {
+            "hours": hours,
+            "error": "no_samples",
+            "message": "采样数据为空。",
+        }
+
+    cur = samples[-1]
+    deltas, reset_warnings = compute_delta_from_maps(cur.get("nodes", {}), base.get("nodes", {}))
+    skipped = list(dict.fromkeys((base.get("skipped", []) or []) + (cur.get("skipped", []) or [])))
+
+    from_dt = datetime.fromtimestamp(int(base["ts"]), TZ)
+    to_dt = datetime.fromtimestamp(int(cur["ts"]), TZ)
+
+    nodes = []
+    for v in deltas.values():
+        up = int(v.get("up", 0))
+        down = int(v.get("down", 0))
+        total = up + down
+        nodes.append(
+            {"name": v.get("name", ""), "up": up, "down": down, "total": total}
+        )
+    nodes.sort(key=lambda x: (x["total"], x["down"], x["up"], x["name"].lower()), reverse=True)
+    nodes = nodes[: max(0, int(n))]
+
+    return {
+        "hours": hours,
+        "from": from_dt.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "to": to_dt.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "nodes": nodes,
+        "skipped": skipped,
+        "reset_warnings": reset_warnings,
+    }
+
+
+def build_last_7_days_summary() -> dict:
+    """
+    使用 history.json + 月归档，构造最近 7 天总量按日汇总。
+    """
+    ensure_dirs()
+    td = today_date()
+    days = []
+    for i in range(7, 0, -1):
+        d = td - timedelta(days=i)
+        summed = history_sum(d, d)
+        total_up = sum(int(v.get("up", 0)) for v in summed.values())
+        total_down = sum(int(v.get("down", 0)) for v in summed.values())
+        total = total_up + total_down
+        days.append(
+            {
+                "date": d.strftime("%Y-%m-%d"),
+                "total_up": total_up,
+                "total_down": total_down,
+                "total": total,
+            }
+        )
+
+    return {"days": days}
+
+
+def build_ai_data_pack() -> dict:
+    """
+    汇总一份给 AI 用的数据包。
+    """
+    now = now_dt()
+    pack: dict = {
+        "now": now.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "stat_tz": STAT_TZ,
+    }
+
+    try:
+        pack["today"] = build_today_delta_struct()
+    except Exception:
+        logging.exception("build_today_delta_struct error")
+        pack["today"] = {"error": "failed"}
+
+    try:
+        pack["last_24h_top"] = get_top_last_hours_struct(24, TOP_N)
+    except Exception:
+        logging.exception("get_top_last_hours_struct error")
+        pack["last_24h_top"] = {"error": "failed"}
+
+    try:
+        pack["last_7_days"] = build_last_7_days_summary()
+    except Exception:
+        logging.exception("build_last_7_days_summary error")
+        pack["last_7_days"] = {"error": "failed"}
+
+    return pack
 
 
 def format_report(title: str, period_label: str, deltas: dict, reset_warnings: list[str], skipped: list[str] | None = None, include_top: bool = True) -> str:
@@ -1206,6 +1441,22 @@ def listen_commands():
                         f"扫描日基线：{daily_count}，重建 WEEK：{week_count}，重建 MONTH：{month_count}"
                     )
 
+                elif cmd in ("/ask", "/ai"):
+                    question = text.partition(" ")[2].strip()
+                    if not question:
+                        telegram_send(
+                            "用法：/ask 你的问题\n"
+                            "示例：\n"
+                            "/ask 今天哪个节点最耗流量？\n"
+                            "/ask 最近 7 天流量大概是上升还是下降趋势？\n"
+                            "/ask 帮我写一段今天流量情况的总结，适合发到群里。"
+                        )
+                        continue
+
+                    data_pack = build_ai_data_pack()
+                    answer = ask_ai_with_data(question, data_pack)
+                    telegram_send(answer)
+
                 elif cmd in ("/help", "/start"):
                     telegram_send(
                         "可用命令：\n"
@@ -1213,6 +1464,7 @@ def listen_commands():
                         "/top  (默认 today)\n"
                         "/top today|week|month\n"
                         "/top 6h（任意Nh）\n"
+                        "/ask 你的问题（或 /ai）\n"
                         "管理员：/archive /bootstrap /rebuild_baselines\n"
                         "确认命令：/confirm_archive /confirm_bootstrap /confirm_rebuild_baselines"
                     )
