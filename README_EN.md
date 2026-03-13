@@ -102,6 +102,9 @@ AI_API_BASE=
 AI_API_KEY=
 AI_MODEL=
 
+# AI data-pack cache TTL in seconds (default 3600; set 0 to disable)
+AI_PACK_CACHE_TTL_SECONDS=3600
+
 # Startup notification (optional)
 # Set to 0 to disable startup message
 BOT_START_NOTIFY=1
@@ -243,6 +246,7 @@ docker compose up -d
 - today per-node deltas (with human-readable units)
 - last 24h top nodes (with human-readable units)
 - last 24h hourly buckets (including peak/valley hour)
+- yesterday per-node hourly trend (for node-specific busy-hour analysis)
 - last 7 days daily totals + per-node aggregate ranking (with human-readable units)
 
 If data is insufficient, AI should explicitly say it cannot determine from current data.
@@ -257,3 +261,10 @@ By default the bot sends a startup message containing: instance label, stats tim
 
 
 > Note: data is continuously sampled/generated into local files (e.g. samples/history), but it is **not continuously pushed to AI in background**. AI is called only when `/ask` or `/ai` is triggered.
+
+Additionally, `/ask` data-pack caching is enabled locally by default (1 hour): short follow-up questions reuse cached pack; expired cache is rebuilt automatically.
+
+
+### About TELEGRAM_ALLOWED_CHAT_IDS / TELEGRAM_ADMIN_CHAT_IDS
+
+Both variables can be left empty; they fallback to `TELEGRAM_CHAT_ID`, so the bot can still receive commands by default.

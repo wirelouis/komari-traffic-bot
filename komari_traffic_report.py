@@ -53,6 +53,7 @@ HISTORY_PATH = os.path.join(DATA_DIR, "history.json")
 SAMPLES_PATH = os.path.join(DATA_DIR, "samples.json")
 TG_OFFSET_PATH = os.path.join(DATA_DIR, "tg_offset.txt")
 TG_CONFIRM_PATH = os.path.join(DATA_DIR, "tg_confirm.json")
+AI_PACK_CACHE_PATH = os.path.join(DATA_DIR, "ai_pack_cache.json")
 
 TIMEOUT = int(os.environ.get("KOMARI_TIMEOUT_SECONDS", "15"))  # Komari API timeout（秒）
 
@@ -61,6 +62,7 @@ LOG_FILE = os.environ.get("LOG_FILE", "").strip()
 
 BOT_INSTANCE_NAME = os.environ.get("BOT_INSTANCE_NAME", "").strip()
 BOT_START_NOTIFY = os.environ.get("BOT_START_NOTIFY", "1").strip().lower() not in ("0", "false", "no", "off")
+AI_PACK_CACHE_TTL_SECONDS = max(0, int(os.environ.get("AI_PACK_CACHE_TTL_SECONDS", "3600")))
 
 SHUTTING_DOWN = False
 
@@ -753,6 +755,130 @@ def build_last_24h_hourly_summary() -> dict:
         "peak_hour": peak_hour,
         "valley_hour": valley_hour,
     }
+def build_yesterday_hourly_by_node_summary() -> dict:
+    """
+    基于 samples.json 统计“昨天 00:00~24:00”各节点小时级走势。
+    用于回答“某节点昨天哪个小时最忙、是否有峰谷”。
+    """
+    ensure_dirs()
+    take_sample_if_due(force=True)
+
+    td = today_date()
+    yday = td - timedelta(days=1)
+    from_ts = int(start_of_day(yday).timestamp())
+    to_ts = int(start_of_day(td).timestamp())
+
+    data = load_samples()
+    samples = sorted(data.get("samples", []), key=lambda x: int(x.get("ts", 0)))
+    if len(samples) < 2:
+        return {
+            "date": yday.strftime("%Y-%m-%d"),
+            "error": "insufficient_samples",
+            "message": "采样点不足，无法计算昨天节点小时级分布。",
+        }
+
+    prev = None
+    for s0 in samples:
+        ts0 = int(s0.get("ts", 0))
+        if ts0 <= from_ts:
+            prev = s0
+        else:
+            break
+    if prev is None:
+        prev = samples[0]
+
+    node_hour_map: dict[str, dict] = {}
+    for cur in samples:
+        cur_ts = int(cur.get("ts", 0))
+        if cur_ts <= int(prev.get("ts", 0)):
+            continue
+        if cur_ts < from_ts:
+            prev = cur
+            continue
+        if cur_ts > to_ts:
+            break
+
+        deltas, _resets = compute_delta_from_maps(cur.get("nodes", {}), prev.get("nodes", {}))
+        hour_label = datetime.fromtimestamp(cur_ts, TZ).strftime("%Y-%m-%d %H:00")
+
+        for v in deltas.values():
+            name = v.get("name", "")
+            up = int(v.get("up", 0))
+            down = int(v.get("down", 0))
+            total = up + down
+            if name not in node_hour_map:
+                node_hour_map[name] = {"name": name, "up": 0, "down": 0, "total": 0, "hours_map": {}}
+            node_hour_map[name]["up"] += up
+            node_hour_map[name]["down"] += down
+            node_hour_map[name]["total"] += total
+            hm = node_hour_map[name]["hours_map"]
+            if hour_label not in hm:
+                hm[hour_label] = {"hour": hour_label, "up": 0, "down": 0, "total": 0}
+            hm[hour_label]["up"] += up
+            hm[hour_label]["down"] += down
+            hm[hour_label]["total"] += total
+
+        prev = cur
+
+    nodes = []
+    for node in node_hour_map.values():
+        hours = list(node["hours_map"].values())
+        hours.sort(key=lambda x: x["hour"])
+        for h in hours:
+            h["up_human"] = human_bytes(h["up"])
+            h["down_human"] = human_bytes(h["down"])
+            h["total_human"] = human_bytes(h["total"])
+        peak_hour = max(hours, key=lambda x: x["total"]) if hours else None
+        valley_hour = min(hours, key=lambda x: x["total"]) if hours else None
+
+        nodes.append({
+            "name": node["name"],
+            "up": node["up"],
+            "down": node["down"],
+            "total": node["total"],
+            "up_human": human_bytes(node["up"]),
+            "down_human": human_bytes(node["down"]),
+            "total_human": human_bytes(node["total"]),
+            "hours": hours,
+            "peak_hour": peak_hour,
+            "valley_hour": valley_hour,
+        })
+
+    nodes.sort(key=lambda x: (x["total"], x["down"], x["up"], x["name"].lower()), reverse=True)
+    return {
+        "date": yday.strftime("%Y-%m-%d"),
+        "from": datetime.fromtimestamp(from_ts, TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "to": datetime.fromtimestamp(to_ts, TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "nodes": nodes,
+        "top_nodes": nodes[: max(0, int(TOP_N))],
+    }
+
+
+def load_ai_pack_cache() -> dict:
+    return load_json(AI_PACK_CACHE_PATH, {"created_at": 0, "pack": {}})
+
+
+def save_ai_pack_cache(pack: dict):
+    save_json_atomic(AI_PACK_CACHE_PATH, {"created_at": int(time.time()), "pack": pack})
+
+
+def get_ai_data_pack_cached() -> dict:
+    if AI_PACK_CACHE_TTL_SECONDS <= 0:
+        return build_ai_data_pack()
+
+    cache = load_ai_pack_cache()
+    created_at = int(cache.get("created_at", 0))
+    now_ts = int(time.time())
+    if created_at > 0 and now_ts - created_at <= AI_PACK_CACHE_TTL_SECONDS:
+        pack = cache.get("pack") or {}
+        if isinstance(pack, dict) and pack:
+            return pack
+
+    pack = build_ai_data_pack()
+    save_ai_pack_cache(pack)
+    return pack
+
+
 def build_last_7_days_summary() -> dict:
     """
     使用 history.json + 月归档，构造最近 7 天总量按日汇总，
@@ -854,6 +980,12 @@ def build_ai_data_pack() -> dict:
     except Exception:
         logging.exception("build_last_24h_hourly_summary error")
         pack["last_24h_hourly"] = {"error": "failed"}
+
+    try:
+        pack["yesterday_hourly_by_node"] = build_yesterday_hourly_by_node_summary()
+    except Exception:
+        logging.exception("build_yesterday_hourly_by_node_summary error")
+        pack["yesterday_hourly_by_node"] = {"error": "failed"}
 
     try:
         pack["last_7_days"] = build_last_7_days_summary()
@@ -1352,8 +1484,11 @@ def consume_confirm_action(chat_id: str, action: str, code: str) -> bool:
 
 
 def parse_chat_ids_env(name: str, default_value: str) -> list[str]:
-    raw = os.environ.get(name, default_value)
-    return [x.strip() for x in raw.split(",") if x.strip()]
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        raw = str(default_value)
+    ids = [x.strip() for x in raw.split(",") if x.strip()]
+    return ids
 
 
 def is_allowed_chat(chat_id: str) -> bool:
@@ -1637,7 +1772,7 @@ def listen_commands():
                         )
                         continue
 
-                    data_pack = build_ai_data_pack()
+                    data_pack = get_ai_data_pack_cached()
                     answer = ask_ai_with_data(question, data_pack)
                     telegram_send(normalize_ai_answer_for_telegram(answer))
 
