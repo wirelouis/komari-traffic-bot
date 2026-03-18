@@ -327,7 +327,9 @@ def ask_ai_with_data(question: str, data_pack: dict) -> str:
         "7. 若用户问“今天按小时某节点趋势/峰谷”，优先使用 today_hourly_by_node.nodes[*].hours / peak_hour / valley_hour。\n"
         "8. 若用户问“昨天按小时某节点趋势/峰谷”，优先使用 yesterday_hourly_by_node.nodes[*].hours / peak_hour / valley_hour。\n"
         "9. 若用户问全局小时级峰谷，优先使用 last_24h_hourly.hours / peak_hour / valley_hour。\n"
-        "10. 不需要原样打印整个 JSON，只引用对结论有用的关键信息。"
+        "10. 不要向用户暴露内部字段名或实现细节，例如 data_pack、last_1h_by_node、today_hourly_by_node、up_human、down_human、total_human。\n"
+        "11. 要把内部统计字段翻译成自然语言，直接说“最近1小时”“上行”“下行”“合计”等用户能看懂的话。\n"
+        "12. 不需要原样打印整个 JSON，只引用对结论有用的关键信息。"
     )
     messages = [
         {"role": "system", "content": system_prompt},
@@ -396,6 +398,25 @@ def normalize_ai_answer_for_telegram(text: str) -> str:
     out = re.sub(r"\*\*(.*?)\*\*", r"\1", out)
     out = re.sub(r"__(.*?)__", r"\1", out)
     out = out.replace("`", "")
+
+    # 将常见内部字段/术语替换成人话，避免直接暴露 pack 结构
+    replacements = {
+        "data_pack": "统计结果",
+        "last_1h_by_node": "最近1小时统计",
+        "today_hourly_by_node": "今天按小时统计",
+        "yesterday_hourly_by_node": "昨天按小时统计",
+        "last_24h_hourly": "最近24小时统计",
+        "last_24h_top": "最近24小时节点统计",
+        "today.nodes": "今日节点统计",
+        "up_human =": "上行：",
+        "down_human =": "下行：",
+        "total_human =": "合计：",
+    }
+    for old, new in replacements.items():
+        out = out.replace(old, new)
+
+    out = re.sub(r"根据\s*统计结果\s*中", "根据统计结果", out)
+    out = re.sub(r"根据\s*最近1小时统计\s*的统计时间段[:：]?", "最近 1 小时统计区间：", out)
 
     # 压缩过多空行
     out = re.sub(r"\n{3,}", "\n\n", out)
