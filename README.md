@@ -31,7 +31,8 @@
   - `/top week`、`/top month`
 - **交互命令**
   - `/today` `/week` `/month`
-  - `/top [Nh|week|month]`
+  - `/top [Nh|today|week|month]`
+  - `/ask 你的问题（或 /ai）`
 - **稳定性**
   - Komari 节点超时自动跳过，不影响整体报表
   - Telegram 网络异常自动重试
@@ -85,6 +86,27 @@ KOMARI_FETCH_WORKERS=6
 TELEGRAM_BOT_TOKEN=123456:YOUR_BOT_TOKEN
 TELEGRAM_CHAT_ID=123456789
 
+# 允许接收命令的 chat（可选，逗号分隔）
+TELEGRAM_ALLOWED_CHAT_IDS=
+
+# 管理员 chat（可选，逗号分隔）
+TELEGRAM_ADMIN_CHAT_IDS=
+
+# AI（可选，启用 /ask 与 /ai）
+AI_API_BASE=
+AI_API_KEY=
+AI_MODEL=
+
+# AI 数据包缓存时长（秒），默认 3600；设为 0 关闭缓存
+AI_PACK_CACHE_TTL_SECONDS=3600
+
+# 启动通知（可选）
+# 设为 0 可关闭启动消息
+BOT_START_NOTIFY=1
+
+# 启动通知显示的实例名（可选，建议填机器名/环境名）
+BOT_INSTANCE_NAME=
+
 # 容器内数据目录（固定）
 DATA_DIR=/data
 
@@ -125,7 +147,7 @@ CRON
 version: "3.9"
 
 services:
-  komari-traffic-bot:
+  bot:
     image: ghcr.io/wirelouis/komari-traffic-bot:latest
     env_file: .env
     environment:
@@ -141,7 +163,7 @@ services:
       retries: 3
     command: ["python", "/app/komari_traffic_report.py", "listen"]
 
-  komari-traffic-cron:
+  cron:
     image: ghcr.io/wirelouis/komari-traffic-bot:latest
     env_file: .env
     environment:
@@ -160,7 +182,7 @@ docker compose ps
 ```
 ### 5️⃣ 初始化（只需一次
 ```）
-docker compose exec komari-traffic-bot \
+docker compose exec bot \
   python /app/komari_traffic_report.py bootstrap
 ```
 ## 🤖 Telegram 命令示例
@@ -173,6 +195,9 @@ docker compose exec komari-traffic-bot \
 | `/top 6h`    | 最近 6 小时 Top      |
 | `/top week`  | 本周 Top           |
 | `/top month` | 本月 Top           |
+| `/ask 问题`   | AI 基于数据包分析回答 |
+| `/ai 问题`    | `/ask` 别名         |
+| `/help`       | 查看命令帮助         |
 
 ## 🕒 关于时区
 统计口径时区：STAT_TZ（默认 Asia/Shanghai）
@@ -212,3 +237,45 @@ Komari 某节点超时？
 
 Telegram 偶发断连？
 已内置自动重试
+
+
+## 🔐 管理员命令（需管理员 chat）
+
+- `/archive` → 先发确认码，再通过 `/confirm_archive <code>` 执行
+- `/bootstrap` → 有历史数据风险时会拒绝；可通过 `/confirm_bootstrap <code>` 执行
+- `/rebuild_baselines` → 先发确认码，再通过 `/confirm_rebuild_baselines <code>` 执行
+
+> 默认管理员为 `TELEGRAM_CHAT_ID`。配置 `TELEGRAM_ADMIN_CHAT_IDS` 后按该列表生效。
+
+## 🤖 /ask 数据范围说明
+
+`/ask` 与 `/ai` 只基于程序计算出的 `data_pack` 回答，主要包含：
+
+- 今日按节点增量（含可读单位）
+- 最近 1 小时按节点明细（可回答“刚刚这一小时哪台机器用了多少”）
+- 最近 24 小时 Top（含可读单位）
+- 最近 24 小时按小时分桶（含峰值/低谷小时）
+- 今天按节点小时级走势（可回答“今天每小时各机器用了多少”）
+- 昨天按节点小时级走势（可回答“某节点昨天最忙时段”）
+- 最近 7 天按日总量 + 按节点累计排行（含可读单位）
+
+若数据不足，AI 会明确说明无法判断。
+
+
+## ℹ️ 启动提示说明
+
+默认会发送一条启动提示，内容为“实例名 + 统计时区 + 可接收命令 chat 数”。
+
+- 通过 `BOT_INSTANCE_NAME` 自定义实例标识（如 `hk-vps-prod`）。
+- 通过 `BOT_START_NOTIFY=0` 关闭启动提示。
+
+
+> 说明：数据会持续由 bot 采样/生成并写入本地文件（samples/history 等），但**不会在后台持续主动推送给 AI**；仅在你触发 `/ask` 或 `/ai` 时才会临时组包并调用 AI。
+
+另外：`/ask` 数据包支持本地缓存（默认 1 小时），同一时间段连续追问会复用缓存，过期后自动重建。  
+但像“刚刚这一小时 / 今天按小时”这类强时效问题，会自动绕过缓存并实时重建数据包，避免拿旧数据回答。
+
+
+### 关于 TELEGRAM_ALLOWED_CHAT_IDS / TELEGRAM_ADMIN_CHAT_IDS
+
+这两个变量可以留空；留空时默认回退为 `TELEGRAM_CHAT_ID`，不会导致 bot 收不到消息。
