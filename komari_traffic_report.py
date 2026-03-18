@@ -322,14 +322,17 @@ def ask_ai_with_data(question: str, data_pack: dict) -> str:
         "2. 如果 data_pack 中没有足够信息回答某个问题，请明确说明“无法从当前数据中判断”，不要瞎猜。\n"
         "3. 回答使用简洁中文，优先使用 *_human 字段展示人类可读流量单位（如 GiB/TiB），避免输出超长原始整数。\n"
         "4. 涉及“最近 7 天哪个节点流量最高”时，优先使用 last_7_days.node_totals 与 last_7_days.top_nodes。\n"
-        "5. 输出为工整纯文本，优先用“结论 / 依据 / 趋势”分段；不要使用 Markdown 标记（如 #、*、**、```）。\n"
-        "6. 若用户问“刚刚这一小时/最近1小时某节点用了多少”，优先使用 last_1h_by_node.nodes。\n"
-        "7. 若用户问“今天按小时某节点趋势/峰谷”，优先使用 today_hourly_by_node.nodes[*].hours / peak_hour / valley_hour。\n"
-        "8. 若用户问“昨天按小时某节点趋势/峰谷”，优先使用 yesterday_hourly_by_node.nodes[*].hours / peak_hour / valley_hour。\n"
-        "9. 若用户问全局小时级峰谷，优先使用 last_24h_hourly.hours / peak_hour / valley_hour。\n"
-        "10. 不要向用户暴露内部字段名或实现细节，例如 data_pack、last_1h_by_node、today_hourly_by_node、up_human、down_human、total_human。\n"
-        "11. 要把内部统计字段翻译成自然语言，直接说“最近1小时”“上行”“下行”“合计”等用户能看懂的话。\n"
-        "12. 不需要原样打印整个 JSON，只引用对结论有用的关键信息。"
+        "5. 所有回答都尽量按固定模板组织：优先输出“结论”，必要时补“依据 / 趋势 / 建议 / 风险提示”。\n"
+        "6. 输出必须适合 Telegram 阅读：每个标题单独成行，每段 2~4 条短句，尽量让用户一眼扫完。\n"
+        "7. 列表统一使用简洁项目符号，不要使用冗长的 1) 2) 3) 序号堆砌。\n"
+        "8. 若用户问“刚刚这一小时/最近1小时某节点用了多少”，优先使用 last_1h_by_node.nodes。\n"
+        "9. 若用户问“今天按小时某节点趋势/峰谷”，优先使用 today_hourly_by_node.nodes[*].hours / peak_hour / valley_hour。\n"
+        "10. 若用户问“昨天按小时某节点趋势/峰谷”，优先使用 yesterday_hourly_by_node.nodes[*].hours / peak_hour / valley_hour。\n"
+        "11. 若用户问全局小时级峰谷，优先使用 last_24h_hourly.hours / peak_hour / valley_hour。\n"
+        "12. 不要向用户暴露内部字段名或实现细节，例如 data_pack、last_1h_by_node、today_hourly_by_node、up_human、down_human、total_human。\n"
+        "13. 要把内部统计字段翻译成自然语言，直接说“最近1小时”“上行”“下行”“合计”等用户能看懂的话。\n"
+        "14. 不需要原样打印整个 JSON，只引用对结论有用的关键信息。\n"
+        "15. 不要写成开发日志或调试输出，不要出现‘字段/结构/键名/pack’等工程化表述。"
     )
     messages = [
         {"role": "system", "content": system_prompt},
@@ -394,6 +397,8 @@ def normalize_ai_answer_for_telegram(text: str) -> str:
     out = re.sub(r"(?m)^\s*#{1,6}\s*(.+?)\s*$", lambda m: f"【{m.group(1).strip()}】", out)
     # 无序列表：* / - -> •
     out = re.sub(r"(?m)^\s*[-*]\s+", "• ", out)
+    # 有序列表：1) / 1. -> •
+    out = re.sub(r"(?m)^\s*\d+[.)、]\s+", "• ", out)
     # 去掉常见 Markdown 标记
     out = re.sub(r"\*\*(.*?)\*\*", r"\1", out)
     out = re.sub(r"__(.*?)__", r"\1", out)
@@ -417,6 +422,39 @@ def normalize_ai_answer_for_telegram(text: str) -> str:
 
     out = re.sub(r"根据\s*统计结果\s*中", "根据统计结果", out)
     out = re.sub(r"根据\s*最近1小时统计\s*的统计时间段[:：]?", "最近 1 小时统计区间：", out)
+    out = re.sub(r"(?m)^\s*(结论|依据|趋势|建议|说明|补充|风险提示)\s*[:：]\s*$", r"\1", out)
+    out = re.sub(r"(?m)^\s*(结论|依据|趋势|建议|说明|补充|风险提示)\s*[:：]\s*(.+)$", r"\1\n• \2", out)
+    out = re.sub(r"(?m)^\s*-\s+", "• ", out)
+
+    # 统一段落标题样式
+    section_map = {
+        "结论": "📌 <b>结论</b>",
+        "依据": "📎 <b>依据</b>",
+        "趋势": "📈 <b>趋势</b>",
+        "建议": "💡 <b>建议</b>",
+        "说明": "📝 <b>说明</b>",
+        "补充": "🧩 <b>补充</b>",
+        "风险提示": "⚠️ <b>风险提示</b>",
+    }
+    lines = []
+    for raw_line in out.split("\n"):
+        line = raw_line.strip()
+        if line in section_map:
+            lines.append(section_map[line])
+            continue
+        # 给时间区间/统计截止加一点视觉提示
+        if line.startswith("截止 ") or line.startswith("截至 "):
+            lines.append(f"⏱ {line}")
+            continue
+        if line.startswith("最近 1 小时统计区间：") or line.startswith("统计区间："):
+            lines.append(f"⏱ {line}")
+            continue
+        lines.append(raw_line.rstrip())
+    out = "\n".join(lines)
+
+    # 将常见“节点：数值...”条目美化
+    out = re.sub(r"(?m)^(•\s*)([^：:\n]{2,40})([：:])", r"\1<b>\2</b>\3", out)
+    out = re.sub(r"(?m)^(•\s*)(上行|下行|合计|跳过节点|统计时间|统计时区)([：:])", r"\1<b>\2</b>\3", out)
 
     # 压缩过多空行
     out = re.sub(r"\n{3,}", "\n\n", out)
