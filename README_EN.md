@@ -244,8 +244,10 @@ docker compose up -d
 `/ask` and `/ai` can only use computed `data_pack` fields, including:
 
 - today per-node deltas (with human-readable units)
+- last 1h per-node detail (for questions like “how much did each node use in the last hour?”)
 - last 24h top nodes (with human-readable units)
 - last 24h hourly buckets (including peak/valley hour)
+- today per-node hourly trend (for “today by hour” node analysis)
 - yesterday per-node hourly trend (for node-specific busy-hour analysis)
 - last 7 days daily totals + per-node aggregate ranking (with human-readable units)
 
@@ -262,7 +264,8 @@ By default the bot sends a startup message containing: instance label, stats tim
 
 > Note: data is continuously sampled/generated into local files (e.g. samples/history), but it is **not continuously pushed to AI in background**. AI is called only when `/ask` or `/ai` is triggered.
 
-Additionally, `/ask` data-pack caching is enabled locally by default (1 hour): short follow-up questions reuse cached pack; expired cache is rebuilt automatically.
+Additionally, `/ask` data-pack caching is enabled locally by default (1 hour): short follow-up questions reuse cached pack; expired cache is rebuilt automatically.  
+For highly time-sensitive questions such as “the last hour” or “today by hour”, the bot bypasses cache and rebuilds the pack immediately to avoid stale answers.
 
 
 ### About TELEGRAM_ALLOWED_CHAT_IDS / TELEGRAM_ADMIN_CHAT_IDS

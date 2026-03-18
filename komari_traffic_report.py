@@ -306,11 +306,13 @@ def ask_ai_with_data(question: str, data_pack: dict) -> str:
     给 AI：用户问题 + 经过 Python 计算好的数据包。
     所有数值都由 Python 从 Komari / JSON 中算好，AI 只负责解读。
     """
+    focused_pack = build_focused_ai_data_pack(question, data_pack)
+
     try:
-        data_text = json.dumps(data_pack, ensure_ascii=False)
+        data_text = json.dumps(focused_pack, ensure_ascii=False)
     except Exception:
         logging.exception("serialize data_pack error")
-        data_text = str(data_pack)
+        data_text = str(focused_pack)
 
     system_prompt = (
         "你是一个 Komari 流量机器人助手，负责帮用户解读流量统计数据。\n"
@@ -321,8 +323,11 @@ def ask_ai_with_data(question: str, data_pack: dict) -> str:
         "3. 回答使用简洁中文，优先使用 *_human 字段展示人类可读流量单位（如 GiB/TiB），避免输出超长原始整数。\n"
         "4. 涉及“最近 7 天哪个节点流量最高”时，优先使用 last_7_days.node_totals 与 last_7_days.top_nodes。\n"
         "5. 输出为工整纯文本，优先用“结论 / 依据 / 趋势”分段；不要使用 Markdown 标记（如 #、*、**、```）。\n"
-        "6. 若用户问小时级峰谷，优先使用 last_24h_hourly.hours / peak_hour / valley_hour。\n"
-        "7. 不需要原样打印整个 JSON，只引用对结论有用的关键信息。"
+        "6. 若用户问“刚刚这一小时/最近1小时某节点用了多少”，优先使用 last_1h_by_node.nodes。\n"
+        "7. 若用户问“今天按小时某节点趋势/峰谷”，优先使用 today_hourly_by_node.nodes[*].hours / peak_hour / valley_hour。\n"
+        "8. 若用户问“昨天按小时某节点趋势/峰谷”，优先使用 yesterday_hourly_by_node.nodes[*].hours / peak_hour / valley_hour。\n"
+        "9. 若用户问全局小时级峰谷，优先使用 last_24h_hourly.hours / peak_hour / valley_hour。\n"
+        "10. 不需要原样打印整个 JSON，只引用对结论有用的关键信息。"
     )
     messages = [
         {"role": "system", "content": system_prompt},
@@ -337,6 +342,41 @@ def ask_ai_with_data(question: str, data_pack: dict) -> str:
         },
     ]
     return ai_chat(messages)
+
+
+def question_requires_fresh_ai_pack(question: str) -> bool:
+    q = (question or "").lower().strip()
+    hot_keywords = (
+        "刚刚", "最近1小时", "最近 1 小时", "一小时", "1小时", "1 h", "1h",
+        "今天按小时", "今日按小时", "小时趋势", "小时级",
+    )
+    return any(k in q for k in hot_keywords)
+
+
+def build_focused_ai_data_pack(question: str, data_pack: dict) -> dict:
+    """
+    按问题类型缩小喂给 AI 的数据范围，减少模型被无关字段干扰。
+    """
+    q = (question or "").lower().strip()
+    focused = {
+        "now": data_pack.get("now"),
+        "stat_tz": data_pack.get("stat_tz"),
+    }
+
+    if any(k in q for k in ("刚刚", "最近1小时", "最近 1 小时", "一小时", "1小时", "1 h", "1h")):
+        focused["last_1h_by_node"] = data_pack.get("last_1h_by_node")
+        return focused
+
+    if ("今天" in q or "今日" in q) and ("小时" in q or "峰谷" in q or "走势" in q):
+        focused["today_hourly_by_node"] = data_pack.get("today_hourly_by_node")
+        focused["today"] = data_pack.get("today")
+        return focused
+
+    if ("昨天" in q or "昨日" in q) and ("小时" in q or "峰谷" in q or "走势" in q):
+        focused["yesterday_hourly_by_node"] = data_pack.get("yesterday_hourly_by_node")
+        return focused
+
+    return data_pack
 
 
 def normalize_ai_answer_for_telegram(text: str) -> str:
@@ -531,6 +571,45 @@ def compute_delta_from_maps(current_nodes_map: dict, baseline_nodes_map: dict) -
     return deltas, reset_warnings
 
 
+def compute_strict_sample_delta_from_maps(current_nodes_map: dict, previous_nodes_map: dict) -> tuple[dict, list[str]]:
+    """
+    用于 samples.json 邻近样本之间的严格差分。
+
+    规则：
+    - 仅对“当前样本和前一样本都存在”的节点计算差分；
+    - 若计数器回退/重置（负差），该段差分按 0 处理，不回退到当前累计值；
+    - 这样可避免把累计计数器绝对值误判成某一小时/某一采样区间的流量。
+    returns: (deltas, warnings)
+    """
+    deltas = {}
+    warnings = []
+
+    for uuid, cur in current_nodes_map.items():
+        prev = previous_nodes_map.get(uuid)
+        name = cur.get("name", uuid)
+
+        if not prev:
+            warnings.append(f"{name}(missing_prev)")
+            continue
+
+        cur_up = int(cur.get("up", 0))
+        cur_down = int(cur.get("down", 0))
+        prev_up = int(prev.get("up", 0))
+        prev_down = int(prev.get("down", 0))
+
+        up_delta = cur_up - prev_up
+        down_delta = cur_down - prev_down
+
+        if up_delta < 0 or down_delta < 0:
+            warnings.append(f"{name}(counter_reset)")
+            up_delta = max(up_delta, 0)
+            down_delta = max(down_delta, 0)
+
+        deltas[uuid] = {"name": name, "up": up_delta, "down": down_delta}
+
+    return deltas, warnings
+
+
 # -------------------- Top 榜展示 --------------------
 
 def top_lines(deltas: dict, n: int) -> list[str]:
@@ -683,6 +762,70 @@ def get_top_last_hours_struct(hours: int, n: int) -> dict | None:
     }
 
 
+def get_last_hours_nodes_struct(hours: int) -> dict | None:
+    """
+    返回最近 N 小时所有节点的结构化差分（不截断 Top N）。
+    """
+    if hours <= 0:
+        return None
+
+    ensure_dirs()
+    take_sample_if_due(force=True)
+
+    now_ts = int(time.time())
+    target_ts = now_ts - hours * 3600
+    base = get_sample_at_or_before(target_ts)
+    if base is None:
+        return {
+            "hours": hours,
+            "error": "no_base_sample",
+            "message": f"还没有足够的采样历史来计算最近 {hours} 小时的数据。",
+        }
+
+    data = load_samples()
+    samples = data.get("samples", [])
+    if not samples:
+        return {
+            "hours": hours,
+            "error": "no_samples",
+            "message": "采样数据为空。",
+        }
+
+    cur = samples[-1]
+    deltas, warnings = compute_strict_sample_delta_from_maps(cur.get("nodes", {}), base.get("nodes", {}))
+    skipped = list(dict.fromkeys((base.get("skipped", []) or []) + (cur.get("skipped", []) or [])))
+
+    from_dt = datetime.fromtimestamp(int(base["ts"]), TZ)
+    to_dt = datetime.fromtimestamp(int(cur["ts"]), TZ)
+
+    nodes = []
+    for v in deltas.values():
+        up = int(v.get("up", 0))
+        down = int(v.get("down", 0))
+        total = up + down
+        nodes.append(
+            {
+                "name": v.get("name", ""),
+                "up": up,
+                "down": down,
+                "total": total,
+                "up_human": human_bytes(up),
+                "down_human": human_bytes(down),
+                "total_human": human_bytes(total),
+            }
+        )
+    nodes.sort(key=lambda x: (x["total"], x["down"], x["up"], x["name"].lower()), reverse=True)
+
+    return {
+        "hours": hours,
+        "from": from_dt.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "to": to_dt.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "nodes": nodes,
+        "skipped": skipped,
+        "warnings": warnings,
+    }
+
+
 
 def build_last_24h_hourly_summary() -> dict:
     """
@@ -724,7 +867,7 @@ def build_last_24h_hourly_summary() -> dict:
             prev = cur
             continue
 
-        deltas, _resets = compute_delta_from_maps(cur.get("nodes", {}), prev.get("nodes", {}))
+        deltas, _warnings = compute_strict_sample_delta_from_maps(cur.get("nodes", {}), prev.get("nodes", {}))
         up = sum(int(v.get("up", 0)) for v in deltas.values())
         down = sum(int(v.get("down", 0)) for v in deltas.values())
         total = up + down
@@ -798,7 +941,7 @@ def build_yesterday_hourly_by_node_summary() -> dict:
         if cur_ts > to_ts:
             break
 
-        deltas, _resets = compute_delta_from_maps(cur.get("nodes", {}), prev.get("nodes", {}))
+        deltas, _warnings = compute_strict_sample_delta_from_maps(cur.get("nodes", {}), prev.get("nodes", {}))
         hour_label = datetime.fromtimestamp(cur_ts, TZ).strftime("%Y-%m-%d %H:00")
 
         for v in deltas.values():
@@ -849,6 +992,101 @@ def build_yesterday_hourly_by_node_summary() -> dict:
         "date": yday.strftime("%Y-%m-%d"),
         "from": datetime.fromtimestamp(from_ts, TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
         "to": datetime.fromtimestamp(to_ts, TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "nodes": nodes,
+        "top_nodes": nodes[: max(0, int(TOP_N))],
+    }
+
+
+def build_today_hourly_by_node_summary() -> dict:
+    """
+    基于 samples.json 统计“今天 00:00~当前”各节点小时级走势。
+    """
+    ensure_dirs()
+    take_sample_if_due(force=True)
+
+    td = today_date()
+    from_ts = int(start_of_day(td).timestamp())
+    now_ts = int(time.time())
+
+    data = load_samples()
+    samples = sorted(data.get("samples", []), key=lambda x: int(x.get("ts", 0)))
+    if len(samples) < 2:
+        return {
+            "date": td.strftime("%Y-%m-%d"),
+            "error": "insufficient_samples",
+            "message": "采样点不足，无法计算今天节点小时级分布。",
+        }
+
+    prev = None
+    for s0 in samples:
+        ts0 = int(s0.get("ts", 0))
+        if ts0 <= from_ts:
+            prev = s0
+        else:
+            break
+    if prev is None:
+        prev = samples[0]
+
+    node_hour_map: dict[str, dict] = {}
+    for cur in samples:
+        cur_ts = int(cur.get("ts", 0))
+        if cur_ts <= int(prev.get("ts", 0)):
+            continue
+        if cur_ts < from_ts:
+            prev = cur
+            continue
+
+        deltas, _warnings = compute_strict_sample_delta_from_maps(cur.get("nodes", {}), prev.get("nodes", {}))
+        hour_label = datetime.fromtimestamp(cur_ts, TZ).strftime("%Y-%m-%d %H:00")
+
+        for v in deltas.values():
+            name = v.get("name", "")
+            up = int(v.get("up", 0))
+            down = int(v.get("down", 0))
+            total = up + down
+            if name not in node_hour_map:
+                node_hour_map[name] = {"name": name, "up": 0, "down": 0, "total": 0, "hours_map": {}}
+            node_hour_map[name]["up"] += up
+            node_hour_map[name]["down"] += down
+            node_hour_map[name]["total"] += total
+            hm = node_hour_map[name]["hours_map"]
+            if hour_label not in hm:
+                hm[hour_label] = {"hour": hour_label, "up": 0, "down": 0, "total": 0}
+            hm[hour_label]["up"] += up
+            hm[hour_label]["down"] += down
+            hm[hour_label]["total"] += total
+
+        prev = cur
+
+    nodes = []
+    for node in node_hour_map.values():
+        hours = list(node["hours_map"].values())
+        hours.sort(key=lambda x: x["hour"])
+        for h in hours:
+            h["up_human"] = human_bytes(h["up"])
+            h["down_human"] = human_bytes(h["down"])
+            h["total_human"] = human_bytes(h["total"])
+        peak_hour = max(hours, key=lambda x: x["total"]) if hours else None
+        valley_hour = min(hours, key=lambda x: x["total"]) if hours else None
+
+        nodes.append({
+            "name": node["name"],
+            "up": node["up"],
+            "down": node["down"],
+            "total": node["total"],
+            "up_human": human_bytes(node["up"]),
+            "down_human": human_bytes(node["down"]),
+            "total_human": human_bytes(node["total"]),
+            "hours": hours,
+            "peak_hour": peak_hour,
+            "valley_hour": valley_hour,
+        })
+
+    nodes.sort(key=lambda x: (x["total"], x["down"], x["up"], x["name"].lower()), reverse=True)
+    return {
+        "date": td.strftime("%Y-%m-%d"),
+        "from": datetime.fromtimestamp(from_ts, TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "to": datetime.fromtimestamp(now_ts, TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
         "nodes": nodes,
         "top_nodes": nodes[: max(0, int(TOP_N))],
     }
@@ -976,10 +1214,22 @@ def build_ai_data_pack() -> dict:
         pack["last_24h_top"] = {"error": "failed"}
 
     try:
+        pack["last_1h_by_node"] = get_last_hours_nodes_struct(1)
+    except Exception:
+        logging.exception("get_last_hours_nodes_struct(1) error")
+        pack["last_1h_by_node"] = {"error": "failed"}
+
+    try:
         pack["last_24h_hourly"] = build_last_24h_hourly_summary()
     except Exception:
         logging.exception("build_last_24h_hourly_summary error")
         pack["last_24h_hourly"] = {"error": "failed"}
+
+    try:
+        pack["today_hourly_by_node"] = build_today_hourly_by_node_summary()
+    except Exception:
+        logging.exception("build_today_hourly_by_node_summary error")
+        pack["today_hourly_by_node"] = {"error": "failed"}
 
     try:
         pack["yesterday_hourly_by_node"] = build_yesterday_hourly_by_node_summary()
@@ -1772,7 +2022,10 @@ def listen_commands():
                         )
                         continue
 
-                    data_pack = get_ai_data_pack_cached()
+                    if question_requires_fresh_ai_pack(question):
+                        data_pack = build_ai_data_pack()
+                    else:
+                        data_pack = get_ai_data_pack_cached()
                     answer = ask_ai_with_data(question, data_pack)
                     telegram_send(normalize_ai_answer_for_telegram(answer))
 
