@@ -271,6 +271,18 @@ def telegram_send(text: str):
     return post_json(url, payload)
 
 
+def telegram_send_plain(text: str):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 未设置")
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "disable_web_page_preview": True,
+    }
+    return post_json(url, payload)
+
+
 def safe_telegram_send(text: str):
     try:
         if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
@@ -415,6 +427,24 @@ def normalize_ai_answer_for_telegram(text: str) -> str:
     # 保持最小清洗，主体格式约束交给 system prompt，减少脆弱正则链。
     out = out.replace("```html", "").replace("```", "")
     out = re.sub(r"\n{3,}", "\n\n", out)
+
+    # Telegram HTML 安全转义：先全量转义，再还原白名单标签
+    out = out.replace("&", "&amp;")
+    out = out.replace("<", "&lt;")
+    out = out.replace(">", "&gt;")
+
+    allow_map = {
+        "&lt;b&gt;": "<b>",
+        "&lt;/b&gt;": "</b>",
+        "&lt;i&gt;": "<i>",
+        "&lt;/i&gt;": "</i>",
+        "&lt;code&gt;": "<code>",
+        "&lt;/code&gt;": "</code>",
+        "&lt;pre&gt;": "<pre>",
+        "&lt;/pre&gt;": "</pre>",
+    }
+    for escaped, raw in allow_map.items():
+        out = out.replace(escaped, raw)
     return out.strip()
 
 def should_alert(throttle_key: str, min_interval_seconds: int = 300) -> bool:
@@ -570,16 +600,18 @@ def _record_time_label(record: dict) -> str | None:
 
 
 def compute_traffic_from_records(records: list[dict]) -> dict:
+    if records:
+        logging.debug("records fields: %s", list(records[0].keys()))
     if not records:
-        up = down = 0
+        up_delta = down_delta = 0
         first = last = None
     else:
         first = records[0]
         last = records[-1]
-        up = max(0, int(last.get("net_total_up", 0)) - int(first.get("net_total_up", 0)))
-        down = max(0, int(last.get("net_total_down", 0)) - int(first.get("net_total_down", 0)))
+        up_delta = max(0, int(last.get("net_total_up", 0)) - int(first.get("net_total_up", 0)))
+        down_delta = max(0, int(last.get("net_total_down", 0)) - int(first.get("net_total_down", 0)))
 
-    total = up + down
+    total = up_delta + down_delta
     cpu_values = []
     ram_values = []
     disk_values = []
@@ -595,11 +627,11 @@ def compute_traffic_from_records(records: list[dict]) -> dict:
             disk_values.append(disk)
 
     return {
-        "up": up,
-        "down": down,
+        "up": up_delta,
+        "down": down_delta,
         "total": total,
-        "up_human": human_bytes(up),
-        "down_human": human_bytes(down),
+        "up_human": human_bytes(up_delta),
+        "down_human": human_bytes(down_delta),
         "total_human": human_bytes(total),
         "cpu": _metric_stats(cpu_values),
         "ram": _metric_stats(ram_values),
@@ -2214,7 +2246,15 @@ def listen_commands():
                     else:
                         data_pack = get_ai_data_pack_cached()
                     answer = ask_ai_with_data(question, data_pack)
-                    telegram_send(normalize_ai_answer_for_telegram(answer))
+                    ai_text = normalize_ai_answer_for_telegram(answer)
+                    try:
+                        telegram_send(ai_text)
+                    except requests.exceptions.HTTPError as e:
+                        if e.response is not None and e.response.status_code == 400:
+                            logging.warning("telegram html parse failed, fallback to plain text send")
+                            telegram_send_plain(re.sub(r"</?[^>]+>", "", ai_text))
+                        else:
+                            raise
 
                 elif cmd in ("/help", "/start"):
                     telegram_send(
