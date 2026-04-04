@@ -121,9 +121,10 @@ STAT_TZ=Asia/Shanghai
 # Top ranking size
 TOP_N=3
 
-# Sampling for /top Nh
+# Sampling for /top Nh (short-window diff only by default)
+# Long-range history should come from Komari /api/records/load
 SAMPLE_INTERVAL_SECONDS=300
-SAMPLE_RETENTION_HOURS=720
+SAMPLE_RETENTION_HOURS=2
 
 # History retention
 HISTORY_HOT_DAYS=60
