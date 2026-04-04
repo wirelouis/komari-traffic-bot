@@ -606,7 +606,14 @@ def compute_traffic_from_records(records: list[dict]) -> dict:
         up_delta = down_delta = 0
         first = last = None
     else:
-        records_sorted = sorted(records, key=lambda r: r.get("time", ""))
+        seen = set()
+        deduped = []
+        for r in records:
+            t = r.get("time", "")
+            if t not in seen:
+                seen.add(t)
+                deduped.append(r)
+        records_sorted = sorted(deduped, key=lambda r: r.get("time", ""))
         first, last = records_sorted[0], records_sorted[-1]
         up_delta = max(0, int(last.get("net_total_up", 0)) - int(first.get("net_total_up", 0)))
         down_delta = max(0, int(last.get("net_total_down", 0)) - int(first.get("net_total_down", 0)))
