@@ -116,9 +116,10 @@ STAT_TZ=Asia/Shanghai
 # Top 榜数量
 TOP_N=3
 
-# /top Nh 采样：每 5 分钟采样一次，保留 30 天
+# /top Nh 采样：每 5 分钟采样一次，默认仅保留 2 小时（用于短时差分）
+# 长期历史建议依赖 Komari /api/records/load
 SAMPLE_INTERVAL_SECONDS=300
-SAMPLE_RETENTION_HOURS=720
+SAMPLE_RETENTION_HOURS=2
 
 # 历史数据策略
 HISTORY_HOT_DAYS=60

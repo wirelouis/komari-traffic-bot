@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import errno
 import sys
 import time
 import traceback
@@ -13,6 +14,7 @@ import gzip
 import concurrent.futures
 import signal
 import secrets
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
@@ -46,7 +48,7 @@ AI_MODEL = os.environ.get("AI_MODEL", "").strip()
 
 # /top Nh 依赖采样快照：bot 运行时自动采样
 SAMPLE_INTERVAL_SECONDS = int(os.environ.get("SAMPLE_INTERVAL_SECONDS", "300"))  # 默认 5 分钟
-SAMPLE_RETENTION_HOURS = int(os.environ.get("SAMPLE_RETENTION_HOURS", "720"))    # 默认保留 30 天采样
+SAMPLE_RETENTION_HOURS = int(os.environ.get("SAMPLE_RETENTION_HOURS", "2"))    # 默认保留 2 小时采样
 
 BASELINES_PATH = os.path.join(DATA_DIR, "baselines.json")
 HISTORY_PATH = os.path.join(DATA_DIR, "history.json")
@@ -65,6 +67,8 @@ BOT_START_NOTIFY = os.environ.get("BOT_START_NOTIFY", "1").strip().lower() not i
 AI_PACK_CACHE_TTL_SECONDS = max(0, int(os.environ.get("AI_PACK_CACHE_TTL_SECONDS", "3600")))
 
 SHUTTING_DOWN = False
+SAMPLE_THREAD: threading.Thread | None = None
+SAMPLE_STOP_EVENT = threading.Event()
 
 
 def ai_enabled() -> bool:
@@ -179,11 +183,10 @@ def ensure_dirs():
 def human_bytes(n: int) -> str:
     units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"]
     x = float(max(int(n), 0))
-    for u in units:
-        if x < 1024 or u == units[-1]:
+    for idx, u in enumerate(units):
+        if x < 1024 or idx == len(units) - 1:
             return f"{x:.2f} {u}" if u != "B" else f"{int(x)} B"
         x /= 1024
-    return f"{x:.2f} PiB"
 
 
 def now_dt() -> datetime:
@@ -233,7 +236,14 @@ def save_json_atomic(path: str, data):
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+    try:
+        os.replace(tmp, path)
+    except OSError as e:
+        if e.errno != errno.EXDEV:
+            raise
+        with open(path, "w", encoding="utf-8") as dst, open(tmp, "r", encoding="utf-8") as src:
+            dst.write(src.read())
+        os.unlink(tmp)
 
 
 def get_json(url: str):
@@ -256,6 +266,18 @@ def telegram_send(text: str):
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
         "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    return post_json(url, payload)
+
+
+def telegram_send_plain(text: str):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 未设置")
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
         "disable_web_page_preview": True,
     }
     return post_json(url, payload)
@@ -307,6 +329,13 @@ def ask_ai_with_data(question: str, data_pack: dict) -> str:
     所有数值都由 Python 从 Komari / JSON 中算好，AI 只负责解读。
     """
     focused_pack = build_focused_ai_data_pack(question, data_pack)
+    error_keys = [
+        k for k, v in (data_pack or {}).items()
+        if isinstance(v, dict) and v.get("error") == "failed"
+    ]
+    if len(error_keys) >= 3:
+        logging.warning("ask_ai_with_data aborted: too many failed data sources: %s", ",".join(error_keys))
+        return "⚠️ 数据获取异常，稍后再试。"
 
     try:
         data_text = json.dumps(focused_pack, ensure_ascii=False)
@@ -321,9 +350,10 @@ def ask_ai_with_data(question: str, data_pack: dict) -> str:
         "1. 所有具体数值（例如流量大小、排名）必须直接来自 data_pack，不要自己发明新数字。\n"
         "2. 如果 data_pack 中没有足够信息回答某个问题，请明确说明“无法从当前数据中判断”，不要瞎猜。\n"
         "3. 回答使用简洁中文，优先使用 *_human 字段展示人类可读流量单位（如 GiB/TiB），避免输出超长原始整数。\n"
-        "4. 涉及“最近 7 天哪个节点流量最高”时，优先使用 last_7_days.node_totals 与 last_7_days.top_nodes。\n"
+        "4. 涉及近 24 小时/7 天/30 天节点流量对比时，优先使用 last_24h、last_7d、last_30d 的 top_nodes。\n"
         "5. 所有回答都尽量按固定模板组织：优先输出“结论”，必要时补“依据 / 趋势 / 建议 / 风险提示”。\n"
         "6. 输出必须适合 Telegram 阅读：每个标题单独成行，每段 2~4 条短句，尽量让用户一眼扫完。\n"
+        "6.1 只允许输出 Telegram HTML 支持标签（如 <b>/<i>/<code>），不要输出 Markdown（如 #、*、```）。\n"
         "7. 列表统一使用简洁项目符号，不要使用冗长的 1) 2) 3) 序号堆砌。\n"
         "8. 若用户问“刚刚这一小时/最近1小时某节点用了多少”，优先使用 last_1h_by_node.nodes。\n"
         "9. 若用户问“今天按小时某节点趋势/峰谷”，优先使用 today_hourly_by_node.nodes[*].hours / peak_hour / valley_hour。\n"
@@ -333,6 +363,7 @@ def ask_ai_with_data(question: str, data_pack: dict) -> str:
         "13. 要把内部统计字段翻译成自然语言，直接说“最近1小时”“上行”“下行”“合计”等用户能看懂的话。\n"
         "14. 不需要原样打印整个 JSON，只引用对结论有用的关键信息。\n"
         "15. 不要写成开发日志或调试输出，不要出现‘字段/结构/键名/pack’等工程化表述。"
+        "16. 字段说明：last_24h/last_7d/last_30d 分别表示最近 24h/168h/720h 的节点汇总；其中 cpu/ram/disk 为使用率百分比统计（avg/max/min）。"
     )
     messages = [
         {"role": "system", "content": system_prompt},
@@ -393,71 +424,27 @@ def normalize_ai_answer_for_telegram(text: str) -> str:
     if not out:
         return "⚠️ AI 返回为空，请稍后重试。"
 
-    # 标题：### xxx -> 【xxx】
-    out = re.sub(r"(?m)^\s*#{1,6}\s*(.+?)\s*$", lambda m: f"【{m.group(1).strip()}】", out)
-    # 无序列表：* / - -> •
-    out = re.sub(r"(?m)^\s*[-*]\s+", "• ", out)
-    # 有序列表：1) / 1. -> •
-    out = re.sub(r"(?m)^\s*\d+[.)、]\s+", "• ", out)
-    # 去掉常见 Markdown 标记
-    out = re.sub(r"\*\*(.*?)\*\*", r"\1", out)
-    out = re.sub(r"__(.*?)__", r"\1", out)
-    out = out.replace("`", "")
-
-    # 将常见内部字段/术语替换成人话，避免直接暴露 pack 结构
-    replacements = {
-        "data_pack": "统计结果",
-        "last_1h_by_node": "最近1小时统计",
-        "today_hourly_by_node": "今天按小时统计",
-        "yesterday_hourly_by_node": "昨天按小时统计",
-        "last_24h_hourly": "最近24小时统计",
-        "last_24h_top": "最近24小时节点统计",
-        "today.nodes": "今日节点统计",
-        "up_human =": "上行：",
-        "down_human =": "下行：",
-        "total_human =": "合计：",
-    }
-    for old, new in replacements.items():
-        out = out.replace(old, new)
-
-    out = re.sub(r"根据\s*统计结果\s*中", "根据统计结果", out)
-    out = re.sub(r"根据\s*最近1小时统计\s*的统计时间段[:：]?", "最近 1 小时统计区间：", out)
-    out = re.sub(r"(?m)^\s*(结论|依据|趋势|建议|说明|补充|风险提示)\s*[:：]\s*$", r"\1", out)
-    out = re.sub(r"(?m)^\s*(结论|依据|趋势|建议|说明|补充|风险提示)\s*[:：]\s*(.+)$", r"\1\n• \2", out)
-    out = re.sub(r"(?m)^\s*-\s+", "• ", out)
-
-    # 统一段落标题样式
-    section_map = {
-        "结论": "📌 <b>结论</b>",
-        "依据": "📎 <b>依据</b>",
-        "趋势": "📈 <b>趋势</b>",
-        "建议": "💡 <b>建议</b>",
-        "说明": "📝 <b>说明</b>",
-        "补充": "🧩 <b>补充</b>",
-        "风险提示": "⚠️ <b>风险提示</b>",
-    }
-    lines = []
-    for raw_line in out.split("\n"):
-        line = raw_line.strip()
-        if line in section_map:
-            lines.append(section_map[line])
-            continue
-        # 给时间区间/统计截止加一点视觉提示
-        if line.startswith("截止 ") or line.startswith("截至 "):
-            lines.append(f"⏱ {line}")
-            continue
-        if line.startswith("最近 1 小时统计区间：") or line.startswith("统计区间："):
-            lines.append(f"⏱ {line}")
-            continue
-        lines.append(raw_line.rstrip())
-    out = "\n".join(lines)
-
-    # 将常见“节点：数值...”条目美化
-    out = re.sub(r"(?m)^(•\s*)([^：:\n]{2,40})([：:])", r"\1<b>\2</b>\3", out)
-    out = re.sub(r"(?m)^(•\s*)(上行|下行|合计|跳过节点|统计时间|统计时区)([：:])", r"\1<b>\2</b>\3", out)
-
-    # 压缩过多空行
+    # 保持最小清洗，主体格式约束交给 system prompt，减少脆弱正则链。
+    out = out.replace("```html", "").replace("```", "")
     out = re.sub(r"\n{3,}", "\n\n", out)
+
+    # Telegram HTML 安全转义：先全量转义，再还原白名单标签
+    out = out.replace("&", "&amp;")
+    out = out.replace("<", "&lt;")
+    out = out.replace(">", "&gt;")
+
+    allow_map = {
+        "&lt;b&gt;": "<b>",
+        "&lt;/b&gt;": "</b>",
+        "&lt;i&gt;": "<i>",
+        "&lt;/i&gt;": "</i>",
+        "&lt;code&gt;": "<code>",
+        "&lt;/code&gt;": "</code>",
+        "&lt;pre&gt;": "<pre>",
+        "&lt;/pre&gt;": "</pre>",
+    }
+    for escaped, raw in allow_map.items():
+        out = out.replace(escaped, raw)
     return out.strip()
 
 def should_alert(throttle_key: str, min_interval_seconds: int = 300) -> bool:
@@ -556,6 +543,151 @@ def fetch_nodes_and_totals():
                 out.append(result)
 
     return out, skipped
+
+
+def fetch_node_records(uuid: str, hours: int) -> list[dict]:
+    if not uuid:
+        raise ValueError("uuid is required")
+    if hours <= 0:
+        raise ValueError("hours must be > 0")
+    url = f"{KOMARI_BASE_URL}/api/records/load"
+    r = HTTP_SESSION.get(
+        url,
+        params={"uuid": uuid, "hours": int(hours)},
+        timeout=TIMEOUT,
+        headers=build_komari_headers(),
+    )
+    r.raise_for_status()
+    payload = r.json()
+    if not (isinstance(payload, dict) and payload.get("status") == "success"):
+        raise RuntimeError(f"/api/records/load bad response: {payload}")
+    data = payload.get("data", {})
+    if not isinstance(data, dict):
+        raise RuntimeError(f"/api/records/load data is invalid: {payload}")
+    records = data.get("records", [])
+    if not isinstance(records, list):
+        raise RuntimeError(f"/api/records/load records is invalid: {payload}")
+    return records
+
+
+def _to_float_safe(value) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _metric_stats(values: list[float]) -> dict:
+    if not values:
+        return {"avg": None, "max": None, "min": None}
+    return {
+        "avg": round(sum(values) / len(values), 2),
+        "max": round(max(values), 2),
+        "min": round(min(values), 2),
+    }
+
+
+def _record_time_label(record: dict) -> str | None:
+    if not isinstance(record, dict):
+        return None
+    for key in ("time", "timestamp", "created_at", "createdAt", "ts"):
+        v = record.get(key)
+        if v is not None:
+            return str(v)
+    return None
+
+
+def compute_traffic_from_records(records: list[dict]) -> dict:
+    if records:
+        logging.debug("records fields: %s", list(records[0].keys()))
+    if not records:
+        up_delta = down_delta = 0
+        first = last = None
+    else:
+        first = records[0]
+        last = records[-1]
+        up_delta = max(0, int(last.get("net_total_up", 0)) - int(first.get("net_total_up", 0)))
+        down_delta = max(0, int(last.get("net_total_down", 0)) - int(first.get("net_total_down", 0)))
+
+    total = up_delta + down_delta
+    cpu_values = []
+    ram_values = []
+    disk_values = []
+    for rec in records:
+        cpu = _to_float_safe(rec.get("cpu"))
+        ram = _to_float_safe(rec.get("ram"))
+        disk = _to_float_safe(rec.get("disk"))
+        if cpu is not None:
+            cpu_values.append(cpu)
+        if ram is not None:
+            ram_values.append(ram)
+        if disk is not None:
+            disk_values.append(disk)
+
+    return {
+        "up": up_delta,
+        "down": down_delta,
+        "total": total,
+        "up_human": human_bytes(up_delta),
+        "down_human": human_bytes(down_delta),
+        "total_human": human_bytes(total),
+        "cpu": _metric_stats(cpu_values),
+        "ram": _metric_stats(ram_values),
+        "disk": _metric_stats(disk_values),
+        "record_count": len(records),
+        "from": _record_time_label(first) if first else None,
+        "to": _record_time_label(last) if last else None,
+    }
+
+
+def build_records_summary(hours: int) -> dict:
+    if hours <= 0:
+        raise ValueError("hours must be > 0")
+    nodes_resp = get_json(f"{KOMARI_BASE_URL}/api/nodes")
+    if not (isinstance(nodes_resp, dict) and nodes_resp.get("status") == "success"):
+        raise RuntimeError(f"/api/nodes 返回异常：{nodes_resp}")
+    nodes = nodes_resp.get("data", [])
+    if not isinstance(nodes, list):
+        raise RuntimeError(f"/api/nodes data 非列表：{nodes_resp}")
+
+    out_nodes: list[dict] = []
+    skipped: list[str] = []
+
+    def fetch_one(node: dict):
+        uuid = node.get("uuid")
+        name = node.get("name") or uuid or "unknown"
+        if not uuid:
+            return None, f"{name}(missing_uuid)"
+        try:
+            records = fetch_node_records(str(uuid), hours)
+            summary = compute_traffic_from_records(records)
+            summary["uuid"] = str(uuid)
+            summary["name"] = str(name)
+            return summary, None
+        except requests.exceptions.ReadTimeout:
+            return None, f"{name}(timeout)"
+        except Exception as e:
+            return None, f"{name}({type(e).__name__})"
+
+    max_workers = max(1, min(len(nodes), KOMARI_FETCH_WORKERS))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_map = {executor.submit(fetch_one, n): n for n in nodes}
+        for future in concurrent.futures.as_completed(future_map):
+            item, err = future.result()
+            if err:
+                skipped.append(err)
+            elif item:
+                out_nodes.append(item)
+
+    out_nodes.sort(key=lambda x: (x["total"], x["down"], x["up"], x["name"].lower()), reverse=True)
+    return {
+        "hours": int(hours),
+        "nodes": out_nodes,
+        "top_nodes": out_nodes[: max(0, int(TOP_N))],
+        "skipped": sorted(skipped),
+    }
 
 
 def build_nodes_map_from_current(current: list[NodeTotal]) -> dict:
@@ -1267,10 +1399,10 @@ def build_ai_data_pack() -> dict:
         pack["today"] = {"error": "failed"}
 
     try:
-        pack["last_24h_top"] = get_top_last_hours_struct(24, TOP_N)
+        pack["last_24h"] = build_records_summary(24)
     except Exception:
-        logging.exception("get_top_last_hours_struct error")
-        pack["last_24h_top"] = {"error": "failed"}
+        logging.exception("build_records_summary(24) error")
+        pack["last_24h"] = {"error": "failed"}
 
     try:
         pack["last_1h_by_node"] = get_last_hours_nodes_struct(1)
@@ -1297,10 +1429,16 @@ def build_ai_data_pack() -> dict:
         pack["yesterday_hourly_by_node"] = {"error": "failed"}
 
     try:
-        pack["last_7_days"] = build_last_7_days_summary()
+        pack["last_7d"] = build_records_summary(168)
     except Exception:
-        logging.exception("build_last_7_days_summary error")
-        pack["last_7_days"] = {"error": "failed"}
+        logging.exception("build_records_summary(168) error")
+        pack["last_7d"] = {"error": "failed"}
+
+    try:
+        pack["last_30d"] = build_records_summary(720)
+    except Exception:
+        logging.exception("build_records_summary(720) error")
+        pack["last_30d"] = {"error": "failed"}
 
     return pack
 
@@ -1588,6 +1726,32 @@ def take_sample_if_due(force: bool = False):
     save_samples({"samples": samples})
 
 
+def sample_worker_loop():
+    logging.info("sample worker started, interval=%ss", SAMPLE_INTERVAL_SECONDS)
+    while not SAMPLE_STOP_EVENT.is_set():
+        try:
+            take_sample_if_due(force=False)
+        except Exception:
+            logging.exception("sample worker error")
+        SAMPLE_STOP_EVENT.wait(timeout=max(1, SAMPLE_INTERVAL_SECONDS))
+    logging.info("sample worker stopped")
+
+
+def start_sample_worker():
+    global SAMPLE_THREAD
+    if SAMPLE_THREAD and SAMPLE_THREAD.is_alive():
+        return
+    SAMPLE_STOP_EVENT.clear()
+    SAMPLE_THREAD = threading.Thread(target=sample_worker_loop, name="sample-worker", daemon=True)
+    SAMPLE_THREAD.start()
+
+
+def stop_sample_worker():
+    SAMPLE_STOP_EVENT.set()
+    if SAMPLE_THREAD and SAMPLE_THREAD.is_alive():
+        SAMPLE_THREAD.join(timeout=3)
+
+
 def get_sample_at_or_before(target_ts: int):
     data = load_samples()
     samples = data.get("samples", [])
@@ -1827,7 +1991,7 @@ def get_updates(offset: int | None):
     last_exc = None
     for _ in range(5):
         try:
-            r = HTTP_SESSION.get(url, params=params, timeout=TIMEOUT + 60)
+            r = requests.get(url, params=params, timeout=55)
             r.raise_for_status()
             return r.json()
         except requests.HTTPError as e:
@@ -1910,18 +2074,14 @@ def listen_commands():
         take_sample_if_due(force=True)
     except Exception:
         pass
+    start_sample_worker()
 
     while True:
         if SHUTTING_DOWN:
             logging.warning("shutdown flag set, exiting listen loop")
+            stop_sample_worker()
             return
         try:
-            # 周期采样：哪怕没人发命令，也会积累 /top Nh 所需数据
-            try:
-                take_sample_if_due(force=False)
-            except Exception:
-                pass
-
             data = get_updates(offset)
             if not data.get("ok"):
                 time.sleep(3)
@@ -2086,7 +2246,15 @@ def listen_commands():
                     else:
                         data_pack = get_ai_data_pack_cached()
                     answer = ask_ai_with_data(question, data_pack)
-                    telegram_send(normalize_ai_answer_for_telegram(answer))
+                    ai_text = normalize_ai_answer_for_telegram(answer)
+                    try:
+                        telegram_send(ai_text)
+                    except requests.exceptions.HTTPError as e:
+                        if e.response is not None and e.response.status_code == 400:
+                            logging.warning("telegram html parse failed, fallback to plain text send")
+                            telegram_send_plain(re.sub(r"</?[^>]+>", "", ai_text))
+                        else:
+                            raise
 
                 elif cmd in ("/help", "/start"):
                     telegram_send(
