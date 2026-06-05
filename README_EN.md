@@ -34,6 +34,10 @@ A **Dockerized traffic statistics extension** for **Komari Probe**, providing:
   - `/today`, `/week`, `/month`
   - `/top [Nh|today|week|month]`
   - `/ask your question (or /ai)`
+- **Smart Alerts**
+  - Consecutive node sampling failures and recovery notifications
+  - Recent-window, daily total, and per-node traffic thresholds
+  - Cooldown, silence windows, and optional dedicated alert chat
 - **Stability & Reliability**
   - Slow or failed Komari nodes are skipped automatically
   - Telegram network errors are retried
@@ -130,6 +134,26 @@ SAMPLE_RETENTION_HOURS=2
 HISTORY_HOT_DAYS=60
 HISTORY_RETENTION_DAYS=400
 
+# Smart alerts
+ALERTS_ENABLED=1
+# Optional alert chat; empty means TELEGRAM_CHAT_ID
+TELEGRAM_ALERT_CHAT_ID=
+# Repeat cooldown for the same active alert (seconds)
+ALERT_COOLDOWN_SECONDS=1800
+# Optional daily silence windows, e.g. 23:00-07:00 or 12:00-13:00,23:00-07:00
+ALERT_SILENCE_WINDOWS=
+# Alert after N consecutive failed node samples
+ALERT_NODE_MISSING_SAMPLES=2
+# Window size for recent-window traffic thresholds
+ALERT_WINDOW_MINUTES=60
+# Traffic thresholds: bytes or MiB/GiB/TiB; empty or 0 disables each rule
+ALERT_TOTAL_WINDOW_BYTES=
+ALERT_NODE_WINDOW_BYTES=
+ALERT_DAILY_TOTAL_BYTES=
+ALERT_DAILY_NODE_BYTES=
+# Send recovery notifications
+ALERT_RECOVERY_NOTIFY=1
+
 # Logging
 LOG_LEVEL=INFO
 LOG_FILE=
@@ -202,6 +226,9 @@ docker compose exec bot \
 | `/top month` | Monthly Top                 |
 | `/ask question` | AI answer based on data pack |
 | `/ai question`  | Alias of `/ask` |
+| `/alerts`       | Show alert status (admin) |
+| `/mute_alerts 2h` | Mute alerts for 2 hours (admin) |
+| `/unmute_alerts` | Unmute alerts (admin) |
 | `/help`         | Show command help |
 ## 🕒 Timezone
 
@@ -223,7 +250,34 @@ History (daily records & compressed archives)
 
 Telegram update offset
 
+alerts_state (active alerts / cooldown / mute state)
+
 Upgrades and restarts will not lose data.
+
+## 🚨 Smart Alerts
+
+Node consecutive sampling failure detection is enabled by default. Traffic threshold rules only trigger after you configure a threshold, so upgrades will not suddenly spam alerts.
+
+- `ALERT_TOTAL_WINDOW_BYTES`: all-node total over the recent `ALERT_WINDOW_MINUTES` window
+- `ALERT_NODE_WINDOW_BYTES`: per-node traffic over the recent window
+- `ALERT_DAILY_TOTAL_BYTES`: all-node total for today
+- `ALERT_DAILY_NODE_BYTES`: per-node total for today
+
+Thresholds support `500MiB`, `2GiB`, `1TiB`, or raw bytes. Empty or `0` disables that rule.
+
+Admin commands:
+
+```
+/alerts
+/mute_alerts 2h
+/unmute_alerts
+```
+
+Manual check inside the container:
+
+```
+python /app/komari_traffic_report.py check_alerts --dry-run
+```
 
 ## 🔄 Upgrade
 ```
@@ -237,6 +291,8 @@ docker compose up -d
 - `/archive` -> sends a confirmation code, then execute with `/confirm_archive <code>`
 - `/bootstrap` -> blocked when historical-risk is detected; execute via `/confirm_bootstrap <code>`
 - `/rebuild_baselines` -> sends confirmation code, then execute via `/confirm_rebuild_baselines <code>`
+- `/alerts` -> show alert status
+- `/mute_alerts 2h` / `/unmute_alerts` -> temporarily mute or resume alerts
 
 > By default only `TELEGRAM_CHAT_ID` is admin. Set `TELEGRAM_ADMIN_CHAT_IDS` to override.
 

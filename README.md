@@ -33,6 +33,10 @@
   - `/today` `/week` `/month`
   - `/top [Nh|today|week|month]`
   - `/ask 你的问题（或 /ai）`
+- **智能告警**
+  - 节点连续采样失败告警与恢复通知
+  - 最近窗口 / 今日总量 / 单节点流量阈值告警
+  - 支持冷却时间、静默时段和单独告警 chat
 - **稳定性**
   - Komari 节点超时自动跳过，不影响整体报表
   - Telegram 网络异常自动重试
@@ -125,6 +129,26 @@ SAMPLE_RETENTION_HOURS=2
 HISTORY_HOT_DAYS=60
 HISTORY_RETENTION_DAYS=400
 
+# 智能告警
+ALERTS_ENABLED=1
+# 告警发送 chat（可选；留空时复用 TELEGRAM_CHAT_ID）
+TELEGRAM_ALERT_CHAT_ID=
+# 同一 active 告警的重复提醒冷却时间（秒）
+ALERT_COOLDOWN_SECONDS=1800
+# 每日静默窗口（可选），格式：23:00-07:00 或 12:00-13:00,23:00-07:00
+ALERT_SILENCE_WINDOWS=
+# 节点连续采样失败 N 次后告警
+ALERT_NODE_MISSING_SAMPLES=2
+# 窗口流量阈值统计范围
+ALERT_WINDOW_MINUTES=60
+# 流量阈值：支持纯字节或 MiB/GiB/TiB；留空或 0 表示关闭对应规则
+ALERT_TOTAL_WINDOW_BYTES=
+ALERT_NODE_WINDOW_BYTES=
+ALERT_DAILY_TOTAL_BYTES=
+ALERT_DAILY_NODE_BYTES=
+# 告警恢复后是否通知
+ALERT_RECOVERY_NOTIFY=1
+
 # 日志
 LOG_LEVEL=INFO
 LOG_FILE=
@@ -198,6 +222,9 @@ docker compose exec bot \
 | `/top month` | 本月 Top           |
 | `/ask 问题`   | AI 基于数据包分析回答 |
 | `/ai 问题`    | `/ask` 别名         |
+| `/alerts`     | 查看告警状态（管理员） |
+| `/mute_alerts 2h` | 静默告警 2 小时（管理员） |
+| `/unmute_alerts` | 解除告警静默（管理员） |
 | `/help`       | 查看命令帮助         |
 
 ## 🕒 关于时区
@@ -222,7 +249,34 @@ history（日报历史 & 压缩归档）
 
 Telegram offset
 
+alerts_state（告警 active 状态 / 冷却 / 静默）
+
 升级 / 重启容器不会丢数据。
+
+## 🚨 智能告警
+
+告警默认启用节点连续采样失败检测；流量阈值类规则只有在你配置对应阈值后才会触发，避免升级后突然刷屏。
+
+- `ALERT_TOTAL_WINDOW_BYTES`：最近 `ALERT_WINDOW_MINUTES` 分钟所有节点合计超阈值
+- `ALERT_NODE_WINDOW_BYTES`：最近窗口内单节点超阈值
+- `ALERT_DAILY_TOTAL_BYTES`：今日所有节点合计超阈值
+- `ALERT_DAILY_NODE_BYTES`：今日单节点超阈值
+
+阈值支持 `500MiB`、`2GiB`、`1TiB` 或纯数字字节；留空或 `0` 表示关闭该规则。
+
+可用命令：
+
+```
+/alerts
+/mute_alerts 2h
+/unmute_alerts
+```
+
+也可以在容器内手动检查：
+
+```
+python /app/komari_traffic_report.py check_alerts --dry-run
+```
 
 ## 🔄 升级方式
 ```
@@ -245,6 +299,8 @@ Telegram 偶发断连？
 - `/archive` → 先发确认码，再通过 `/confirm_archive <code>` 执行
 - `/bootstrap` → 有历史数据风险时会拒绝；可通过 `/confirm_bootstrap <code>` 执行
 - `/rebuild_baselines` → 先发确认码，再通过 `/confirm_rebuild_baselines <code>` 执行
+- `/alerts` → 查看告警状态
+- `/mute_alerts 2h` / `/unmute_alerts` → 临时静默或恢复告警
 
 > 默认管理员为 `TELEGRAM_CHAT_ID`。配置 `TELEGRAM_ADMIN_CHAT_IDS` 后按该列表生效。
 

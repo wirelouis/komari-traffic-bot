@@ -11,12 +11,13 @@ import time
 import traceback
 import socket
 import gzip
+import html
 import concurrent.futures
 import signal
 import secrets
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from zoneinfo import ZoneInfo
 
 import requests
@@ -24,8 +25,80 @@ import random
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 
+
+def parse_bool_value(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text == "":
+        return default
+    if text in ("1", "true", "yes", "on", "y"):
+        return True
+    if text in ("0", "false", "no", "off", "n"):
+        return False
+    raise RuntimeError(f"invalid boolean value: {value}")
+
+
+def parse_bool_env(name: str, default: bool = False) -> bool:
+    return parse_bool_value(os.environ.get(name), default=default)
+
+
+def parse_bytes_value(value, name: str = "value") -> int:
+    if value is None:
+        return 0
+    text = str(value).strip()
+    if not text:
+        return 0
+
+    m = re.fullmatch(r"(?i)(\d+(?:\.\d+)?)\s*([kmgtp]?i?b?|b)?", text)
+    if not m:
+        raise RuntimeError(f"{name} must be bytes or KiB/MiB/GiB/TiB, got: {value}")
+
+    number = float(m.group(1))
+    unit = (m.group(2) or "b").lower()
+    unit_map = {
+        "": 1,
+        "b": 1,
+        "k": 1024,
+        "kb": 1024,
+        "kib": 1024,
+        "m": 1024 ** 2,
+        "mb": 1024 ** 2,
+        "mib": 1024 ** 2,
+        "g": 1024 ** 3,
+        "gb": 1024 ** 3,
+        "gib": 1024 ** 3,
+        "t": 1024 ** 4,
+        "tb": 1024 ** 4,
+        "tib": 1024 ** 4,
+        "p": 1024 ** 5,
+        "pb": 1024 ** 5,
+        "pib": 1024 ** 5,
+    }
+    if unit not in unit_map:
+        raise RuntimeError(f"{name} has unsupported unit: {value}")
+    return max(0, int(number * unit_map[unit]))
+
+
+def parse_bytes_env(name: str) -> int:
+    return parse_bytes_value(os.environ.get(name, ""), name=name)
+
+
 STAT_TZ = os.environ.get("STAT_TZ", "Asia/Shanghai")
-TZ = ZoneInfo(STAT_TZ)  # 统计时区
+
+
+def load_stat_timezone(name: str):
+    try:
+        return ZoneInfo(name)
+    except Exception:
+        if name in ("Asia/Shanghai", "Asia/Chongqing", "Asia/Harbin"):
+            return timezone(timedelta(hours=8), name)
+        if name.upper() in ("UTC", "Etc/UTC"):
+            return timezone.utc
+        raise
+
+
+TZ = load_stat_timezone(STAT_TZ)  # 统计时区
 
 KOMARI_BASE_URL = os.environ.get("KOMARI_BASE_URL", "").rstrip("/")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -56,6 +129,7 @@ SAMPLES_PATH = os.path.join(DATA_DIR, "samples.json")
 TG_OFFSET_PATH = os.path.join(DATA_DIR, "tg_offset.txt")
 TG_CONFIRM_PATH = os.path.join(DATA_DIR, "tg_confirm.json")
 AI_PACK_CACHE_PATH = os.path.join(DATA_DIR, "ai_pack_cache.json")
+ALERTS_STATE_PATH = os.path.join(DATA_DIR, "alerts_state.json")
 
 TIMEOUT = int(os.environ.get("KOMARI_TIMEOUT_SECONDS", "15"))  # Komari API timeout（秒）
 
@@ -63,8 +137,20 @@ LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 LOG_FILE = os.environ.get("LOG_FILE", "").strip()
 
 BOT_INSTANCE_NAME = os.environ.get("BOT_INSTANCE_NAME", "").strip()
-BOT_START_NOTIFY = os.environ.get("BOT_START_NOTIFY", "1").strip().lower() not in ("0", "false", "no", "off")
+BOT_START_NOTIFY = parse_bool_env("BOT_START_NOTIFY", True)
 AI_PACK_CACHE_TTL_SECONDS = max(0, int(os.environ.get("AI_PACK_CACHE_TTL_SECONDS", "3600")))
+
+ALERTS_ENABLED = parse_bool_env("ALERTS_ENABLED", True)
+TELEGRAM_ALERT_CHAT_ID = os.environ.get("TELEGRAM_ALERT_CHAT_ID", "").strip()
+ALERT_COOLDOWN_SECONDS = int(os.environ.get("ALERT_COOLDOWN_SECONDS", "1800"))
+ALERT_SILENCE_WINDOWS = os.environ.get("ALERT_SILENCE_WINDOWS", "").strip()
+ALERT_NODE_MISSING_SAMPLES = int(os.environ.get("ALERT_NODE_MISSING_SAMPLES", "2"))
+ALERT_WINDOW_MINUTES = int(os.environ.get("ALERT_WINDOW_MINUTES", "60"))
+ALERT_TOTAL_WINDOW_BYTES = parse_bytes_env("ALERT_TOTAL_WINDOW_BYTES")
+ALERT_NODE_WINDOW_BYTES = parse_bytes_env("ALERT_NODE_WINDOW_BYTES")
+ALERT_DAILY_TOTAL_BYTES = parse_bytes_env("ALERT_DAILY_TOTAL_BYTES")
+ALERT_DAILY_NODE_BYTES = parse_bytes_env("ALERT_DAILY_NODE_BYTES")
+ALERT_RECOVERY_NOTIFY = parse_bool_env("ALERT_RECOVERY_NOTIFY", True)
 
 SHUTTING_DOWN = False
 SAMPLE_THREAD: threading.Thread | None = None
@@ -120,6 +206,11 @@ def _require_positive_int(name: str, value: int):
         raise RuntimeError(f"{name} must be > 0")
 
 
+def _require_non_negative_int(name: str, value: int):
+    if value < 0:
+        raise RuntimeError(f"{name} must be >= 0")
+
+
 def validate_config_or_raise():
     required = {
         "KOMARI_BASE_URL": KOMARI_BASE_URL,
@@ -135,6 +226,19 @@ def validate_config_or_raise():
     _require_positive_int("TOP_N", TOP_N)
     _require_positive_int("SAMPLE_INTERVAL_SECONDS", SAMPLE_INTERVAL_SECONDS)
     _require_positive_int("SAMPLE_RETENTION_HOURS", SAMPLE_RETENTION_HOURS)
+    _require_non_negative_int("ALERT_COOLDOWN_SECONDS", ALERT_COOLDOWN_SECONDS)
+    _require_positive_int("ALERT_NODE_MISSING_SAMPLES", ALERT_NODE_MISSING_SAMPLES)
+    _require_positive_int("ALERT_WINDOW_MINUTES", ALERT_WINDOW_MINUTES)
+    for name, value in (
+        ("ALERT_TOTAL_WINDOW_BYTES", ALERT_TOTAL_WINDOW_BYTES),
+        ("ALERT_NODE_WINDOW_BYTES", ALERT_NODE_WINDOW_BYTES),
+        ("ALERT_DAILY_TOTAL_BYTES", ALERT_DAILY_TOTAL_BYTES),
+        ("ALERT_DAILY_NODE_BYTES", ALERT_DAILY_NODE_BYTES),
+    ):
+        _require_non_negative_int(name, value)
+    if TELEGRAM_ALERT_CHAT_ID and any(ch.isspace() for ch in TELEGRAM_ALERT_CHAT_ID):
+        raise RuntimeError("TELEGRAM_ALERT_CHAT_ID must be a single chat id without whitespace")
+    parse_silence_windows(ALERT_SILENCE_WINDOWS)
 
 
 def run_healthcheck_or_raise():
@@ -148,7 +252,7 @@ def run_healthcheck_or_raise():
     except Exception as e:
         raise RuntimeError(f"DATA_DIR not writable: {DATA_DIR}: {e}")
 
-    for p in [BASELINES_PATH, HISTORY_PATH, SAMPLES_PATH, TG_OFFSET_PATH, TG_CONFIRM_PATH]:
+    for p in [BASELINES_PATH, HISTORY_PATH, SAMPLES_PATH, TG_OFFSET_PATH, TG_CONFIRM_PATH, ALERTS_STATE_PATH]:
         if os.path.exists(p):
             try:
                 if p == TG_OFFSET_PATH:
@@ -258,29 +362,36 @@ def post_json(url: str, payload: dict):
     return r.json()
 
 
-def telegram_send(text: str):
+def telegram_send_to_chat(text: str, chat_id: str, parse_mode: str | None = "HTML"):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         raise RuntimeError("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 未设置")
+    if not str(chat_id).strip():
+        raise RuntimeError("chat_id 未设置")
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
+        "chat_id": str(chat_id).strip(),
         "text": text,
-        "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     return post_json(url, payload)
+
+
+def telegram_send(text: str):
+    return telegram_send_to_chat(text, TELEGRAM_CHAT_ID, parse_mode="HTML")
 
 
 def telegram_send_plain(text: str):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 未设置")
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": text,
-        "disable_web_page_preview": True,
-    }
-    return post_json(url, payload)
+    return telegram_send_to_chat(text, TELEGRAM_CHAT_ID, parse_mode=None)
+
+
+def telegram_alert_chat_id() -> str:
+    return TELEGRAM_ALERT_CHAT_ID or TELEGRAM_CHAT_ID
+
+
+def telegram_send_alert(text: str):
+    return telegram_send_to_chat(text, telegram_alert_chat_id(), parse_mode="HTML")
 
 
 def safe_telegram_send(text: str):
@@ -1738,6 +1849,7 @@ def sample_worker_loop():
     while not SAMPLE_STOP_EVENT.is_set():
         try:
             take_sample_if_due(force=False)
+            run_alert_check(dry_run=False, notify=True, force_sample=False)
         except Exception:
             logging.exception("sample worker error")
         SAMPLE_STOP_EVENT.wait(timeout=max(1, SAMPLE_INTERVAL_SECONDS))
@@ -1776,6 +1888,437 @@ def get_sample_at_or_before(target_ts: int):
         else:
             hi = mid - 1
     return best
+
+
+# -------------------- 智能告警 --------------------
+
+def parse_silence_windows(value: str) -> list[tuple[int, int]]:
+    """
+    解析静默窗口，格式：HH:MM-HH:MM,23:00-07:00。
+    返回当天分钟数区间，支持跨午夜。
+    """
+    text = (value or "").strip()
+    if not text:
+        return []
+
+    windows = []
+    for part in re.split(r"[,;]\s*", text):
+        if not part:
+            continue
+        m = re.fullmatch(r"(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})", part.strip())
+        if not m:
+            raise RuntimeError(f"ALERT_SILENCE_WINDOWS invalid segment: {part}")
+        sh, sm, eh, em = [int(x) for x in m.groups()]
+        if not (0 <= sh <= 23 and 0 <= eh <= 23 and 0 <= sm <= 59 and 0 <= em <= 59):
+            raise RuntimeError(f"ALERT_SILENCE_WINDOWS time out of range: {part}")
+        start = sh * 60 + sm
+        end = eh * 60 + em
+        if start == end:
+            raise RuntimeError(f"ALERT_SILENCE_WINDOWS empty segment: {part}")
+        windows.append((start, end))
+    return windows
+
+
+def is_in_silence_window(now: datetime | None = None, windows_text: str | None = None) -> bool:
+    windows = parse_silence_windows(ALERT_SILENCE_WINDOWS if windows_text is None else windows_text)
+    if not windows:
+        return False
+    now = now or now_dt()
+    minute = now.hour * 60 + now.minute
+    for start, end in windows:
+        if start < end and start <= minute < end:
+            return True
+        if start > end and (minute >= start or minute < end):
+            return True
+    return False
+
+
+def load_alerts_state() -> dict:
+    data = load_json(ALERTS_STATE_PATH, {})
+    if not isinstance(data, dict):
+        data = {}
+    data.setdefault("version", 1)
+    data.setdefault("active", {})
+    data.setdefault("node_skips", {})
+    data.setdefault("muted_until", 0)
+    return data
+
+
+def save_alerts_state(data: dict):
+    save_json_atomic(ALERTS_STATE_PATH, data)
+
+
+def alerts_muted_until_dt(state: dict) -> datetime | None:
+    muted_until = int(state.get("muted_until", 0) or 0)
+    if muted_until <= int(time.time()):
+        return None
+    return datetime.fromtimestamp(muted_until, TZ)
+
+
+def set_alerts_muted_for(hours: int) -> datetime:
+    if hours <= 0:
+        raise RuntimeError("mute hours must be > 0")
+    ensure_dirs()
+    state = load_alerts_state()
+    muted_until = int(time.time()) + hours * 3600
+    state["muted_until"] = muted_until
+    save_alerts_state(state)
+    return datetime.fromtimestamp(muted_until, TZ)
+
+
+def clear_alerts_muted():
+    ensure_dirs()
+    state = load_alerts_state()
+    state["muted_until"] = 0
+    save_alerts_state(state)
+
+
+def parse_mute_hours_arg(value: str) -> int:
+    text = (value or "").strip().lower()
+    m = re.fullmatch(r"(\d+)\s*h?", text)
+    if not m:
+        raise RuntimeError("用法：/mute_alerts 2h")
+    hours = int(m.group(1))
+    if hours <= 0:
+        raise RuntimeError("用法：/mute_alerts 2h（N>0）")
+    return hours
+
+
+def _alert_escape(value) -> str:
+    return html.escape(str(value), quote=False)
+
+
+def _alert_event(key: str, alert_type: str, title: str, body: str) -> dict:
+    return {
+        "key": key,
+        "type": alert_type,
+        "title": title,
+        "body": body,
+    }
+
+
+def _skip_name(skip: str) -> str:
+    text = str(skip or "").strip()
+    if not text:
+        return "unknown"
+    return re.sub(r"\([^)]*\)$", "", text).strip() or text
+
+
+def _sum_deltas(deltas: dict) -> tuple[int, int, int]:
+    total_up = 0
+    total_down = 0
+    for item in deltas.values():
+        total_up += int(item.get("up", 0))
+        total_down += int(item.get("down", 0))
+    total = total_up + total_down
+    return total_up, total_down, total
+
+
+def collect_alert_candidates(state: dict, now_ts: int | None = None) -> list[dict]:
+    """
+    生成当前应该处于 active 状态的告警候选，并更新连续节点失败计数。
+    """
+    now_ts = now_ts or int(time.time())
+    candidates: list[dict] = []
+
+    samples_data = load_samples()
+    samples = samples_data.get("samples", []) if isinstance(samples_data, dict) else []
+    latest = samples[-1] if samples else None
+
+    if latest:
+        latest_ts = int(latest.get("ts", now_ts) or now_ts)
+        skipped = [str(x) for x in (latest.get("skipped", []) or [])]
+        skipped_names = {_skip_name(x): x for x in skipped}
+        node_skips = state.setdefault("node_skips", {})
+
+        for name, raw in skipped_names.items():
+            rec = node_skips.get(name, {})
+            if int(rec.get("last_sample_ts", 0) or 0) == latest_ts:
+                count = int(rec.get("count", 0))
+            else:
+                count = int(rec.get("count", 0)) + 1
+            node_skips[name] = {
+                "count": count,
+                "last_seen": now_ts,
+                "last_sample_ts": latest_ts,
+                "last_reason": raw,
+            }
+            if count >= ALERT_NODE_MISSING_SAMPLES:
+                candidates.append(_alert_event(
+                    f"node_missing:{name}",
+                    "node_missing",
+                    f"节点连续采样异常：{name}",
+                    (
+                        f"节点 <b>{_alert_escape(name)}</b> 已连续 "
+                        f"<b>{count}</b> 次采样失败。\n"
+                        f"最近原因：<code>{_alert_escape(raw)}</code>"
+                    ),
+                ))
+
+        for name in list(node_skips.keys()):
+            if name not in skipped_names:
+                node_skips[name]["count"] = 0
+
+        window_threshold_enabled = ALERT_TOTAL_WINDOW_BYTES > 0 or ALERT_NODE_WINDOW_BYTES > 0
+        if window_threshold_enabled and len(samples) >= 2:
+            target_ts = int(latest.get("ts", now_ts)) - ALERT_WINDOW_MINUTES * 60
+            base = get_sample_at_or_before(target_ts)
+            if base is not None and base is not latest:
+                deltas, reset_warnings = compute_strict_sample_delta_from_maps(
+                    latest.get("nodes", {}),
+                    base.get("nodes", {}),
+                )
+                total_up, total_down, total = _sum_deltas(deltas)
+                from_dt = datetime.fromtimestamp(int(base.get("ts", target_ts)), TZ)
+                to_dt = datetime.fromtimestamp(int(latest.get("ts", now_ts)), TZ)
+                label = f"{from_dt.strftime('%Y-%m-%d %H:%M')} -> {to_dt.strftime('%Y-%m-%d %H:%M')}"
+
+                if ALERT_TOTAL_WINDOW_BYTES > 0 and total >= ALERT_TOTAL_WINDOW_BYTES:
+                    body = (
+                        f"窗口：<code>{_alert_escape(label)}</code>\n"
+                        f"合计：<b>{human_bytes(total)}</b>"
+                        f"（下行 {human_bytes(total_down)} / 上行 {human_bytes(total_up)}）\n"
+                        f"阈值：<b>{human_bytes(ALERT_TOTAL_WINDOW_BYTES)}</b>"
+                    )
+                    if reset_warnings:
+                        body += f"\n计数器重置/缺样节点：{_alert_escape('、'.join(reset_warnings[:10]))}"
+                    candidates.append(_alert_event("window_total", "window_total", "窗口总流量超阈值", body))
+
+                if ALERT_NODE_WINDOW_BYTES > 0:
+                    for uuid, item in deltas.items():
+                        up = int(item.get("up", 0))
+                        down = int(item.get("down", 0))
+                        total_node = up + down
+                        if total_node < ALERT_NODE_WINDOW_BYTES:
+                            continue
+                        name = item.get("name") or uuid
+                        body = (
+                            f"节点：<b>{_alert_escape(name)}</b>\n"
+                            f"窗口：<code>{_alert_escape(label)}</code>\n"
+                            f"合计：<b>{human_bytes(total_node)}</b>"
+                            f"（下行 {human_bytes(down)} / 上行 {human_bytes(up)}）\n"
+                            f"阈值：<b>{human_bytes(ALERT_NODE_WINDOW_BYTES)}</b>"
+                        )
+                        candidates.append(_alert_event(
+                            f"window_node:{uuid}",
+                            "window_node",
+                            f"节点窗口流量超阈值：{name}",
+                            body,
+                        ))
+
+    if ALERT_DAILY_TOTAL_BYTES > 0 or ALERT_DAILY_NODE_BYTES > 0:
+        today = build_today_delta_struct()
+        if isinstance(today, dict) and today.get("note") == "baseline_ok":
+            nodes = today.get("nodes", []) or []
+            total_up = sum(int(n.get("up", 0)) for n in nodes)
+            total_down = sum(int(n.get("down", 0)) for n in nodes)
+            total = total_up + total_down
+            if ALERT_DAILY_TOTAL_BYTES > 0 and total >= ALERT_DAILY_TOTAL_BYTES:
+                candidates.append(_alert_event(
+                    "daily_total",
+                    "daily_total",
+                    "今日总流量超阈值",
+                    (
+                        f"日期：<code>{_alert_escape(today.get('date', 'today'))}</code>\n"
+                        f"合计：<b>{human_bytes(total)}</b>"
+                        f"（下行 {human_bytes(total_down)} / 上行 {human_bytes(total_up)}）\n"
+                        f"阈值：<b>{human_bytes(ALERT_DAILY_TOTAL_BYTES)}</b>"
+                    ),
+                ))
+
+            if ALERT_DAILY_NODE_BYTES > 0:
+                for item in nodes:
+                    total_node = int(item.get("total", 0))
+                    if total_node < ALERT_DAILY_NODE_BYTES:
+                        continue
+                    name = item.get("name") or item.get("uuid") or "unknown"
+                    candidates.append(_alert_event(
+                        f"daily_node:{item.get('uuid', name)}",
+                        "daily_node",
+                        f"节点今日流量超阈值：{name}",
+                        (
+                            f"节点：<b>{_alert_escape(name)}</b>\n"
+                            f"今日合计：<b>{human_bytes(total_node)}</b>"
+                            f"（下行 {human_bytes(int(item.get('down', 0)))} / "
+                            f"上行 {human_bytes(int(item.get('up', 0)))})\n"
+                            f"阈值：<b>{human_bytes(ALERT_DAILY_NODE_BYTES)}</b>"
+                        ),
+                    ))
+
+    return candidates
+
+
+def format_alert_message(event: dict, now_ts: int, repeated: bool = False) -> str:
+    ts = datetime.fromtimestamp(now_ts, TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
+    prefix = "⚠️ <b>Komari 告警</b>"
+    if repeated:
+        prefix = "⚠️ <b>Komari 告警仍在持续</b>"
+    return (
+        f"{prefix}\n"
+        f"🕒 {ts}\n"
+        f"📌 <b>{_alert_escape(event.get('title', '告警'))}</b>\n"
+        f"{event.get('body', '')}"
+    )
+
+
+def format_recovery_message(record: dict, now_ts: int) -> str:
+    ts = datetime.fromtimestamp(now_ts, TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
+    title = record.get("title", "告警")
+    return (
+        "✅ <b>Komari 告警恢复</b>\n"
+        f"🕒 {ts}\n"
+        f"📌 <b>{_alert_escape(title)}</b>\n"
+        "当前规则已不再触发。"
+    )
+
+
+def apply_alert_candidates(state: dict, candidates: list[dict], now_ts: int, dry_run: bool = False) -> list[dict]:
+    active = state.setdefault("active", {})
+    candidate_keys = {c["key"] for c in candidates}
+    muted_until = int(state.get("muted_until", 0) or 0)
+    muted = muted_until > now_ts or is_in_silence_window(datetime.fromtimestamp(now_ts, TZ))
+    events: list[dict] = []
+
+    for candidate in candidates:
+        key = candidate["key"]
+        rec = active.get(key)
+        is_new = rec is None
+        if rec is None:
+            rec = {
+                "type": candidate.get("type"),
+                "title": candidate.get("title"),
+                "body": candidate.get("body"),
+                "first_seen": now_ts,
+                "last_seen": now_ts,
+                "last_sent": 0,
+            }
+            active[key] = rec
+        else:
+            rec["title"] = candidate.get("title")
+            rec["body"] = candidate.get("body")
+            rec["last_seen"] = now_ts
+
+        last_sent = int(rec.get("last_sent", 0) or 0)
+        due = last_sent == 0 or (now_ts - last_sent >= ALERT_COOLDOWN_SECONDS)
+        if due:
+            repeated = (not is_new) and last_sent > 0
+            events.append({
+                "kind": "alert",
+                "key": key,
+                "title": rec.get("title", key),
+                "message": format_alert_message(candidate, now_ts, repeated=repeated),
+                "suppressed": muted,
+                "reason": "muted" if muted else "",
+            })
+            if not dry_run and not muted:
+                rec["last_sent"] = now_ts
+
+    for key, rec in list(active.items()):
+        if key in candidate_keys:
+            continue
+        if ALERT_RECOVERY_NOTIFY:
+            events.append({
+                "kind": "recovery",
+                "key": key,
+                "title": rec.get("title", key),
+                "message": format_recovery_message(rec, now_ts),
+                "suppressed": muted,
+                "reason": "muted" if muted else "",
+            })
+        if not dry_run:
+            del active[key]
+
+    return events
+
+
+def run_alert_check(dry_run: bool = False, notify: bool = True, force_sample: bool = False) -> dict:
+    ensure_dirs()
+    now_ts = int(time.time())
+    if not ALERTS_ENABLED:
+        return {"enabled": False, "events": [], "active_count": 0}
+
+    if force_sample:
+        take_sample_if_due(force=True)
+
+    state = load_alerts_state()
+    work_state = json.loads(json.dumps(state)) if dry_run else state
+    candidates = collect_alert_candidates(work_state, now_ts=now_ts)
+    events = apply_alert_candidates(work_state, candidates, now_ts=now_ts, dry_run=dry_run)
+
+    if not dry_run:
+        save_alerts_state(work_state)
+        if notify:
+            for event in events:
+                if event.get("suppressed"):
+                    continue
+                try:
+                    telegram_send_alert(event["message"])
+                except requests.exceptions.HTTPError as e:
+                    if e.response is not None and e.response.status_code == 400:
+                        telegram_send_to_chat(re.sub(r"</?[^>]+>", "", event["message"]), telegram_alert_chat_id(), parse_mode=None)
+                    else:
+                        raise
+
+    return {
+        "enabled": True,
+        "events": events,
+        "active_count": len(work_state.get("active", {})),
+        "muted_until": int(work_state.get("muted_until", 0) or 0),
+        "dry_run": dry_run,
+    }
+
+
+def format_alert_check_result(result: dict) -> str:
+    if not result.get("enabled", True):
+        return "alerts disabled"
+    events = result.get("events", []) or []
+    lines = [
+        f"alerts active={int(result.get('active_count', 0))}",
+        f"events={len(events)}",
+    ]
+    for event in events:
+        suffix = " suppressed" if event.get("suppressed") else ""
+        lines.append(f"- {event.get('kind')} {event.get('key')}: {event.get('title')}{suffix}")
+    return "\n".join(lines)
+
+
+def format_alert_status() -> str:
+    state = load_alerts_state()
+    active = state.get("active", {}) or {}
+    muted_until = alerts_muted_until_dt(state)
+
+    lines = ["🚨 <b>告警状态</b>"]
+    lines.append(f"启用：{'是' if ALERTS_ENABLED else '否'}")
+    lines.append(f"告警 chat：<code>{_alert_escape(telegram_alert_chat_id())}</code>")
+    if muted_until:
+        lines.append(f"静默至：<code>{muted_until.strftime('%Y-%m-%d %H:%M:%S %Z')}</code>")
+    elif is_in_silence_window():
+        lines.append("当前处于静默时段")
+    else:
+        lines.append("静默：否")
+
+    thresholds = [
+        ("窗口总流量", ALERT_TOTAL_WINDOW_BYTES),
+        ("节点窗口流量", ALERT_NODE_WINDOW_BYTES),
+        ("今日总流量", ALERT_DAILY_TOTAL_BYTES),
+        ("节点今日流量", ALERT_DAILY_NODE_BYTES),
+    ]
+    enabled_thresholds = [f"{name} {human_bytes(value)}" for name, value in thresholds if value > 0]
+    lines.append(f"窗口：{ALERT_WINDOW_MINUTES} 分钟，冷却：{ALERT_COOLDOWN_SECONDS} 秒")
+    lines.append("阈值：" + ("；".join(enabled_thresholds) if enabled_thresholds else "未配置流量阈值"))
+
+    if not active:
+        lines.append("")
+        lines.append("当前无 active 告警。")
+        return "\n".join(lines)
+
+    lines.append("")
+    lines.append(f"Active 告警：{len(active)}")
+    now_ts = int(time.time())
+    for rec in active.values():
+        last_seen = datetime.fromtimestamp(int(rec.get("last_seen", now_ts)), TZ).strftime("%m-%d %H:%M")
+        lines.append(f"- <b>{_alert_escape(rec.get('title', '告警'))}</b>（last seen {last_seen}）")
+    return "\n".join(lines)
 
 
 # -------------------- 报表任务 --------------------
@@ -2079,6 +2622,7 @@ def listen_commands():
     # 启动先采一次样
     try:
         take_sample_if_due(force=True)
+        run_alert_check(dry_run=False, notify=True, force_sample=False)
     except Exception:
         pass
     start_sample_worker()
@@ -2193,6 +2737,31 @@ def listen_commands():
                         f"如需继续，请发送：/confirm_rebuild_baselines {code}"
                     )
 
+                elif cmd == "/alerts":
+                    if not is_admin(chat_id):
+                        telegram_send("⛔ 无权限")
+                        continue
+                    telegram_send(format_alert_status())
+
+                elif cmd == "/mute_alerts":
+                    if not is_admin(chat_id):
+                        telegram_send("⛔ 无权限")
+                        continue
+                    try:
+                        hours = parse_mute_hours_arg(arg_text)
+                    except Exception as e:
+                        telegram_send(str(e))
+                        continue
+                    muted_until = set_alerts_muted_for(hours)
+                    telegram_send(f"✅ 已静默告警至：<code>{muted_until.strftime('%Y-%m-%d %H:%M:%S %Z')}</code>")
+
+                elif cmd == "/unmute_alerts":
+                    if not is_admin(chat_id):
+                        telegram_send("⛔ 无权限")
+                        continue
+                    clear_alerts_muted()
+                    telegram_send("✅ 已解除告警静默")
+
                 elif cmd == "/confirm_archive":
                     if not is_admin(chat_id):
                         telegram_send("⛔ 无权限")
@@ -2271,7 +2840,8 @@ def listen_commands():
                         "/top today|week|month\n"
                         "/top 6h（任意Nh）\n"
                         "/ask 你的问题（或 /ai）\n"
-                        "管理员：/archive /bootstrap /rebuild_baselines\n"
+                        "管理员：/alerts /mute_alerts 2h /unmute_alerts\n"
+                        "/archive /bootstrap /rebuild_baselines\n"
                         "确认命令：/confirm_archive /confirm_bootstrap /confirm_rebuild_baselines"
                     )
 
@@ -2288,7 +2858,7 @@ def listen_commands():
 
 def main():
     if len(sys.argv) < 2:
-        raise RuntimeError("Usage: report_daily | report_weekly | report_monthly | listen | bootstrap [--force] | rebuild-baselines [--dry-run] [--since YYYY-MM-DD] | health | config-validate")
+        raise RuntimeError("Usage: report_daily | report_weekly | report_monthly | listen | bootstrap [--force] | rebuild-baselines [--dry-run] [--since YYYY-MM-DD] | check_alerts [--dry-run] | health | config-validate")
 
     cmd = sys.argv[1].strip().lower()
 
@@ -2343,6 +2913,17 @@ def main():
             f"OK {mode} rebuilt baselines from daily snapshots (>= {since_text}): "
             f"days={daily_count}, week={week_count}, month={month_count}"
         )
+        return 0
+    if cmd in ("check_alerts", "check-alerts"):
+        dry_run = False
+        for arg in sys.argv[2:]:
+            if arg.strip().lower() == "--dry-run":
+                dry_run = True
+                continue
+            raise RuntimeError(f"Unknown check_alerts arg: {arg}")
+        validate_config_or_raise()
+        result = run_alert_check(dry_run=dry_run, notify=not dry_run, force_sample=True)
+        print(format_alert_check_result(result))
         return 0
     if cmd == "config-validate":
         validate_config_or_raise()
