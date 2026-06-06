@@ -10,6 +10,7 @@ A **Dockerized traffic statistics extension** for **Komari Probe**, providing:
 - 📊 Daily / Weekly / Monthly traffic reports via Telegram
 - 🔥 Top N traffic consumers (supports `/top 6h`, `/top week`, etc.)
 - 🤖 Interactive Telegram Bot commands
+- 🧭 Web traffic analysis console
 - 🐳 Docker / docker-compose deployment
 - 🕒 Fixed statistics timezone (Asia/Shanghai by default)
 - 🧱 Designed for multi-node and long-running environments
@@ -34,6 +35,10 @@ A **Dockerized traffic statistics extension** for **Komari Probe**, providing:
   - `/today`, `/week`, `/month`
   - `/top [Nh|today|week|month]`
   - `/ask your question (or /ai)`
+- **Web Console**
+  - Overview for today / week / month traffic and node Top lists
+  - Alert status, manual checks, mute/unmute controls
+  - Telegram test/report sending and AI data Q&A
 - **Smart Alerts**
   - Consecutive node sampling failures and recovery notifications
   - Recent-window, daily total, and per-node traffic thresholds
@@ -108,6 +113,13 @@ AI_MODEL=
 
 # AI data-pack cache TTL in seconds (default 3600; set 0 to disable)
 AI_PACK_CACHE_TTL_SECONDS=3600
+
+# Web console (WEB_PASSWORD is required)
+WEB_USERNAME=admin
+WEB_PASSWORD=
+# Empty means a temporary session secret is generated on each start
+WEB_SESSION_SECRET=
+WEB_PORT=8080
 
 # Startup notification (optional)
 # Set to 0 to disable startup message
@@ -204,16 +216,42 @@ services:
       - ./crontab:/app/crontab:ro
     restart: unless-stopped
     command: ["supercronic", "/app/crontab"]
+
+  web:
+    image: ghcr.io/wirelouis/komari-traffic-bot:latest
+    env_file: .env
+    environment:
+      - TZ=Asia/Shanghai
+      - STAT_TZ=Asia/Shanghai
+    volumes:
+      - ./data:/data
+    ports:
+      - "${WEB_PORT:-8080}:8080"
+    restart: unless-stopped
+    command: ["uvicorn", "web_app:app", "--host", "0.0.0.0", "--port", "8080"]
 ```
 Start services:
 ```
 docker compose up -d
 ```
+Web console: `http://localhost:8080`
+
 ### 5️⃣ Initialize baseline (run once)
 ```
 docker compose exec bot \
   python /app/komari_traffic_report.py bootstrap
 ```
+## 🧭 Web Console
+
+The Web console is a lightweight dashboard for traffic overview, node analysis, alert controls, Telegram sending, and AI Q&A.
+
+- Username: `WEB_USERNAME` (default `admin`)
+- Password: `WEB_PASSWORD` (required)
+- Port: `WEB_PORT` (default `8080`)
+- Session secret: `WEB_SESSION_SECRET`; empty values generate a temporary secret, so sessions expire after container restart
+
+The console never returns Telegram tokens, Komari tokens, AI keys, or the Web password to the browser.
+
 ## 🤖 Telegram Command Examples
 | Command      | Description                 |
 | ------------ | --------------------------- |

@@ -10,6 +10,7 @@
 - 📊 Telegram **流量日报 / 周报 / 月报**
 - 🔥 **Top N 流量消耗榜**（支持 `/top 6h`、`/top week` 等任意时间窗口）
 - 🤖 Telegram Bot **交互式查询**
+- 🧭 **Web 流量分析面板**
 - 🐳 **Docker / docker-compose 部署**
 - 🕒 统计口径固定为 **北京时间（Asia/Shanghai）**
 - 🧱 适合多节点、长期运行场景
@@ -33,6 +34,10 @@
   - `/today` `/week` `/month`
   - `/top [Nh|today|week|month]`
   - `/ask 你的问题（或 /ai）`
+- **Web 面板**
+  - 总览今日 / 本周 / 本月流量与节点 Top
+  - 查看告警状态，手动检查、静默或恢复告警
+  - 测试 Telegram 推送，手动发送报表，并使用 AI 问答
 - **智能告警**
   - 节点连续采样失败告警与恢复通知
   - 最近窗口 / 今日总量 / 单节点流量阈值告警
@@ -103,6 +108,13 @@ AI_MODEL=
 
 # AI 数据包缓存时长（秒），默认 3600；设为 0 关闭缓存
 AI_PACK_CACHE_TTL_SECONDS=3600
+
+# Web 面板（WEB_PASSWORD 必填）
+WEB_USERNAME=admin
+WEB_PASSWORD=
+# 留空时每次启动生成临时会话密钥；公网部署建议固定填写随机长字符串
+WEB_SESSION_SECRET=
+WEB_PORT=8080
 
 # 启动通知（可选）
 # 设为 0 可关闭启动消息
@@ -199,17 +211,43 @@ services:
       - ./crontab:/app/crontab:ro
     restart: unless-stopped
     command: ["supercronic", "/app/crontab"]
+
+  web:
+    image: ghcr.io/wirelouis/komari-traffic-bot:latest
+    env_file: .env
+    environment:
+      - TZ=Asia/Shanghai
+      - STAT_TZ=Asia/Shanghai
+    volumes:
+      - ./data:/data
+    ports:
+      - "${WEB_PORT:-8080}:8080"
+    restart: unless-stopped
+    command: ["uvicorn", "web_app:app", "--host", "0.0.0.0", "--port", "8080"]
 ```
 启动：
 ```
 docker compose up -d
 docker compose ps
 ```
-### 5️⃣ 初始化（只需一次
-```）
+Web 面板默认访问：`http://localhost:8080`
+
+### 5️⃣ 初始化（只需一次）
+```
 docker compose exec bot \
   python /app/komari_traffic_report.py bootstrap
 ```
+## 🧭 Web 面板
+
+Web 面板提供轻量控制台，用于查看总览、节点流量、告警状态、Telegram 推送和 AI 问答。
+
+- 登录账号：`WEB_USERNAME`（默认 `admin`）
+- 登录密码：`WEB_PASSWORD`（必须设置）
+- 端口：`WEB_PORT`（默认 `8080`）
+- 会话密钥：`WEB_SESSION_SECRET`；留空时生成临时密钥，容器重启后登录态会失效
+
+面板不会向前端返回 Telegram Token、Komari Token、AI Key 或 Web 密码。
+
 ## 🤖 Telegram 命令示例
 | 命令           | 说明               |
 | ------------ | ---------------- |

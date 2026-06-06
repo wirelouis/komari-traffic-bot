@@ -1601,7 +1601,7 @@ def format_report(title: str, period_label: str, deltas: dict, reset_warnings: l
     return "\n".join(lines)
 
 
-def send_top_only(period_label: str, deltas: dict, reset_warnings: list[str], skipped: list[str] | None = None):
+def format_top_only_message(period_label: str, deltas: dict, reset_warnings: list[str], skipped: list[str] | None = None) -> str:
     skipped = skipped or []
     lines = [f"🔥 <b>Top {TOP_N} 消耗榜</b>（上下行合计）", f"⏱ {period_label}", ""]
     lines.extend(top_lines(deltas, n=TOP_N))
@@ -1616,7 +1616,11 @@ def send_top_only(period_label: str, deltas: dict, reset_warnings: list[str], sk
         lines.append("⚠️ <b>检测到计数器可能重置</b>（已兜底）：")
         lines.append("、".join(reset_warnings))
 
-    telegram_send("\n".join(lines))
+    return "\n".join(lines)
+
+
+def send_top_only(period_label: str, deltas: dict, reset_warnings: list[str], skipped: list[str] | None = None):
+    telegram_send(format_top_only_message(period_label, deltas, reset_warnings, skipped=skipped))
 
 
 # -------------------- 历史数据：热存储 + 冷归档（gzip） --------------------
@@ -2377,26 +2381,28 @@ def run_monthly_send_last_month():
     telegram_send(format_report("上月流量月报", label, summed, [], skipped=[], include_top=True))
 
 
-def run_period_report(from_dt: datetime, to_dt: datetime, tag: str, top_only: bool = False):
+def build_period_report_message(from_dt: datetime, to_dt: datetime, tag: str, top_only: bool = False) -> str:
     ensure_dirs()
     baseline_nodes = get_baseline_nodes(tag)
     if baseline_nodes is None:
         set_baseline_to_current(tag)
-        telegram_send(
+        return (
             f"⚠️ 当前没有找到 起点快照（{tag}）。\n"
             f"我已把现在的累计值保存为新的起点。\n"
             f"请稍后再发一次命令查看稳定统计。"
         )
-        return
 
     current, skipped = fetch_nodes_and_totals()
     deltas, _new_base, reset_warnings = compute_delta_from_nodes(current, baseline_nodes)
     period_label = f"{from_dt.strftime('%Y-%m-%d %H:%M')} → {to_dt.strftime('%Y-%m-%d %H:%M')}"
 
     if top_only:
-        send_top_only(period_label, deltas, reset_warnings, skipped=skipped)
-    else:
-        telegram_send(format_report("流量统计", period_label, deltas, reset_warnings, skipped=skipped, include_top=True))
+        return format_top_only_message(period_label, deltas, reset_warnings, skipped=skipped)
+    return format_report("流量统计", period_label, deltas, reset_warnings, skipped=skipped, include_top=True)
+
+
+def run_period_report(from_dt: datetime, to_dt: datetime, tag: str, top_only: bool = False):
+    telegram_send(build_period_report_message(from_dt, to_dt, tag, top_only=top_only))
 
 
 def run_top_last_hours(hours: int):

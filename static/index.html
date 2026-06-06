@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Komari Traffic Console</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <main id="login-view" class="login-shell hidden">
+    <section class="login-panel">
+      <p class="eyebrow">Komari Traffic</p>
+      <h1>流量分析控制台</h1>
+      <p class="muted">登录后查看节点流量、告警状态和 Telegram 推送。</p>
+      <form id="login-form" class="form-stack">
+        <label>
+          <span>用户名</span>
+          <input id="login-username" autocomplete="username" value="admin">
+        </label>
+        <label>
+          <span>密码</span>
+          <input id="login-password" type="password" autocomplete="current-password">
+        </label>
+        <button type="submit" class="primary-btn">登录</button>
+      </form>
+      <p id="login-error" class="error-text"></p>
+    </section>
+  </main>
+
+  <main id="app-view" class="app-shell hidden">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-mark">K</span>
+        <div>
+          <strong>Komari Traffic</strong>
+          <span>Analysis Console</span>
+        </div>
+      </div>
+      <nav>
+        <a href="#overview" class="nav-link active">总览</a>
+        <a href="#nodes" class="nav-link">节点</a>
+        <a href="#alerts" class="nav-link">告警</a>
+        <a href="#telegram" class="nav-link">推送</a>
+        <a href="#ai" class="nav-link">AI</a>
+      </nav>
+    </aside>
+
+    <section class="workspace">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Dashboard</p>
+          <h1>流量分析工作台</h1>
+        </div>
+        <div class="top-actions">
+          <span id="status-pill" class="status-pill">加载中</span>
+          <button id="refresh-btn" class="ghost-btn">刷新</button>
+          <button id="logout-btn" class="ghost-btn">退出</button>
+        </div>
+      </header>
+
+      <section id="overview" class="section-grid metrics-grid">
+        <article class="metric-panel">
+          <span>今日</span>
+          <strong id="metric-today">--</strong>
+          <small id="metric-today-note">等待数据</small>
+        </article>
+        <article class="metric-panel">
+          <span>本周</span>
+          <strong id="metric-week">--</strong>
+          <small id="metric-week-note">等待数据</small>
+        </article>
+        <article class="metric-panel">
+          <span>本月</span>
+          <strong id="metric-month">--</strong>
+          <small id="metric-month-note">等待数据</small>
+        </article>
+        <article class="metric-panel">
+          <span>状态</span>
+          <strong id="metric-services">--</strong>
+          <small id="metric-time">--</small>
+        </article>
+      </section>
+
+      <section class="content-grid">
+        <article class="panel wide">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Traffic</p>
+              <h2>最近 24h / 7d 摘要</h2>
+            </div>
+            <span id="range-label" class="soft-label">records</span>
+          </div>
+          <div id="trend-chart" class="chart-box"></div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Top</p>
+              <h2>今日 Top 节点</h2>
+            </div>
+          </div>
+          <ol id="top-list" class="top-list"></ol>
+        </article>
+      </section>
+
+      <section id="nodes" class="panel">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">Nodes</p>
+            <h2>节点流量分析</h2>
+          </div>
+          <div class="segmented" id="range-tabs">
+            <button data-hours="1">1h</button>
+            <button data-hours="6">6h</button>
+            <button data-hours="24" class="active">24h</button>
+            <button data-hours="168">7d</button>
+            <button data-hours="720">30d</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>节点</th>
+                <th>下行</th>
+                <th>上行</th>
+                <th>合计</th>
+                <th>CPU</th>
+                <th>RAM</th>
+                <th>Disk</th>
+              </tr>
+            </thead>
+            <tbody id="nodes-table"></tbody>
+          </table>
+        </div>
+        <div id="node-detail" class="detail-strip">点击节点查看详情。</div>
+      </section>
+
+      <section class="content-grid">
+        <article id="alerts" class="panel">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Alerts</p>
+              <h2>告警控制</h2>
+            </div>
+            <span id="alert-count" class="soft-label">--</span>
+          </div>
+          <div id="alerts-body" class="stacked"></div>
+          <div class="inline-form">
+            <input id="mute-hours" type="number" min="1" value="2" aria-label="静默小时数">
+            <button id="mute-btn" class="ghost-btn">静默</button>
+            <button id="unmute-btn" class="ghost-btn">解除</button>
+            <button id="check-alerts-btn" class="primary-btn">检查</button>
+          </div>
+        </article>
+
+        <article id="telegram" class="panel">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Telegram</p>
+              <h2>推送控制</h2>
+            </div>
+          </div>
+          <div class="inline-form">
+            <button id="tg-test-btn" class="ghost-btn">测试发送</button>
+            <select id="report-scope">
+              <option value="today">今日</option>
+              <option value="week">本周</option>
+              <option value="month">本月</option>
+            </select>
+            <select id="report-mode">
+              <option value="full">完整</option>
+              <option value="top">Top</option>
+            </select>
+            <button id="send-report-btn" class="primary-btn">发送报表</button>
+          </div>
+          <p id="telegram-result" class="muted"></p>
+        </article>
+      </section>
+
+      <section id="ai" class="panel">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">AI</p>
+            <h2>数据问答</h2>
+          </div>
+          <span id="ai-status" class="soft-label">--</span>
+        </div>
+        <div class="ai-box">
+          <textarea id="ai-question" rows="3" placeholder="例如：今天哪个节点流量异常？"></textarea>
+          <button id="ai-ask-btn" class="primary-btn">提问</button>
+        </div>
+        <div id="ai-answer" class="answer-box">等待提问。</div>
+      </section>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

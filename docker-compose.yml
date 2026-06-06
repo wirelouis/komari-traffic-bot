@@ -26,3 +26,16 @@ services:
       - ./crontab:/app/crontab:ro
     restart: unless-stopped
     command: ["supercronic", "/app/crontab"]
+
+  web:
+    image: ghcr.io/wirelouis/komari-traffic-bot:latest
+    env_file: .env
+    environment:
+      - TZ=Asia/Shanghai
+      - STAT_TZ=Asia/Shanghai
+    volumes:
+      - ./data:/data
+    ports:
+      - "${WEB_PORT:-8080}:8080"
+    restart: unless-stopped
+    command: ["uvicorn", "web_app:app", "--host", "0.0.0.0", "--port", "8080"]

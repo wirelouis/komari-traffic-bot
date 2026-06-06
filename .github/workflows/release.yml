@@ -25,7 +25,8 @@ jobs:
 
       - name: Run tests
         run: |
-          python -m py_compile komari_traffic_report.py rebuild_period_baselines.py
+          python -m pip install -r requirements-dev.txt
+          python -m py_compile komari_traffic_report.py rebuild_period_baselines.py web_app.py
           python -m unittest discover -s tests
 
       - name: Set up QEMU
