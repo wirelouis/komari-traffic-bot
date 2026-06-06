@@ -1,4 +1,5 @@
 import os
+import base64
 import tempfile
 import time
 import unittest
@@ -115,6 +116,54 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("samesite=lax", cookie)
         self.assertIn("secure", cookie)
 
+    def test_login_uses_session_cookie_by_default(self):
+        response = self.client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "test-password"},
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        cookie = response.headers["set-cookie"].lower()
+        self.assertIn("httponly", cookie)
+        self.assertIn("samesite=lax", cookie)
+        self.assertNotIn("max-age", cookie)
+
+    def test_login_remember_sets_persistent_cookie(self):
+        response = self.client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "test-password", "remember": True},
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        cookie = response.headers["set-cookie"].lower()
+        self.assertIn("httponly", cookie)
+        self.assertIn("samesite=lax", cookie)
+        self.assertIn(f"max-age={w.SESSION_REMEMBER_SECONDS}", cookie)
+
+    def test_session_token_expiry_and_remember_duration(self):
+        with patch.object(w.time, "time", lambda: 1000):
+            browser_token = w.create_session_token("admin", w.SESSION_BROWSER_SECONDS)
+            remember_token = w.create_session_token("admin", w.SESSION_REMEMBER_SECONDS)
+
+        with patch.object(w.time, "time", lambda: 1000 + w.SESSION_BROWSER_SECONDS - 1):
+            self.assertEqual(w.validate_session_token(browser_token), "admin")
+        with patch.object(w.time, "time", lambda: 1000 + w.SESSION_BROWSER_SECONDS):
+            self.assertIsNone(w.validate_session_token(browser_token))
+
+        with patch.object(w.time, "time", lambda: 1000 + w.SESSION_REMEMBER_SECONDS - 1):
+            self.assertEqual(w.validate_session_token(remember_token), "admin")
+        with patch.object(w.time, "time", lambda: 1000 + w.SESSION_REMEMBER_SECONDS):
+            self.assertIsNone(w.validate_session_token(remember_token))
+
+    def test_legacy_session_token_remains_valid_for_compat_window(self):
+        body = "admin|1000|legacy-nonce"
+        token = base64.urlsafe_b64encode(f"{body}|{w._sign_session(body)}".encode("utf-8")).decode("ascii")
+
+        with patch.object(w.time, "time", lambda: 1000 + w.LEGACY_SESSION_MAX_AGE_SECONDS - 1):
+            self.assertEqual(w.validate_session_token(token), "admin")
+        with patch.object(w.time, "time", lambda: 1000 + w.LEGACY_SESSION_MAX_AGE_SECONDS + 1):
+            self.assertIsNone(w.validate_session_token(token))
+
     def test_login_rate_limits_repeated_failures_and_clears_on_success(self):
         headers = {"x-forwarded-for": "198.51.100.7"}
         for _index in range(w.LOGIN_RATE_LIMIT_ATTEMPTS):
@@ -154,6 +203,21 @@ class WebAppTests(unittest.TestCase):
             self.assertNotIn(f"<h2>{title}</h2>", html)
         for label in ("Nodes", "Alerts", "Telegram", "Analytics", "System", "Editable", "Maintenance"):
             self.assertNotIn(f'>{label}</p>', html)
+
+    def test_frontend_login_remember_is_opt_in(self):
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        html = response.text
+        self.assertIn('id="login-remember"', html)
+        self.assertNotIn('id="login-remember" type="checkbox" checked', html)
+        self.assertIn('name="komari-user-field"', html)
+        self.assertIn('name="komari-pass-field"', html)
+        self.assertIn('autocomplete="new-password"', html)
+
+        app_js = (w.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+        local_storage_lines = [line for line in app_js.splitlines() if "localStorage" in line]
+        self.assertFalse(any("password" in line.lower() for line in local_storage_lines))
 
     def test_brand_icon_static_asset(self):
         response = self.client.get("/static/komari-traffic-icon.svg")

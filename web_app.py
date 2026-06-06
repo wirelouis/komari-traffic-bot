@@ -24,7 +24,9 @@ import komari_traffic_report as k
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 SESSION_COOKIE = "komari_traffic_session"
-SESSION_MAX_AGE_SECONDS = 7 * 24 * 3600
+LEGACY_SESSION_MAX_AGE_SECONDS = 7 * 24 * 3600
+SESSION_BROWSER_SECONDS = 12 * 3600
+SESSION_REMEMBER_SECONDS = 30 * 24 * 3600
 LOGIN_RATE_LIMIT_ATTEMPTS = 5
 LOGIN_RATE_LIMIT_WINDOW_SECONDS = 5 * 60
 LOGIN_RATE_LIMIT_LOCK_SECONDS = 10 * 60
@@ -40,6 +42,7 @@ if STATIC_DIR.exists():
 class LoginRequest(BaseModel):
     username: str = ""
     password: str = ""
+    remember: bool = False
 
 
 class AlertCheckRequest(BaseModel):
@@ -213,10 +216,11 @@ def _sign_session(body: str) -> str:
     return hmac.new(WEB_SESSION_SECRET.encode("utf-8"), body.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
-def create_session_token(username: str) -> str:
+def create_session_token(username: str, max_age_seconds: int = SESSION_BROWSER_SECONDS) -> str:
     issued = int(time.time())
+    expires = issued + max(1, int(max_age_seconds))
     nonce = secrets.token_urlsafe(12)
-    body = f"{username}|{issued}|{nonce}"
+    body = f"{username}|{issued}|{expires}|{nonce}"
     token = f"{body}|{_sign_session(body)}"
     return base64.urlsafe_b64encode(token.encode("utf-8")).decode("ascii")
 
@@ -226,12 +230,26 @@ def validate_session_token(token: str | None) -> str | None:
         return None
     try:
         raw = base64.urlsafe_b64decode(token.encode("ascii")).decode("utf-8")
-        username, issued_text, nonce, signature = raw.split("|", 3)
-        body = f"{username}|{issued_text}|{nonce}"
-        if not hmac.compare_digest(signature, _sign_session(body)):
-            return None
-        issued = int(issued_text)
-        if issued <= 0 or int(time.time()) - issued > SESSION_MAX_AGE_SECONDS:
+        parts = raw.split("|")
+        if len(parts) == 5:
+            username, issued_text, expires_text, nonce, signature = parts
+            body = f"{username}|{issued_text}|{expires_text}|{nonce}"
+            if not hmac.compare_digest(signature, _sign_session(body)):
+                return None
+            issued = int(issued_text)
+            expires = int(expires_text)
+            now_ts = int(time.time())
+            if issued <= 0 or expires <= issued or now_ts >= expires:
+                return None
+        elif len(parts) == 4:
+            username, issued_text, nonce, signature = parts
+            body = f"{username}|{issued_text}|{nonce}"
+            if not hmac.compare_digest(signature, _sign_session(body)):
+                return None
+            issued = int(issued_text)
+            if issued <= 0 or int(time.time()) - issued > LEGACY_SESSION_MAX_AGE_SECONDS:
+                return None
+        else:
             return None
         if username != web_username():
             return None
@@ -983,13 +1001,18 @@ async def login(req: LoginRequest, request: Request):
         "username": web_username(),
         "session_secret_temporary": WEB_SESSION_SECRET_TEMPORARY,
     })
+    session_seconds = SESSION_REMEMBER_SECONDS if req.remember else SESSION_BROWSER_SECONDS
+    cookie_kwargs = {
+        "httponly": True,
+        "samesite": "lax",
+        "secure": request_is_https(request),
+    }
+    if req.remember:
+        cookie_kwargs["max_age"] = SESSION_REMEMBER_SECONDS
     response.set_cookie(
         SESSION_COOKIE,
-        create_session_token(web_username()),
-        max_age=SESSION_MAX_AGE_SECONDS,
-        httponly=True,
-        samesite="lax",
-        secure=request_is_https(request),
+        create_session_token(web_username(), session_seconds),
+        **cookie_kwargs,
     )
     return response
 

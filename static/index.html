@@ -4,15 +4,15 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Komari Traffic Console</title>
-  <link rel="icon" type="image/svg+xml" href="/static/komari-traffic-icon.svg?v=20260606-product9">
-  <link rel="stylesheet" href="/static/styles.css?v=20260606-product9">
+  <link rel="icon" type="image/svg+xml" href="/static/komari-traffic-icon.svg?v=20260606-product10">
+  <link rel="stylesheet" href="/static/styles.css?v=20260606-product10">
 </head>
 <body>
   <main id="login-view" class="login-shell hidden">
     <section class="login-panel">
       <div class="login-brand">
         <span class="brand-mark">
-          <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260606-product9" alt="">
+          <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260606-product10" alt="">
           <span class="brand-fallback" hidden>K</span>
         </span>
         <div>
@@ -30,6 +30,10 @@
           <span>密码</span>
           <input id="login-password" name="komari-pass-field" type="password" autocomplete="new-password" data-lpignore="true" readonly>
         </label>
+        <label class="check-row login-remember-row">
+          <input id="login-remember" type="checkbox" autocomplete="off">
+          <span>记住我</span>
+        </label>
         <button type="submit" class="primary-btn">登录</button>
       </form>
       <p id="login-error" class="error-text"></p>
@@ -41,7 +45,7 @@
       <div class="sidebar-head">
         <a class="brand" href="/" data-route="/" aria-label="Komari Traffic 总览">
           <span class="brand-mark">
-            <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260606-product9" alt="">
+            <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260606-product10" alt="">
             <span class="brand-fallback" hidden>K</span>
           </span>
           <span class="brand-copy">
@@ -505,6 +509,6 @@
     </section>
   </main>
 
-  <script src="/static/app.js?v=20260606-product9"></script>
+  <script src="/static/app.js?v=20260606-product10"></script>
 </body>
 </html>

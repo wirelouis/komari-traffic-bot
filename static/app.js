@@ -59,15 +59,48 @@ function loginFields() {
   return [$("login-username"), $("login-password")].filter(Boolean);
 }
 
-function lockAndClearLoginFields() {
+function loginRememberEnabled() {
+  return Boolean($("login-remember")?.checked);
+}
+
+function setLoginFieldMode({ remember = false, clear = false } = {}) {
+  const form = $("login-form");
+  const username = $("login-username");
+  const password = $("login-password");
+  if (!form || !username || !password) return;
+  form.setAttribute("autocomplete", remember ? "on" : "off");
+  if (remember) {
+    form.removeAttribute("data-lpignore");
+  } else {
+    form.setAttribute("data-lpignore", "true");
+  }
+  username.setAttribute("name", remember ? "username" : "komari-user-field");
+  password.setAttribute("name", remember ? "password" : "komari-pass-field");
+  username.setAttribute("autocomplete", remember ? "username" : "new-password");
+  password.setAttribute("autocomplete", remember ? "current-password" : "new-password");
   loginFields().forEach((input) => {
-    input.value = "";
-    input.setAttribute("readonly", "readonly");
-    input.setAttribute("autocomplete", "new-password");
+    if (clear) input.value = "";
+    if (remember) {
+      input.removeAttribute("readonly");
+      input.removeAttribute("data-lpignore");
+    } else {
+      input.setAttribute("readonly", "readonly");
+      input.setAttribute("data-lpignore", "true");
+    }
   });
 }
 
+function lockAndClearLoginFields() {
+  setLoginFieldMode({ remember: loginRememberEnabled(), clear: true });
+}
+
+function handleLoginRememberChange() {
+  const remember = loginRememberEnabled();
+  setLoginFieldMode({ remember, clear: !remember });
+}
+
 function unlockLoginFields() {
+  if (loginRememberEnabled()) return;
   loginFields().forEach((input) => {
     input.removeAttribute("readonly");
   });
@@ -76,6 +109,7 @@ function unlockLoginFields() {
 function showLoginView(message = "") {
   state.authenticated = false;
   state.overview = null;
+  if ($("login-remember")) $("login-remember").checked = false;
   lockAndClearLoginFields();
   $("login-error").textContent = message;
   setVisible("login-view", true);
@@ -1437,6 +1471,7 @@ async function doLogin(event) {
       body: JSON.stringify({
         username: $("login-username").value,
         password: $("login-password").value,
+        remember: loginRememberEnabled(),
       }),
     });
     state.authenticated = true;
@@ -1490,6 +1525,7 @@ function bindIconFallbacks() {
 
 function bindEvents() {
   $("login-form").addEventListener("submit", doLogin);
+  $("login-remember").addEventListener("change", handleLoginRememberChange);
   loginFields().forEach((input) => {
     input.addEventListener("pointerdown", unlockLoginFields);
     input.addEventListener("focus", unlockLoginFields);
