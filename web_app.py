@@ -25,8 +25,12 @@ BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 SESSION_COOKIE = "komari_traffic_session"
 SESSION_MAX_AGE_SECONDS = 7 * 24 * 3600
+LOGIN_RATE_LIMIT_ATTEMPTS = 5
+LOGIN_RATE_LIMIT_WINDOW_SECONDS = 5 * 60
+LOGIN_RATE_LIMIT_LOCK_SECONDS = 10 * 60
 WEB_SESSION_SECRET = os.environ.get("WEB_SESSION_SECRET", "").strip() or secrets.token_urlsafe(32)
 WEB_SESSION_SECRET_TEMPORARY = not bool(os.environ.get("WEB_SESSION_SECRET", "").strip())
+LOGIN_FAILURES: dict[str, dict[str, float | int]] = {}
 
 app = FastAPI(title="Komari Traffic Web", docs_url=None, redoc_url=None)
 if STATIC_DIR.exists():
@@ -106,10 +110,40 @@ def api_ok(data: Any = None, **extra):
     return JSONResponse(payload)
 
 
+def redact_web_sensitive_text(value: str) -> str:
+    text = k.redact_sensitive_text(value)
+    for secret in (web_password(), WEB_SESSION_SECRET):
+        secret = str(secret or "").strip()
+        if not secret:
+            continue
+        masked = "***" if len(secret) <= 6 else f"{secret[:3]}***{secret[-3:]}"
+        text = text.replace(secret, masked)
+    return text
+
+
+def redact_web_sensitive_data(value):
+    if isinstance(value, dict):
+        return {str(key): redact_web_sensitive_data(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [redact_web_sensitive_data(item) for item in value]
+    if isinstance(value, str):
+        return redact_web_sensitive_text(value)
+    return value
+
+
 def api_error(message: str, status_code: int = 400, code: str = "error", **extra):
-    payload = {"ok": False, "error": {"code": code, "message": str(message)}}
-    payload.update(extra)
+    payload = {"ok": False, "error": {"code": code, "message": redact_web_sensitive_text(str(message))}}
+    payload.update(redact_web_sensitive_data(extra))
     return JSONResponse(payload, status_code=status_code)
+
+
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    return response
 
 
 @app.exception_handler(HTTPException)
@@ -134,6 +168,45 @@ def web_password() -> str:
 
 def web_password_configured() -> bool:
     return bool(web_password())
+
+
+def request_is_https(request: Request) -> bool:
+    forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+    return request.url.scheme == "https" or forwarded_proto == "https"
+
+
+def login_rate_key(request: Request) -> str:
+    forwarded_for = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+    host = request.client.host if request.client else ""
+    return forwarded_for or host or "unknown"
+
+
+def login_limited(key: str, now_ts: float | None = None) -> bool:
+    now_ts = time.time() if now_ts is None else now_ts
+    state = LOGIN_FAILURES.get(key)
+    if not state:
+        return False
+    locked_until = float(state.get("locked_until", 0))
+    if locked_until > now_ts:
+        return True
+    if locked_until:
+        LOGIN_FAILURES.pop(key, None)
+    return False
+
+
+def record_login_failure(key: str, now_ts: float | None = None):
+    now_ts = time.time() if now_ts is None else now_ts
+    state = LOGIN_FAILURES.get(key) or {"count": 0, "first": now_ts, "locked_until": 0}
+    if now_ts - float(state.get("first", now_ts)) > LOGIN_RATE_LIMIT_WINDOW_SECONDS:
+        state = {"count": 0, "first": now_ts, "locked_until": 0}
+    state["count"] = int(state.get("count", 0)) + 1
+    if int(state["count"]) >= LOGIN_RATE_LIMIT_ATTEMPTS:
+        state["locked_until"] = now_ts + LOGIN_RATE_LIMIT_LOCK_SECONDS
+    LOGIN_FAILURES[key] = state
+
+
+def clear_login_failures(key: str):
+    LOGIN_FAILURES.pop(key, None)
 
 
 def _sign_session(body: str) -> str:
@@ -896,11 +969,16 @@ async def index():
 
 
 @app.post("/api/auth/login")
-async def login(req: LoginRequest):
+async def login(req: LoginRequest, request: Request):
+    rate_key = login_rate_key(request)
+    if login_limited(rate_key):
+        return api_error("登录失败次数过多，请稍后再试。", status_code=429, code="login_rate_limited")
     if not web_password_configured():
         return api_error("WEB_PASSWORD is not configured", status_code=503, code="web_password_missing")
     if req.username != web_username() or not hmac.compare_digest(req.password, web_password()):
+        record_login_failure(rate_key)
         return api_error("invalid username or password", status_code=401, code="invalid_login")
+    clear_login_failures(rate_key)
     response = api_ok({
         "username": web_username(),
         "session_secret_temporary": WEB_SESSION_SECRET_TEMPORARY,
@@ -911,6 +989,7 @@ async def login(req: LoginRequest):
         max_age=SESSION_MAX_AGE_SECONDS,
         httponly=True,
         samesite="lax",
+        secure=request_is_https(request),
     )
     return response
 

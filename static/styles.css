@@ -527,6 +527,17 @@ nav {
   justify-content: space-between;
 }
 
+.route-toolbar {
+  justify-content: flex-end;
+  align-items: center;
+  min-height: 38px;
+  margin-bottom: 12px;
+}
+
+.route-toolbar:empty {
+  display: none;
+}
+
 .topbar {
   margin-bottom: 18px;
 }
@@ -651,6 +662,7 @@ nav {
 .metric-panel,
 .panel,
 .sub-panel {
+  min-width: 0;
   padding: 16px;
 }
 
@@ -924,6 +936,8 @@ nav {
 
 .table-wrap {
   width: 100%;
+  max-width: 100%;
+  min-width: 0;
   overflow-x: auto;
   margin-top: 12px;
   border: 1px solid var(--line);
@@ -1620,6 +1634,16 @@ tbody tr:last-child td {
     align-items: flex-start;
     grid-template-columns: 1fr;
     flex-direction: column;
+  }
+
+  .route-toolbar {
+    width: 100%;
+    min-height: auto;
+    margin-bottom: 10px;
+  }
+
+  .route-toolbar .segmented {
+    width: 100%;
   }
 
   .top-actions,

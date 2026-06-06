@@ -24,6 +24,7 @@ class WebAppTests(unittest.TestCase):
         self.patchers = []
         self.patch_env("WEB_USERNAME", "admin")
         self.patch_env("WEB_PASSWORD", "test-password")
+        w.LOGIN_FAILURES.clear()
         self.point_runtime_paths()
         self.configure_alerts()
         self.client = TestClient(w.app)
@@ -101,6 +102,34 @@ class WebAppTests(unittest.TestCase):
         self.assertTrue(payload["data"]["authenticated"])
         self.assertEqual(payload["data"]["username"], "admin")
 
+    def test_login_sets_secure_cookie_when_forwarded_https(self):
+        response = self.client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "test-password"},
+            headers={"x-forwarded-proto": "https"},
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        cookie = response.headers["set-cookie"].lower()
+        self.assertIn("httponly", cookie)
+        self.assertIn("samesite=lax", cookie)
+        self.assertIn("secure", cookie)
+
+    def test_login_rate_limits_repeated_failures_and_clears_on_success(self):
+        headers = {"x-forwarded-for": "198.51.100.7"}
+        for _index in range(w.LOGIN_RATE_LIMIT_ATTEMPTS):
+            response = self.client.post("/api/auth/login", json={"username": "admin", "password": "bad"}, headers=headers)
+            self.assertEqual(response.status_code, 401, response.text)
+
+        response = self.client.post("/api/auth/login", json={"username": "admin", "password": "bad"}, headers=headers)
+        self.assertEqual(response.status_code, 429, response.text)
+        self.assertEqual(response.json()["error"]["code"], "login_rate_limited")
+
+        w.LOGIN_FAILURES.clear()
+        response = self.client.post("/api/auth/login", json={"username": "admin", "password": "test-password"}, headers=headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertNotIn("198.51.100.7", w.LOGIN_FAILURES)
+
     def test_frontend_routes_return_index(self):
         for path in ("/", "/nodes", "/alerts", "/telegram", "/ai", "/analytics", "/system"):
             with self.subTest(path=path):
@@ -109,8 +138,22 @@ class WebAppTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 200, response.text)
                 self.assertEqual(response.headers["content-type"].split(";")[0], "text/html")
                 self.assertEqual(response.headers["cache-control"], "no-store")
+                self.assertEqual(response.headers["x-frame-options"], "DENY")
+                self.assertEqual(response.headers["x-content-type-options"], "nosniff")
+                self.assertEqual(response.headers["referrer-policy"], "no-referrer")
                 self.assertIn("Komari Traffic Console", response.text)
                 self.assertIn("/static/app.js", response.text)
+
+    def test_frontend_main_page_titles_are_not_duplicated(self):
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        html = response.text
+        self.assertNotIn('id="topbar-eyebrow"', html)
+        for title in ("节点流量分析", "告警控制", "推送控制", "数据问答", "系统健康"):
+            self.assertNotIn(f"<h2>{title}</h2>", html)
+        for label in ("Nodes", "Alerts", "Telegram", "Analytics", "System", "Editable", "Maintenance"):
+            self.assertNotIn(f'>{label}</p>', html)
 
     def test_brand_icon_static_asset(self):
         response = self.client.get("/static/komari-traffic-icon.svg")
@@ -175,6 +218,20 @@ class WebAppTests(unittest.TestCase):
         self.assertNotIn("test-password", merged)
         self.assertNotIn("secret-session-value", merged)
         self.assertNotIn("123456789", alerts)
+
+    def test_api_errors_redact_web_secrets(self):
+        self.patch_attr(w, "WEB_SESSION_SECRET", "secret-session-value")
+
+        response = w.api_error(
+            "bad values: test-password secret-session-value",
+            status_code=500,
+            code="boom",
+            data={"detail": "test-password secret-session-value"},
+        )
+        text = response.body.decode("utf-8")
+
+        self.assertNotIn("test-password", text)
+        self.assertNotIn("secret-session-value", text)
 
     def test_komari_machines_are_normalized_with_web_url(self):
         self.login()

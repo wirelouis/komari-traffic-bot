@@ -4,37 +4,30 @@ const THEME_MODES = ["auto", "light", "dark"];
 
 const routeConfig = {
   "/": {
-    eyebrow: "Dashboard",
     title: "流量分析工作台",
     subtitle: "查看探针流量、节点排行和服务状态。",
   },
   "/nodes": {
-    eyebrow: "Nodes",
     title: "节点流量分析",
     subtitle: "按时间窗口比较节点上下行、合计流量和 Komari 机器绑定。",
   },
   "/alerts": {
-    eyebrow: "Alerts",
     title: "告警控制",
     subtitle: "查看告警状态、阈值、静默窗口，并执行检查或推送。",
   },
   "/telegram": {
-    eyebrow: "Telegram",
     title: "推送控制",
     subtitle: "预览周期报表、测试 Telegram，并查看计划任务。",
   },
   "/ai": {
-    eyebrow: "AI",
     title: "数据问答",
     subtitle: "刷新数据包、使用快捷问题，快速定位流量异常。",
   },
   "/analytics": {
-    eyebrow: "Analytics",
     title: "流量分析",
     subtitle: "按日期范围查看 SQLite 长期统计、节点贡献和分组趋势。",
   },
   "/system": {
-    eyebrow: "System",
     title: "系统健康",
     subtitle: "查看配置状态、运行记录、低敏配置和数据维护动作。",
   },
@@ -186,7 +179,6 @@ function routeUrl(target) {
 
 function updateTopbar(route) {
   const config = routeConfig[route] || routeConfig["/"];
-  $("topbar-eyebrow").textContent = config.eyebrow;
   $("topbar-title").textContent = config.title;
   $("topbar-subtitle").textContent = config.subtitle;
   document.title = `${config.title} - Komari Traffic Console`;
@@ -390,10 +382,10 @@ function renderOverviewHealth(system) {
   if (!target) return;
   if (!system) {
     target.innerHTML = [
-      miniCard("系统健康", "加载中", "等待系统状态"),
-      miniCard("最近任务", "--", "等待运行记录"),
-      miniCard("SQLite", "--", "等待数据目录"),
-      miniCard("计划任务", "--", "等待 scheduler 状态"),
+      miniCard("系统健康", "同步中", "稍后显示状态"),
+      miniCard("最近任务", "--", "暂无记录"),
+      miniCard("长期统计", "--", "稍后显示状态"),
+      miniCard("计划任务", "--", "稍后显示状态"),
     ].join("");
     return;
   }
@@ -404,7 +396,7 @@ function renderOverviewHealth(system) {
   target.innerHTML = [
     miniCard("系统健康", `${summary.healthy || 0}/${summary.total || 0}`, (summary.issues || []).length ? `待确认：${(summary.issues || []).join("、")}` : "核心配置正常", (summary.issues || []).length ? "bad" : "good"),
     miniCard("最近任务", latestReport?.status ? runStatusText(latestReport.status) : "暂无", latestReport?.started_at_text || "未记录", latestReport?.status === "failed" ? "bad" : ""),
-    miniCard("SQLite", db.ok ? "可用" : "异常", `${db.daily_rows || 0} daily / ${db.task_runs || 0} runs`, db.ok ? "good" : "bad"),
+    miniCard("长期统计", db.ok ? "正常" : "异常", db.ok ? "历史流量会继续保存" : "历史流量可能无法保存", db.ok ? "good" : "bad"),
     miniCard("计划任务", `${schedules.enabled || 0}/${schedules.total || 0}`, "启用 / 总数"),
   ].join("");
 }
@@ -596,10 +588,9 @@ function renderNodeDetail(node) {
     ? [machine.uuid, machine.region, machine.group].filter(Boolean).join(" · ")
     : (binding.stale ? "绑定目标不存在或 Komari 暂不可达" : "暂无可打开的 Komari 机器");
   $("node-detail").innerHTML = `
-    <div class="detail-drawer">
+      <div class="detail-drawer">
       <div class="detail-main">
         <div class="detail-title">
-          <p class="eyebrow">Node Detail</p>
           <h3>${escapeHtml(node.name)}</h3>
           <p class="tiny">${escapeHtml(node.uuid)}</p>
         </div>
@@ -1289,7 +1280,6 @@ function renderTrafficRange(data) {
       <article class="analytics-panel analytics-wide">
         <div class="panel-head compact-head">
           <div>
-            <p class="eyebrow">Timeline</p>
             <h3>分组趋势</h3>
           </div>
           <span class="soft-label">${escapeHtml(data.group || "daily")}</span>
@@ -1313,7 +1303,6 @@ function renderTrafficRange(data) {
       <article class="analytics-panel">
         <div class="panel-head compact-head">
           <div>
-            <p class="eyebrow">Nodes</p>
             <h3>节点贡献</h3>
           </div>
           <span class="soft-label">Top ${escapeHtml(String(topNodes.length || 0))}</span>
@@ -1340,7 +1329,6 @@ function renderTrafficRange(data) {
       <article class="analytics-panel">
         <div class="panel-head compact-head">
           <div>
-            <p class="eyebrow">Details</p>
             <h3>节点明细</h3>
           </div>
           <span class="soft-label">${nodes.length} 个节点</span>

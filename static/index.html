@@ -4,15 +4,15 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Komari Traffic Console</title>
-  <link rel="icon" type="image/svg+xml" href="/static/komari-traffic-icon.svg?v=20260606-product6">
-  <link rel="stylesheet" href="/static/styles.css?v=20260606-product6">
+  <link rel="icon" type="image/svg+xml" href="/static/komari-traffic-icon.svg?v=20260606-product9">
+  <link rel="stylesheet" href="/static/styles.css?v=20260606-product9">
 </head>
 <body>
   <main id="login-view" class="login-shell hidden">
     <section class="login-panel">
       <div class="login-brand">
         <span class="brand-mark">
-          <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260606-product6" alt="">
+          <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260606-product9" alt="">
           <span class="brand-fallback" hidden>K</span>
         </span>
         <div>
@@ -41,7 +41,7 @@
       <div class="sidebar-head">
         <a class="brand" href="/" data-route="/" aria-label="Komari Traffic 总览">
           <span class="brand-mark">
-            <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260606-product6" alt="">
+            <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260606-product9" alt="">
             <span class="brand-fallback" hidden>K</span>
           </span>
           <span class="brand-copy">
@@ -118,7 +118,6 @@
     <section class="workspace">
       <header class="topbar">
         <div>
-          <p id="topbar-eyebrow" class="eyebrow">Dashboard</p>
           <h1 id="topbar-title">流量分析工作台</h1>
           <p id="topbar-subtitle" class="topbar-subtitle muted">查看探针流量、节点排行和服务状态。</p>
         </div>
@@ -139,17 +138,17 @@
           <article class="metric-panel">
             <span>今日</span>
             <strong id="metric-today">--</strong>
-            <small id="metric-today-note">等待数据</small>
+            <small id="metric-today-note">同步中</small>
           </article>
           <article class="metric-panel">
             <span>本周</span>
             <strong id="metric-week">--</strong>
-            <small id="metric-week-note">等待数据</small>
+            <small id="metric-week-note">同步中</small>
           </article>
           <article class="metric-panel">
             <span>本月</span>
             <strong id="metric-month">--</strong>
-            <small id="metric-month-note">等待数据</small>
+            <small id="metric-month-note">同步中</small>
           </article>
           <article class="metric-panel">
             <span>状态</span>
@@ -163,7 +162,6 @@
           <article class="panel wide">
             <div class="panel-head">
               <div>
-                <p class="eyebrow">Traffic</p>
                 <h2>最近 24h / 7d 摘要</h2>
               </div>
               <span id="range-label" class="soft-label">records</span>
@@ -174,7 +172,6 @@
           <article class="panel">
             <div class="panel-head">
               <div>
-                <p class="eyebrow">Top</p>
                 <h2>今日 Top 节点</h2>
               </div>
             </div>
@@ -185,11 +182,7 @@
 
       <section class="route-view hidden" data-route="/nodes">
         <section id="nodes" class="panel">
-          <div class="panel-head">
-            <div>
-              <p class="eyebrow">Nodes</p>
-              <h2>节点流量分析</h2>
-            </div>
+          <div class="panel-head route-toolbar">
             <div class="segmented" id="range-tabs">
               <button data-hours="1">1h</button>
               <button data-hours="6">6h</button>
@@ -200,7 +193,6 @@
           </div>
           <div id="node-bind-panel" class="binding-panel hidden">
             <div>
-              <p class="eyebrow">Binding</p>
               <h3 id="bind-node-name">绑定 Komari 机器</h3>
               <p id="bind-node-note" class="muted">默认会按 uuid 自动绑定，可在这里覆盖。</p>
             </div>
@@ -235,11 +227,7 @@
 
       <section class="route-view hidden" data-route="/alerts">
         <section id="alerts" class="panel">
-          <div class="panel-head">
-            <div>
-              <p class="eyebrow">Alerts</p>
-              <h2>告警控制</h2>
-            </div>
+          <div class="panel-head route-toolbar">
             <span id="alert-count" class="soft-label">--</span>
           </div>
           <div id="alerts-summary" class="mini-grid"></div>
@@ -247,7 +235,6 @@
             <article class="sub-panel">
               <div class="panel-head">
                 <div>
-                  <p class="eyebrow">Active</p>
                   <h3>当前告警</h3>
                 </div>
               </div>
@@ -256,7 +243,6 @@
             <article class="sub-panel">
               <div class="panel-head">
                 <div>
-                  <p class="eyebrow">Thresholds</p>
                   <h3>阈值与静默</h3>
                 </div>
               </div>
@@ -266,7 +252,6 @@
           <article class="sub-panel">
             <div class="panel-head">
               <div>
-                <p class="eyebrow">Settings</p>
                 <h3>告警配置</h3>
               </div>
             </div>
@@ -287,18 +272,14 @@
               <button class="ghost-btn quick-mute" data-hours="24">24h</button>
               <button id="unmute-btn" class="ghost-btn">解除静默</button>
             </div>
-            <div id="alert-result" class="result-box muted">等待操作。</div>
+            <div id="alert-result" class="result-box muted">暂无结果。</div>
           </div>
         </section>
       </section>
 
       <section class="route-view hidden" data-route="/telegram">
         <section id="telegram" class="panel">
-          <div class="panel-head">
-            <div>
-              <p class="eyebrow">Telegram</p>
-              <h2>推送控制</h2>
-            </div>
+          <div class="panel-head route-toolbar">
             <span id="telegram-status-pill" class="soft-label">--</span>
           </div>
           <div id="telegram-summary" class="mini-grid"></div>
@@ -306,7 +287,6 @@
             <article class="sub-panel">
               <div class="panel-head">
                 <div>
-                  <p class="eyebrow">Composer</p>
                   <h3>报表预览</h3>
                 </div>
               </div>
@@ -323,12 +303,11 @@
                 <button id="preview-report-btn" class="ghost-btn">生成预览</button>
                 <button id="send-report-btn" class="primary-btn">发送报表</button>
               </div>
-              <pre id="telegram-preview" class="preview-box">等待生成预览。</pre>
+              <pre id="telegram-preview" class="preview-box">暂无预览。</pre>
             </article>
             <article class="sub-panel">
               <div class="panel-head">
                 <div>
-                  <p class="eyebrow">Delivery</p>
                   <h3>推送状态</h3>
                 </div>
               </div>
@@ -382,13 +361,12 @@
               <div class="inline-form">
                 <button id="tg-test-btn" class="ghost-btn">测试发送</button>
               </div>
-              <p id="telegram-result" class="result-box muted">等待操作。</p>
+              <p id="telegram-result" class="result-box muted">暂无结果。</p>
             </article>
           </div>
           <article class="sub-panel">
             <div class="panel-head">
               <div>
-                <p class="eyebrow">Runs</p>
                 <h3>推送运行历史</h3>
               </div>
             </div>
@@ -399,11 +377,7 @@
 
       <section class="route-view hidden" data-route="/ai">
         <section id="ai" class="panel">
-          <div class="panel-head">
-            <div>
-              <p class="eyebrow">AI</p>
-              <h2>数据问答</h2>
-            </div>
+          <div class="panel-head route-toolbar">
             <span id="ai-status" class="soft-label">--</span>
           </div>
           <div id="ai-summary" class="mini-grid"></div>
@@ -411,7 +385,6 @@
             <article class="sub-panel">
               <div class="panel-head">
                 <div>
-                  <p class="eyebrow">Ask</p>
                   <h3>快捷分析</h3>
                 </div>
                 <button id="ai-refresh-btn" class="ghost-btn">刷新数据包</button>
@@ -426,12 +399,11 @@
                 <textarea id="ai-question" rows="4" placeholder="例如：今天哪个节点流量异常？"></textarea>
                 <button id="ai-ask-btn" class="primary-btn">提问</button>
               </div>
-              <div id="ai-answer" class="answer-box">等待提问。</div>
+              <div id="ai-answer" class="answer-box">选择问题或输入后提问。</div>
             </article>
             <article class="sub-panel">
               <div class="panel-head">
                 <div>
-                  <p class="eyebrow">Data Pack</p>
                   <h3>数据来源</h3>
                 </div>
               </div>
@@ -443,11 +415,7 @@
 
       <section class="route-view hidden" data-route="/analytics">
         <section id="analytics" class="panel">
-          <div class="panel-head">
-            <div>
-              <p class="eyebrow">Analytics</p>
-              <h2>流量分析</h2>
-            </div>
+          <div class="panel-head route-toolbar">
             <span id="analytics-status-pill" class="soft-label">SQLite</span>
           </div>
           <div class="inline-form range-controls">
@@ -466,11 +434,7 @@
 
       <section class="route-view hidden" data-route="/system">
         <section id="system" class="panel">
-          <div class="panel-head">
-            <div>
-              <p class="eyebrow">System</p>
-              <h2>系统健康</h2>
-            </div>
+          <div class="panel-head route-toolbar">
             <span id="system-status-pill" class="soft-label">--</span>
           </div>
           <div id="system-summary" class="mini-grid"></div>
@@ -478,7 +442,6 @@
             <article class="sub-panel">
               <div class="panel-head">
                 <div>
-                  <p class="eyebrow">Config</p>
                   <h3>配置健康</h3>
                 </div>
               </div>
@@ -487,7 +450,6 @@
             <article class="sub-panel">
               <div class="panel-head">
                 <div>
-                  <p class="eyebrow">Data</p>
                   <h3>数据状态</h3>
                 </div>
               </div>
@@ -498,7 +460,6 @@
             <article class="sub-panel">
               <div class="panel-head">
                 <div>
-                  <p class="eyebrow">Editable</p>
                   <h3>低敏配置</h3>
                 </div>
               </div>
@@ -511,7 +472,6 @@
             <article class="sub-panel">
               <div class="panel-head">
                 <div>
-                  <p class="eyebrow">History</p>
                   <h3>任务运行记录</h3>
                 </div>
                 <select id="task-run-filter" aria-label="任务类型">
@@ -529,7 +489,6 @@
           <article class="sub-panel maintenance-panel">
             <div class="panel-head">
               <div>
-                <p class="eyebrow">Maintenance</p>
                 <h3>数据维护</h3>
               </div>
               <span id="maintenance-status-pill" class="soft-label">--</span>
@@ -539,13 +498,13 @@
               <button id="prune-task-runs-btn" class="ghost-btn">清理旧运行记录</button>
               <button id="vacuum-db-btn" class="ghost-btn">压缩 SQLite</button>
             </div>
-            <div id="maintenance-result" class="result-box muted">等待操作。</div>
+            <div id="maintenance-result" class="result-box muted">暂无操作结果。</div>
           </article>
         </section>
       </section>
     </section>
   </main>
 
-  <script src="/static/app.js?v=20260606-product6"></script>
+  <script src="/static/app.js?v=20260606-product9"></script>
 </body>
 </html>
