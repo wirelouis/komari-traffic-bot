@@ -3,7 +3,7 @@ import sys
 import tempfile
 import types
 import unittest
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -105,6 +105,8 @@ class CoreTests(unittest.TestCase):
         self.patch_attr("ALERTS_STATE_PATH", str(self.tmp_path / "alerts_state.json"))
         self.patch_attr("BASELINES_PATH", str(self.tmp_path / "baselines.json"))
         self.patch_attr("HISTORY_PATH", str(self.tmp_path / "history.json"))
+        self.patch_attr("REPORT_SCHEDULES_PATH", str(self.tmp_path / "report_schedules.json"))
+        self.patch_attr("TRAFFIC_DB_PATH", str(self.tmp_path / "traffic.db"))
         self.patch_attr("TG_OFFSET_PATH", str(self.tmp_path / "tg_offset.txt"))
         self.patch_attr("TG_CONFIRM_PATH", str(self.tmp_path / "tg_confirm.json"))
         self.patch_attr("AI_PACK_CACHE_PATH", str(self.tmp_path / "ai_pack_cache.json"))
@@ -241,6 +243,53 @@ class CoreTests(unittest.TestCase):
         )
 
         self.assertIn("node &lt;bad&gt;", message)
+
+    def test_normalize_percent_metric_rejects_byte_like_values(self):
+        self.assertEqual(k.normalize_percent_metric(50), 50)
+        self.assertEqual(k.normalize_percent_metric({"used": 1, "total": 2}), 50)
+        self.assertEqual(k.normalize_percent_metric(512, total=1024), 50)
+        self.assertIsNone(k.normalize_percent_metric(123456789))
+        self.assertIsNone(k.normalize_percent_metric({"used": 2, "total": 1}))
+
+    def test_history_sum_migrates_json_to_sqlite_daily_usage(self):
+        k.save_json_atomic(str(self.tmp_path / "history.json"), {
+            "days": {
+                "2026-06-01": {
+                    "n1": {"name": "Node One", "up": 10, "down": 20},
+                    "n2": {"name": "Node Two", "up": 5, "down": 7},
+                },
+                "2026-06-02": {
+                    "n1": {"name": "Node One", "up": 3, "down": 4},
+                },
+            }
+        })
+
+        summed = k.history_sum(date(2026, 6, 1), date(2026, 6, 2))
+
+        self.assertEqual(summed["n1"], {"name": "Node One", "up": 13, "down": 24})
+        self.assertEqual(summed["n2"], {"name": "Node Two", "up": 5, "down": 7})
+        self.assertTrue((self.tmp_path / "traffic.db").exists())
+
+    def test_report_schedule_validation_and_due_key(self):
+        schedule = k.validate_report_schedule({
+            "enabled": True,
+            "scope": "weekly",
+            "mode": "top",
+            "time": "09:30",
+            "weekday": 0,
+            "month_day": 1,
+        })
+        now = datetime(2026, 6, 8, 9, 30, tzinfo=k.TZ)
+
+        self.assertEqual(schedule["scope"], "weekly")
+        self.assertEqual(k.schedule_due_key(schedule, now), f"{schedule['id']}:2026-06-08 09:30")
+        self.assertIsNone(k.schedule_due_key(schedule, datetime(2026, 6, 8, 9, 31, tzinfo=k.TZ)))
+        with self.assertRaises(RuntimeError):
+            k.validate_report_schedule({"scope": "daily", "mode": "full", "time": "25:00"})
+        with self.assertRaises(RuntimeError):
+            k.validate_report_schedule({"scope": "weekly", "mode": "full", "time": "09:00", "weekday": 7})
+        with self.assertRaises(RuntimeError):
+            k.validate_report_schedule({"scope": "monthly", "mode": "full", "time": "09:00", "month_day": 0})
 
 
 if __name__ == "__main__":

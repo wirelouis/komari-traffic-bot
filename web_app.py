@@ -60,6 +60,16 @@ class NodeBindingRequest(BaseModel):
     komari_uuid: str = ""
 
 
+class ScheduleRequest(BaseModel):
+    enabled: bool = True
+    scope: str = "daily"
+    mode: str = "full"
+    time: str = "09:00"
+    weekday: int = 0
+    month_day: int = 1
+    chat: str = ""
+
+
 def api_ok(data: Any = None, **extra):
     payload = {"ok": True, "data": data}
     payload.update(extra)
@@ -329,12 +339,75 @@ def read_crontab_entries() -> list[dict]:
 
 
 def build_telegram_status_struct() -> dict:
+    app_schedules = k.load_report_schedules().get("schedules", [])
     return {
         "configured": bool(k.TELEGRAM_BOT_TOKEN and k.TELEGRAM_CHAT_ID),
         "bot_token_configured": bool(k.TELEGRAM_BOT_TOKEN),
         "chat": mask_value(k.TELEGRAM_CHAT_ID),
         "alert_chat": mask_value(k.telegram_alert_chat_id()),
-        "schedules": read_crontab_entries(),
+        "schedules": app_schedules,
+        "cron_schedules": read_crontab_entries(),
+        "scheduler": {"type": "app", "path": k.REPORT_SCHEDULES_PATH},
+    }
+
+
+def schedule_response(schedule: dict) -> dict:
+    item = k.normalize_report_schedule(schedule)
+    item["label"] = k.schedule_label(item)
+    item["chat_masked"] = mask_value(item.get("chat") or k.TELEGRAM_CHAT_ID)
+    return item
+
+
+def schedule_payload(req: ScheduleRequest, schedule_id: str | None = None) -> dict:
+    payload = req.model_dump() if hasattr(req, "model_dump") else req.dict()
+    if schedule_id:
+        payload["id"] = schedule_id
+    return k.validate_report_schedule(payload)
+
+
+def build_schedules_struct() -> dict:
+    data = k.load_report_schedules()
+    return {
+        "schedules": [schedule_response(item) for item in data.get("schedules", [])],
+        "last_runs": data.get("last_runs", {}),
+        "path": k.REPORT_SCHEDULES_PATH,
+        "cron_schedules": read_crontab_entries(),
+    }
+
+
+def summarize_alert_check_result(result: dict, notify: bool) -> dict:
+    if not result.get("enabled", True):
+        return {"level": "muted", "title": "告警未启用", "message": "检查未执行：告警功能当前关闭。"}
+    events = result.get("events", []) or []
+    active_count = int(result.get("active_count", 0) or 0)
+    suppressed = [event for event in events if event.get("suppressed")]
+    alerts = [event for event in events if event.get("kind") == "alert"]
+    recoveries = [event for event in events if event.get("kind") == "recovery"]
+    if not events:
+        return {
+            "level": "ok",
+            "title": "检查完成，暂无异常",
+            "message": f"没有发现新的告警事件，当前 active 告警 {active_count} 个。",
+            "events_count": 0,
+            "active_count": active_count,
+            "notified": bool(notify),
+        }
+    parts = []
+    if alerts:
+        parts.append(f"新增/持续告警 {len(alerts)} 个")
+    if recoveries:
+        parts.append(f"恢复 {len(recoveries)} 个")
+    if suppressed:
+        parts.append(f"静默或冷却 {len(suppressed)} 个")
+    titles = [str(event.get("title") or event.get("key") or "告警") for event in events[:3]]
+    return {
+        "level": "warn" if alerts else "ok",
+        "title": "检查完成，发现需要关注的事件" if alerts else "检查完成，告警状态已更新",
+        "message": "；".join(parts) + ("。" if parts else "。"),
+        "events_count": len(events),
+        "active_count": active_count,
+        "notified": bool(notify),
+        "items": titles,
     }
 
 
@@ -441,6 +514,38 @@ def period_parts(scope: str):
 
 def build_period_summary(scope: str) -> dict:
     start, now, tag = period_parts(scope)
+    if scope in ("week", "month"):
+        today = k.today_date()
+        historical_end = today - timedelta(days=1)
+        historical = k.history_sum(start.date(), historical_end) if historical_end >= start.date() else {}
+        today_nodes = {}
+        skipped = []
+        reset_warnings = []
+        today_baseline = k.get_baseline_nodes(today.strftime("%Y-%m-%d"))
+        if today_baseline is not None:
+            current, skipped = k.fetch_nodes_and_totals()
+            today_nodes, _new_baseline, reset_warnings = k.compute_delta_from_nodes(current, today_baseline)
+        merged = dict(historical)
+        for uuid, item in today_nodes.items():
+            if uuid not in merged:
+                merged[uuid] = {"name": item.get("name", uuid), "up": 0, "down": 0}
+            merged[uuid]["up"] += int(item.get("up", 0) or 0)
+            merged[uuid]["down"] += int(item.get("down", 0) or 0)
+            merged[uuid]["name"] = item.get("name") or merged[uuid].get("name") or uuid
+        nodes = to_node_rows(merged)
+        return {
+            "scope": scope,
+            "tag": tag,
+            "from": start.strftime("%Y-%m-%d %H:%M:%S %Z"),
+            "to": now.strftime("%Y-%m-%d %H:%M:%S %Z"),
+            "note": "sqlite_rollup" if historical else "sqlite_rollup_empty",
+            "nodes": nodes,
+            "top_nodes": nodes[: max(0, int(k.TOP_N))],
+            "total": total_from_nodes(nodes),
+            "skipped": skipped,
+            "reset_warnings": reset_warnings,
+        }
+
     baseline = k.get_baseline_nodes(tag)
     if baseline is None:
         return {
@@ -679,6 +784,7 @@ async def alerts(_user: str = Depends(current_user)):
 @app.post("/api/alerts/check")
 async def alerts_check(req: AlertCheckRequest, _user: str = Depends(current_user)):
     result = k.run_alert_check(dry_run=not req.notify, notify=req.notify, force_sample=True)
+    result["summary"] = summarize_alert_check_result(result, notify=req.notify)
     return api_ok(result)
 
 
@@ -710,6 +816,66 @@ async def telegram_test(_user: str = Depends(current_user)):
 @app.get("/api/telegram/status")
 async def telegram_status(_user: str = Depends(current_user)):
     return api_ok(build_telegram_status_struct())
+
+
+@app.get("/api/schedules")
+async def schedules(_user: str = Depends(current_user)):
+    return api_ok(build_schedules_struct())
+
+
+@app.post("/api/schedules")
+async def create_schedule(req: ScheduleRequest, _user: str = Depends(current_user)):
+    try:
+        item = schedule_payload(req)
+    except Exception as exc:
+        return api_error(str(exc), status_code=400, code="invalid_schedule")
+    data = k.load_report_schedules()
+    data["schedules"].append(item)
+    k.save_report_schedules(data)
+    return api_ok({"schedule": schedule_response(item), "schedules": build_schedules_struct()["schedules"]})
+
+
+@app.patch("/api/schedules/{schedule_id}")
+async def update_schedule(schedule_id: str, req: ScheduleRequest, _user: str = Depends(current_user)):
+    data = k.load_report_schedules()
+    schedules = data.get("schedules", [])
+    index = next((i for i, item in enumerate(schedules) if item.get("id") == schedule_id), None)
+    if index is None:
+        return api_error("schedule not found", status_code=404, code="schedule_not_found")
+    try:
+        item = schedule_payload(req, schedule_id=schedule_id)
+    except Exception as exc:
+        return api_error(str(exc), status_code=400, code="invalid_schedule")
+    schedules[index] = item
+    data["schedules"] = schedules
+    k.save_report_schedules(data)
+    return api_ok({"schedule": schedule_response(item), "schedules": build_schedules_struct()["schedules"]})
+
+
+@app.delete("/api/schedules/{schedule_id}")
+async def delete_schedule(schedule_id: str, _user: str = Depends(current_user)):
+    data = k.load_report_schedules()
+    before = len(data.get("schedules", []))
+    data["schedules"] = [item for item in data.get("schedules", []) if item.get("id") != schedule_id]
+    data.get("last_runs", {}).pop(schedule_id, None)
+    if len(data["schedules"]) == before:
+        return api_error("schedule not found", status_code=404, code="schedule_not_found")
+    k.save_report_schedules(data)
+    return api_ok({"deleted": True, "schedules": build_schedules_struct()["schedules"]})
+
+
+@app.post("/api/schedules/{schedule_id}/run-now")
+async def run_schedule_now(schedule_id: str, _user: str = Depends(current_user)):
+    data = k.load_report_schedules()
+    item = next((entry for entry in data.get("schedules", []) if entry.get("id") == schedule_id), None)
+    if not item:
+        return api_error("schedule not found", status_code=404, code="schedule_not_found")
+    try:
+        result = k.run_report_schedule(item)
+    except Exception as exc:
+        return api_error(str(exc), status_code=502, code=type(exc).__name__)
+    result["chat"] = mask_value(result.get("chat", ""))
+    return api_ok(result)
 
 
 @app.post("/api/telegram/preview")

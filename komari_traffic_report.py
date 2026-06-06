@@ -16,12 +16,14 @@ import concurrent.futures
 import signal
 import secrets
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, date, timezone
 from zoneinfo import ZoneInfo
 
 import requests
 import random
+import sqlite3
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 
@@ -130,6 +132,8 @@ TG_OFFSET_PATH = os.path.join(DATA_DIR, "tg_offset.txt")
 TG_CONFIRM_PATH = os.path.join(DATA_DIR, "tg_confirm.json")
 AI_PACK_CACHE_PATH = os.path.join(DATA_DIR, "ai_pack_cache.json")
 ALERTS_STATE_PATH = os.path.join(DATA_DIR, "alerts_state.json")
+REPORT_SCHEDULES_PATH = os.path.join(DATA_DIR, "report_schedules.json")
+TRAFFIC_DB_PATH = os.path.join(DATA_DIR, "traffic.db")
 
 TIMEOUT = int(os.environ.get("KOMARI_TIMEOUT_SECONDS", "15"))  # Komari API timeout（秒）
 
@@ -155,6 +159,8 @@ ALERT_RECOVERY_NOTIFY = parse_bool_env("ALERT_RECOVERY_NOTIFY", True)
 SHUTTING_DOWN = False
 SAMPLE_THREAD: threading.Thread | None = None
 SAMPLE_STOP_EVENT = threading.Event()
+SCHEDULER_THREAD: threading.Thread | None = None
+SCHEDULER_STOP_EVENT = threading.Event()
 
 
 def ai_enabled() -> bool:
@@ -348,6 +354,293 @@ def save_json_atomic(path: str, data):
         with open(path, "w", encoding="utf-8") as dst, open(tmp, "r", encoding="utf-8") as src:
             dst.write(src.read())
         os.unlink(tmp)
+
+
+def traffic_db_connect():
+    ensure_dirs()
+    conn = sqlite3.connect(TRAFFIC_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+@contextmanager
+def traffic_db_session():
+    conn = traffic_db_connect()
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def init_traffic_db():
+    with traffic_db_session() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+              version INTEGER PRIMARY KEY,
+              applied_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS node_daily_usage (
+              day TEXT NOT NULL,
+              uuid TEXT NOT NULL,
+              name TEXT NOT NULL,
+              up INTEGER NOT NULL DEFAULT 0,
+              down INTEGER NOT NULL DEFAULT 0,
+              total INTEGER NOT NULL DEFAULT 0,
+              source TEXT NOT NULL DEFAULT 'history',
+              source_from TEXT NOT NULL DEFAULT '',
+              source_to TEXT NOT NULL DEFAULT '',
+              reset_warnings TEXT NOT NULL DEFAULT '[]',
+              skipped TEXT NOT NULL DEFAULT '[]',
+              updated_at INTEGER NOT NULL,
+              PRIMARY KEY (day, uuid)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS period_rollups (
+              period_type TEXT NOT NULL,
+              period_key TEXT NOT NULL,
+              uuid TEXT NOT NULL,
+              name TEXT NOT NULL,
+              up INTEGER NOT NULL DEFAULT 0,
+              down INTEGER NOT NULL DEFAULT 0,
+              total INTEGER NOT NULL DEFAULT 0,
+              updated_at INTEGER NOT NULL,
+              PRIMARY KEY (period_type, period_key, uuid)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS traffic_snapshots (
+              ts INTEGER NOT NULL,
+              uuid TEXT NOT NULL,
+              name TEXT NOT NULL,
+              up INTEGER NOT NULL DEFAULT 0,
+              down INTEGER NOT NULL DEFAULT 0,
+              skipped TEXT NOT NULL DEFAULT '[]',
+              PRIMARY KEY (ts, uuid)
+            )
+            """
+        )
+        conn.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(1, ?)", (now_dt().isoformat(),))
+
+
+def upsert_daily_usage(day_str: str, deltas: dict, source: str = "history", source_from: str = "", source_to: str = "", reset_warnings: list[str] | None = None, skipped: list[str] | None = None):
+    if not deltas:
+        return
+    init_traffic_db()
+    updated_at = int(time.time())
+    reset_json = json.dumps(reset_warnings or [], ensure_ascii=False)
+    skipped_json = json.dumps(skipped or [], ensure_ascii=False)
+    rows = []
+    for uuid, item in deltas.items():
+        up = max(0, int(item.get("up", 0) or 0))
+        down = max(0, int(item.get("down", 0) or 0))
+        rows.append((
+            day_str,
+            str(uuid),
+            str(item.get("name") or uuid),
+            up,
+            down,
+            up + down,
+            source,
+            source_from,
+            source_to,
+            reset_json,
+            skipped_json,
+            updated_at,
+        ))
+    with traffic_db_session() as conn:
+        conn.executemany(
+            """
+            INSERT INTO node_daily_usage(day, uuid, name, up, down, total, source, source_from, source_to, reset_warnings, skipped, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(day, uuid) DO UPDATE SET
+              name=excluded.name,
+              up=excluded.up,
+              down=excluded.down,
+              total=excluded.total,
+              source=excluded.source,
+              source_from=excluded.source_from,
+              source_to=excluded.source_to,
+              reset_warnings=excluded.reset_warnings,
+              skipped=excluded.skipped,
+              updated_at=excluded.updated_at
+            """,
+            rows,
+        )
+
+
+def traffic_db_has_day(day_str: str) -> bool:
+    init_traffic_db()
+    with traffic_db_session() as conn:
+        row = conn.execute("SELECT 1 FROM node_daily_usage WHERE day = ? LIMIT 1", (day_str,)).fetchone()
+    return row is not None
+
+
+def aggregate_daily_usage(from_day: date, to_day: date) -> dict:
+    init_traffic_db()
+    start = from_day.strftime("%Y-%m-%d")
+    end = to_day.strftime("%Y-%m-%d")
+    with traffic_db_session() as conn:
+        rows = conn.execute(
+            """
+            SELECT uuid, COALESCE(NULLIF(name, ''), uuid) AS name, SUM(up) AS up, SUM(down) AS down
+            FROM node_daily_usage
+            WHERE day >= ? AND day <= ?
+            GROUP BY uuid
+            """,
+            (start, end),
+        ).fetchall()
+    result = {}
+    for row in rows:
+        result[str(row["uuid"])] = {
+            "name": row["name"] or row["uuid"],
+            "up": int(row["up"] or 0),
+            "down": int(row["down"] or 0),
+        }
+    return result
+
+
+def migrate_history_to_traffic_db():
+    init_traffic_db()
+    hot = load_json(HISTORY_PATH, {"days": {}}).get("days", {})
+    for day_str, deltas in (hot or {}).items():
+        if isinstance(deltas, dict):
+            upsert_daily_usage(day_str, deltas, source="history_json")
+    if not os.path.isdir(DATA_DIR):
+        return
+    for filename in os.listdir(DATA_DIR):
+        if not re.fullmatch(r"history-\d{4}-\d{2}\.json\.gz", filename):
+            continue
+        ym = filename.removeprefix("history-").removesuffix(".json.gz")
+        try:
+            arc = load_archive_month(ym).get("days", {})
+        except Exception:
+            continue
+        for day_str, deltas in (arc or {}).items():
+            if isinstance(deltas, dict):
+                upsert_daily_usage(day_str, deltas, source="history_archive")
+
+
+def default_report_schedules() -> dict:
+    return {"version": 1, "schedules": [], "last_runs": {}}
+
+
+def _parse_hhmm(value: str) -> tuple[int, int]:
+    text = str(value or "").strip()
+    match = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", text)
+    if not match:
+        raise RuntimeError("time must be HH:mm")
+    return int(match.group(1)), int(match.group(2))
+
+
+def normalize_report_schedule(item: dict) -> dict:
+    scope = str(item.get("scope") or "daily").strip().lower()
+    if scope not in ("daily", "weekly", "monthly"):
+        scope = "daily"
+    mode = str(item.get("mode") or "full").strip().lower()
+    if mode not in ("full", "top"):
+        mode = "full"
+    schedule_id = str(item.get("id") or secrets.token_urlsafe(8)).strip()
+    time_text = str(item.get("time") or "09:00").strip()
+    _parse_hhmm(time_text)
+    weekday = min(6, max(0, int(item.get("weekday", 0) or 0)))
+    month_day = min(31, max(1, int(item.get("month_day", 1) or 1)))
+    return {
+        "id": schedule_id,
+        "enabled": bool(item.get("enabled", True)),
+        "scope": scope,
+        "mode": mode,
+        "time": time_text,
+        "weekday": weekday,
+        "month_day": month_day,
+        "chat": str(item.get("chat") or "").strip(),
+        "updated_at": int(item.get("updated_at") or int(time.time())),
+    }
+
+
+def validate_report_schedule(item: dict) -> dict:
+    scope = str(item.get("scope") or "").strip().lower()
+    if scope not in ("daily", "weekly", "monthly"):
+        raise RuntimeError("scope must be daily, weekly, or monthly")
+    mode = str(item.get("mode") or "full").strip().lower()
+    if mode not in ("full", "top"):
+        raise RuntimeError("mode must be full or top")
+    _parse_hhmm(str(item.get("time") or ""))
+    raw_weekday = item.get("weekday", 0)
+    weekday = int(raw_weekday if raw_weekday not in (None, "") else 0)
+    if weekday < 0 or weekday > 6:
+        raise RuntimeError("weekday must be 0-6")
+    raw_month_day = item.get("month_day", 1)
+    month_day = int(raw_month_day if raw_month_day not in (None, "") else 1)
+    if month_day < 1 or month_day > 31:
+        raise RuntimeError("month_day must be 1-31")
+    payload = dict(item)
+    payload["scope"] = scope
+    payload["mode"] = mode
+    payload["weekday"] = weekday
+    payload["month_day"] = month_day
+    payload["enabled"] = bool(item.get("enabled", True))
+    payload["updated_at"] = int(time.time())
+    return normalize_report_schedule(payload)
+
+
+def load_report_schedules() -> dict:
+    data = load_json(REPORT_SCHEDULES_PATH, default_report_schedules())
+    schedules = data.get("schedules", []) if isinstance(data, dict) else []
+    last_runs = data.get("last_runs", {}) if isinstance(data, dict) else {}
+    if not isinstance(schedules, list):
+        schedules = []
+    if not isinstance(last_runs, dict):
+        last_runs = {}
+    return {
+        "version": 1,
+        "schedules": [normalize_report_schedule(item) for item in schedules if isinstance(item, dict)],
+        "last_runs": last_runs,
+    }
+
+
+def save_report_schedules(data: dict):
+    ensure_dirs()
+    payload = {
+        "version": 1,
+        "schedules": [normalize_report_schedule(item) for item in data.get("schedules", []) if isinstance(item, dict)],
+        "last_runs": data.get("last_runs", {}) if isinstance(data.get("last_runs", {}), dict) else {},
+    }
+    save_json_atomic(REPORT_SCHEDULES_PATH, payload)
+
+
+def schedule_label(item: dict) -> str:
+    mode = "Top" if item.get("mode") == "top" else "完整"
+    if item.get("scope") == "daily":
+        return f"每日 {item.get('time')} 发送{mode}日报"
+    if item.get("scope") == "weekly":
+        names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+        return f"每周{names[int(item.get('weekday', 0))]} {item.get('time')} 发送{mode}周报"
+    return f"每月 {int(item.get('month_day', 1))} 号 {item.get('time')} 发送{mode}月报"
+
+
+def schedule_due_key(item: dict, now: datetime) -> str | None:
+    hour, minute = _parse_hhmm(item.get("time", ""))
+    if now.hour != hour or now.minute != minute:
+        return None
+    if item.get("scope") == "weekly" and now.weekday() != int(item.get("weekday", 0)):
+        return None
+    if item.get("scope") == "monthly" and now.day != int(item.get("month_day", 1)):
+        return None
+    return f"{item.get('id')}:{now.strftime('%Y-%m-%d %H:%M')}"
 
 
 def get_json(url: str):
@@ -700,6 +993,40 @@ def _metric_stats(values: list[float]) -> dict:
     }
 
 
+def normalize_percent_metric(value, total=None) -> float | None:
+    if isinstance(value, dict):
+        used = value.get("used")
+        capacity = value.get("total", value.get("capacity", total))
+        if used is not None and capacity:
+            try:
+                capacity_f = float(capacity)
+                if capacity_f > 0:
+                    pct = float(used) / capacity_f * 100
+                    return round(pct, 2) if 0 <= pct <= 100 else None
+            except Exception:
+                return None
+        for key in ("percent", "percentage", "usage", "value"):
+            if key in value:
+                return normalize_percent_metric(value.get(key), total=total)
+        return None
+
+    try:
+        number = float(value)
+    except Exception:
+        return None
+    if 0 <= number <= 100:
+        return round(number, 2)
+    if total:
+        try:
+            total_f = float(total)
+            if total_f > 0:
+                pct = number / total_f * 100
+                return round(pct, 2) if 0 <= pct <= 100 else None
+        except Exception:
+            return None
+    return None
+
+
 def _record_time_label(record: dict) -> str | None:
     if not isinstance(record, dict):
         return None
@@ -735,8 +1062,8 @@ def compute_traffic_from_records(records: list[dict]) -> dict:
     disk_values = []
     for rec in records:
         cpu = _to_float_safe(rec.get("cpu"))
-        ram = _to_float_safe(rec.get("ram"))
-        disk = _to_float_safe(rec.get("disk"))
+        ram = normalize_percent_metric(rec.get("ram"), rec.get("ram_total"))
+        disk = normalize_percent_metric(rec.get("disk"), rec.get("disk_total"))
         if cpu is not None:
             cpu_values.append(cpu)
         if ram is not None:
@@ -1650,6 +1977,7 @@ def history_append(day_str: str, deltas: dict):
     hist.setdefault("days", {})
     hist["days"][day_str] = deltas
     save_json_atomic(HISTORY_PATH, hist)
+    upsert_daily_usage(day_str, deltas, source="daily_report")
 
 
 def archive_and_prune_history():
@@ -1703,6 +2031,11 @@ def archive_and_prune_history():
 
 def history_sum(from_day: date, to_day: date) -> dict:
     ensure_dirs()
+    migrate_history_to_traffic_db()
+    db_summed = aggregate_daily_usage(from_day, to_day)
+    if db_summed:
+        return db_summed
+
     summed = {}
     hot = load_json(HISTORY_PATH, {"days": {}}).get("days", {})
 
@@ -2405,6 +2738,68 @@ def run_period_report(from_dt: datetime, to_dt: datetime, tag: str, top_only: bo
     telegram_send(build_period_report_message(from_dt, to_dt, tag, top_only=top_only))
 
 
+def scheduled_report_period_parts(scope: str):
+    td = today_date()
+    now = now_dt()
+    if scope == "daily":
+        return start_of_day(td), now, td.strftime("%Y-%m-%d")
+    if scope == "weekly":
+        ws = start_of_week(td)
+        return start_of_day(ws), now, f"WEEK-{ws.strftime('%Y-%m-%d')}"
+    if scope == "monthly":
+        ms = start_of_month(td)
+        return start_of_day(ms), now, f"MONTH-{ms.strftime('%Y-%m-%d')}"
+    raise RuntimeError("scope must be daily, weekly, or monthly")
+
+
+def run_report_schedule(item: dict) -> dict:
+    schedule = normalize_report_schedule(item)
+    start, now, tag = scheduled_report_period_parts(schedule["scope"])
+    message = build_period_report_message(start, now, tag, top_only=(schedule["mode"] == "top"))
+    chat = schedule.get("chat") or TELEGRAM_CHAT_ID
+    telegram_send_to_chat(message, chat)
+    return {"sent": True, "chat": chat, "schedule": schedule, "label": schedule_label(schedule)}
+
+
+def scheduler_worker_loop():
+    logging.info("report scheduler started")
+    while not SCHEDULER_STOP_EVENT.is_set():
+        try:
+            data = load_report_schedules()
+            changed = False
+            now = now_dt()
+            for item in data.get("schedules", []):
+                if not item.get("enabled"):
+                    continue
+                due_key = schedule_due_key(item, now)
+                if not due_key or data["last_runs"].get(item["id"]) == due_key:
+                    continue
+                run_report_schedule(item)
+                data["last_runs"][item["id"]] = due_key
+                changed = True
+            if changed:
+                save_report_schedules(data)
+        except Exception:
+            logging.exception("report scheduler error")
+        SCHEDULER_STOP_EVENT.wait(timeout=30)
+    logging.info("report scheduler stopped")
+
+
+def start_report_scheduler():
+    global SCHEDULER_THREAD
+    if SCHEDULER_THREAD and SCHEDULER_THREAD.is_alive():
+        return
+    SCHEDULER_STOP_EVENT.clear()
+    SCHEDULER_THREAD = threading.Thread(target=scheduler_worker_loop, name="report-scheduler", daemon=True)
+    SCHEDULER_THREAD.start()
+
+
+def stop_report_scheduler():
+    SCHEDULER_STOP_EVENT.set()
+    if SCHEDULER_THREAD and SCHEDULER_THREAD.is_alive():
+        SCHEDULER_THREAD.join(timeout=3)
+
+
 def run_top_last_hours(hours: int):
     """
     /top Nh：最近 N 小时 Top 榜（合计）
@@ -2632,11 +3027,13 @@ def listen_commands():
     except Exception:
         pass
     start_sample_worker()
+    start_report_scheduler()
 
     while True:
         if SHUTTING_DOWN:
             logging.warning("shutdown flag set, exiting listen loop")
             stop_sample_worker()
+            stop_report_scheduler()
             return
         try:
             data = get_updates(offset)

@@ -35,9 +35,12 @@ const state = {
   nodesHours: 24,
   nodes: [],
   machines: [],
+  schedules: [],
+  cronSchedules: [],
   selectedNodeUuid: "",
   bindingSourceId: "",
   sidebarCollapsed: false,
+  aiAsking: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -168,7 +171,17 @@ function totalText(period) {
 
 function metric(stat, key) {
   const value = stat?.[key];
-  return value === null || value === undefined ? "--" : `${value}%`;
+  return value === null || value === undefined || Number.isNaN(Number(value)) ? "--" : `${value}%`;
+}
+
+function hoursLabel(hours) {
+  const value = Number(hours || 0);
+  if (value === 1) return "最近 1 小时";
+  if (value === 6) return "最近 6 小时";
+  if (value === 24) return "最近 24 小时";
+  if (value === 168) return "最近 7 天";
+  if (value === 720) return "最近 30 天";
+  return `${value} 小时窗口`;
 }
 
 function miniCard(label, value, note = "", status = "") {
@@ -295,9 +308,8 @@ function renderNodesTable() {
           <td>${metric(n.disk, "avg")}</td>
           <td>
             <span class="node-actions">
-              <button class="text-btn" data-node-action="open" data-uuid="${escapeHtml(n.uuid)}" ${url ? "" : "disabled"}>打开</button>
-              <button class="text-btn" data-node-action="bind" data-uuid="${escapeHtml(n.uuid)}">绑定</button>
               <button class="text-btn" data-node-action="detail" data-uuid="${escapeHtml(n.uuid)}">详情</button>
+              <button class="text-btn" data-node-action="open" data-uuid="${escapeHtml(n.uuid)}" ${url ? "" : "disabled"}>打开</button>
             </span>
           </td>
         </tr>`;
@@ -305,9 +317,9 @@ function renderNodesTable() {
     : `<tr><td colspan="9">暂无节点数据</td></tr>`;
 
   document.querySelectorAll("#nodes-table tr[data-uuid]").forEach((row) => {
-    row.addEventListener("click", (event) => {
+    row.addEventListener("click", async (event) => {
       if (event.target.closest("button,a,select")) return;
-      openKomariNode(row.dataset.uuid);
+      await selectNode(row.dataset.uuid, { scroll: false });
     });
   });
   document.querySelectorAll("[data-node-action]").forEach((button) => {
@@ -316,7 +328,6 @@ function renderNodesTable() {
       const uuid = button.dataset.uuid;
       const action = button.dataset.nodeAction;
       if (action === "open") openKomariNode(uuid);
-      if (action === "bind") openBindingPanel(uuid);
       if (action === "detail") await selectNode(uuid, { scroll: true });
     });
   });
@@ -333,7 +344,7 @@ async function loadNodes(hours = state.nodesHours) {
     if (target && nodeByUuid(target)) {
       await selectNode(target, { scroll: Boolean(routeSearch().get("node")) });
     } else {
-      $("node-detail").textContent = "点击 Top 排行可跳到节点；点击表格行可打开 Komari 探针机器。";
+      $("node-detail").textContent = "选择节点查看详情；点击打开按钮进入 Komari 机器。";
     }
   } catch (error) {
     $("nodes-table").innerHTML = `<tr><td colspan="9">${escapeHtml(friendlyError(error.message))}</td></tr>`;
@@ -353,27 +364,41 @@ async function selectNode(uuid, options = {}) {
 function renderNodeDetail(node) {
   const machine = node.komari?.machine;
   const binding = node.binding || {};
+  const bindingNeedsAttention = binding.mode !== "auto" || Boolean(binding.stale);
+  const machineNote = machine
+    ? [machine.uuid, machine.region, machine.group].filter(Boolean).join(" · ")
+    : (binding.stale ? "绑定目标不存在或 Komari 暂不可达" : "暂无可打开的 Komari 机器");
   $("node-detail").innerHTML = `
-    <div class="panel-head">
-      <div>
-        <p class="eyebrow">Node Detail</p>
-        <h3>${escapeHtml(node.name)}</h3>
+    <div class="detail-drawer">
+      <div class="detail-main">
+        <div class="detail-title">
+          <p class="eyebrow">Node Detail</p>
+          <h3>${escapeHtml(node.name)}</h3>
+          <p class="tiny">${escapeHtml(node.uuid)}</p>
+        </div>
+        <div class="detail-actions">
+          <span class="pill ${binding.stale ? "bad" : "good"}">${escapeHtml(bindingLabel(binding))}</span>
+          <span class="soft-label">${escapeHtml(hoursLabel(state.nodesHours))}</span>
+          <button class="primary-btn" id="detail-open-node" ${nodeWebUrl(node) ? "" : "disabled"}>打开 Komari 机器</button>
+        </div>
       </div>
-      <span class="pill ${binding.stale ? "bad" : "good"}">${escapeHtml(bindingLabel(binding))}</span>
-    </div>
-    <div class="detail-grid">
-      <div class="detail-item"><span>合计</span><strong>${escapeHtml(node.total_human)}</strong></div>
-      <div class="detail-item"><span>下行</span><strong>${escapeHtml(node.down_human)}</strong></div>
-      <div class="detail-item"><span>上行</span><strong>${escapeHtml(node.up_human)}</strong></div>
-      <div class="detail-item"><span>Komari 机器</span><strong>${escapeHtml(machine?.name || "未绑定")}</strong></div>
-      <div class="detail-item"><span>CPU 平均</span><strong>${metric(node.cpu, "avg")}</strong></div>
-      <div class="detail-item"><span>RAM 平均</span><strong>${metric(node.ram, "avg")}</strong></div>
-      <div class="detail-item"><span>Disk 平均</span><strong>${metric(node.disk, "avg")}</strong></div>
-      <div class="detail-item"><span>UUID</span><strong>${escapeHtml(node.uuid)}</strong></div>
-    </div>
-    <div class="inline-form">
-      <button class="primary-btn" id="detail-open-node" ${nodeWebUrl(node) ? "" : "disabled"}>打开 Komari 机器</button>
-      <button class="ghost-btn" id="detail-bind-node">绑定机器</button>
+      <div class="detail-grid">
+        <div class="detail-item"><span>合计</span><strong>${escapeHtml(node.total_human)}</strong></div>
+        <div class="detail-item"><span>下行</span><strong>${escapeHtml(node.down_human)}</strong></div>
+        <div class="detail-item"><span>上行</span><strong>${escapeHtml(node.up_human)}</strong></div>
+        <div class="detail-item"><span>Komari 机器</span><strong>${escapeHtml(machine?.name || "未绑定")}</strong><small>${escapeHtml(machineNote)}</small></div>
+        <div class="detail-item"><span>CPU 平均</span><strong>${metric(node.cpu, "avg")}</strong><small>峰值 ${metric(node.cpu, "max")}</small></div>
+        <div class="detail-item"><span>RAM 平均</span><strong>${metric(node.ram, "avg")}</strong><small>峰值 ${metric(node.ram, "max")}</small></div>
+        <div class="detail-item"><span>Disk 平均</span><strong>${metric(node.disk, "avg")}</strong><small>峰值 ${metric(node.disk, "max")}</small></div>
+        <div class="detail-item"><span>记录数</span><strong>${escapeHtml(node.record_count || "--")}</strong><small>${escapeHtml(node.from || "")} ${node.to ? `→ ${escapeHtml(node.to)}` : ""}</small></div>
+      </div>
+      <details class="advanced-bind" ${bindingNeedsAttention ? "open" : ""}>
+        <summary>${bindingNeedsAttention ? "绑定设置需要确认" : "绑定设置"}</summary>
+        <div class="advanced-bind-body">
+          <span class="tiny">默认按节点 uuid 自动绑定；只有自动匹配不准时再手动覆盖。</span>
+          <button class="ghost-btn" id="detail-bind-node">修改绑定</button>
+        </div>
+      </details>
     </div>`;
   $("detail-open-node").addEventListener("click", () => openKomariNode(node.uuid));
   $("detail-bind-node").addEventListener("click", () => openBindingPanel(node.uuid));
@@ -470,13 +495,38 @@ async function runAlertCheck(notify) {
   $("alert-result").textContent = "检查中...";
   try {
     const data = await postJson("/api/alerts/check", { notify });
-    $("alert-result").textContent = JSON.stringify(data, null, 2);
+    renderAlertCheckResult(data);
     updateStatus(notify ? "告警已检查并推送" : "告警已检查", true);
     await loadAlerts();
   } catch (error) {
     $("alert-result").textContent = friendlyError(error.message);
     updateStatus(error.message, false);
   }
+}
+
+function renderAlertCheckResult(data) {
+  const summary = data.summary || {};
+  const level = summary.level === "warn" ? "bad" : "good";
+  const title = summary.title || (data.events?.length ? "检查完成，发现事件" : "检查完成，暂无异常");
+  const message = summary.message || `当前 active 告警 ${data.active_count || 0} 个。`;
+  const items = summary.items || [];
+  $("alert-result").innerHTML = `
+    <div class="alert-check-card ${level}">
+      <div>
+        <strong>${escapeHtml(title)}</strong>
+        <p>${escapeHtml(message)}</p>
+      </div>
+      <div class="alert-check-meta">
+        <span class="pill ${level}">事件 ${escapeHtml(summary.events_count ?? (data.events || []).length)}</span>
+        <span class="pill">Active ${escapeHtml(summary.active_count ?? data.active_count ?? 0)}</span>
+        <span class="pill">${summary.notified ? "已推送" : "未推送"}</span>
+      </div>
+      ${items.length ? `<ul>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : ""}
+    </div>
+    <details class="debug-box">
+      <summary>调试详情</summary>
+      <pre>${escapeHtml(JSON.stringify(data, null, 2))}</pre>
+    </details>`;
 }
 
 async function muteAlerts(hours) {
@@ -490,29 +540,161 @@ async function muteAlerts(hours) {
   }
 }
 
+function scheduleBody() {
+  return {
+    enabled: $("schedule-enabled").checked,
+    scope: $("schedule-scope").value,
+    mode: $("schedule-mode").value,
+    time: $("schedule-time").value || "09:00",
+    weekday: Number($("schedule-weekday").value || 0),
+    month_day: Number($("schedule-month-day").value || 1),
+    chat: "",
+  };
+}
+
+function updateScheduleFormVisibility() {
+  const scope = $("schedule-scope").value;
+  $("schedule-weekday-wrap").classList.toggle("hidden", scope !== "weekly");
+  $("schedule-month-day-wrap").classList.toggle("hidden", scope !== "monthly");
+}
+
+function resetScheduleForm() {
+  $("schedule-id").value = "";
+  $("schedule-scope").value = "daily";
+  $("schedule-time").value = "09:00";
+  $("schedule-weekday").value = "0";
+  $("schedule-month-day").value = "1";
+  $("schedule-mode").value = "full";
+  $("schedule-enabled").checked = true;
+  $("save-schedule-btn").textContent = "保存计划";
+  updateScheduleFormVisibility();
+}
+
+function editSchedule(id) {
+  const item = state.schedules.find((schedule) => schedule.id === id);
+  if (!item) return;
+  $("schedule-id").value = item.id;
+  $("schedule-scope").value = item.scope || "daily";
+  $("schedule-time").value = item.time || "09:00";
+  $("schedule-weekday").value = String(item.weekday ?? 0);
+  $("schedule-month-day").value = String(item.month_day ?? 1);
+  $("schedule-mode").value = item.mode || "full";
+  $("schedule-enabled").checked = Boolean(item.enabled);
+  $("save-schedule-btn").textContent = "更新计划";
+  updateScheduleFormVisibility();
+  $("schedule-scope").focus();
+}
+
+async function saveSchedule() {
+  const id = $("schedule-id").value;
+  const options = {
+    method: id ? "PATCH" : "POST",
+    body: JSON.stringify(scheduleBody()),
+  };
+  $("telegram-result").textContent = id ? "更新计划中..." : "保存计划中...";
+  try {
+    await api(id ? `/api/schedules/${encodeURIComponent(id)}` : "/api/schedules", options);
+    $("telegram-result").textContent = id ? "计划已更新。" : "计划已保存。";
+    resetScheduleForm();
+    await loadTelegramStatus();
+  } catch (error) {
+    $("telegram-result").textContent = friendlyError(error.message);
+  }
+}
+
+async function deleteSchedule(id) {
+  if (!id || !window.confirm("删除这条推送计划？")) return;
+  $("telegram-result").textContent = "删除计划中...";
+  try {
+    await api(`/api/schedules/${encodeURIComponent(id)}`, { method: "DELETE" });
+    $("telegram-result").textContent = "计划已删除。";
+    resetScheduleForm();
+    await loadTelegramStatus();
+  } catch (error) {
+    $("telegram-result").textContent = friendlyError(error.message);
+  }
+}
+
+async function runScheduleNow(id) {
+  if (!id) return;
+  $("telegram-result").textContent = "立即发送中...";
+  try {
+    const data = await postJson(`/api/schedules/${encodeURIComponent(id)}/run-now`, {});
+    $("telegram-result").textContent = `已发送：${data.label || "计划任务"}，目标 ${data.chat || "默认 Chat"}`;
+  } catch (error) {
+    $("telegram-result").textContent = friendlyError(error.message);
+  }
+}
+
+function bindScheduleActions() {
+  document.querySelectorAll("[data-schedule-action]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const id = button.dataset.scheduleId;
+      const action = button.dataset.scheduleAction;
+      if (action === "edit") editSchedule(id);
+      if (action === "delete") deleteSchedule(id);
+      if (action === "run") runScheduleNow(id);
+    });
+  });
+}
+
 function renderTelegramStatus(data) {
   $("telegram-status-pill").textContent = data.configured ? "已配置" : "未配置";
   $("telegram-status-pill").classList.toggle("good", Boolean(data.configured));
   $("telegram-status-pill").classList.toggle("bad", !data.configured);
+  const schedules = data.schedules || [];
+  const cronSchedules = data.cron_schedules || [];
+  state.schedules = schedules;
+  state.cronSchedules = cronSchedules;
   $("telegram-summary").innerHTML = [
     miniCard("发送状态", data.configured ? "可发送" : "不可发送", data.bot_token_configured ? "Bot Token 已配置" : "缺少 Bot Token", data.configured ? "good" : "bad"),
     miniCard("默认 Chat", data.chat || "未配置"),
     miniCard("告警 Chat", data.alert_chat || "未配置"),
-    miniCard("计划任务", `${(data.schedules || []).length} 条`, "来自 crontab"),
+    miniCard("应用内计划", `${schedules.length} 条`, "面板可编辑"),
+    miniCard("旧 cron", `${cronSchedules.length} 条`, "兼容只读"),
   ].join("");
-  const schedules = data.schedules || [];
-  $("telegram-schedules").innerHTML = schedules.length
+  const appRows = schedules.length
     ? schedules.map((item) => `
-      <div class="schedule-row">
-        <span><strong>${escapeHtml(item.label)}</strong><br><span class="tiny">${escapeHtml(item.command)}</span></span>
-        <span class="pill">${escapeHtml(item.schedule)}</span>
+      <div class="schedule-row ${item.enabled ? "" : "muted-row"}">
+        <span>
+          <strong>${escapeHtml(item.label || "推送计划")}</strong><br>
+          <span class="tiny">${item.enabled ? "已启用" : "已停用"} · ${item.mode === "top" ? "Top 报表" : "完整报表"} · ${item.chat_masked ? `Chat ${escapeHtml(item.chat_masked)}` : "默认 Chat"}</span>
+        </span>
+        <span class="schedule-actions">
+          <span class="pill ${item.enabled ? "good" : ""}">${item.enabled ? "启用" : "停用"}</span>
+          <button class="text-btn" data-schedule-action="edit" data-schedule-id="${escapeHtml(item.id)}">编辑</button>
+          <button class="text-btn" data-schedule-action="run" data-schedule-id="${escapeHtml(item.id)}">立即发送</button>
+          <button class="text-btn danger" data-schedule-action="delete" data-schedule-id="${escapeHtml(item.id)}">删除</button>
+        </span>
       </div>`).join("")
-    : `<div class="empty-state">当前 Web 容器未读取到计划任务文件。</div>`;
+    : `<div class="empty-state">还没有应用内计划，可用下方表单新增每日、每周或每月推送。</div>`;
+  const cronRows = cronSchedules.length
+    ? `
+      <details class="legacy-schedules">
+        <summary>旧 crontab 兼容任务（${cronSchedules.length}）</summary>
+        <div class="stacked">
+          ${cronSchedules.map((item) => `
+            <div class="schedule-row muted-row">
+              <span><strong>${escapeHtml(item.label)}</strong><br><span class="tiny">${escapeHtml(item.command)}</span></span>
+              <span class="pill">${escapeHtml(item.schedule)}</span>
+            </div>`).join("")}
+        </div>
+      </details>`
+    : `<p class="tiny">未读取到旧 crontab；新部署推荐使用上方应用内计划。</p>`;
+  $("telegram-schedules").innerHTML = appRows + cronRows;
+  bindScheduleActions();
 }
 
 async function loadTelegramStatus() {
   try {
-    renderTelegramStatus(await api("/api/telegram/status"));
+    const status = await api("/api/telegram/status");
+    const schedules = await api("/api/schedules");
+    renderTelegramStatus({
+      ...status,
+      schedules: schedules.schedules || [],
+      cron_schedules: schedules.cron_schedules || status.cron_schedules || [],
+      schedule_path: schedules.path,
+    });
   } catch (error) {
     $("telegram-summary").innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
   }
@@ -575,6 +757,7 @@ async function loadAiStatus() {
 }
 
 async function refreshAiPack() {
+  if (state.aiAsking) return;
   $("ai-answer").textContent = "刷新数据包中...";
   try {
     const data = await postJson("/api/ai/refresh", {});
@@ -585,14 +768,34 @@ async function refreshAiPack() {
   }
 }
 
-async function askAi(question) {
-  const value = String(question || $("ai-question").value || "").trim();
+function setAiBusy(busy) {
+  state.aiAsking = Boolean(busy);
+  $("ai-ask-btn").disabled = state.aiAsking;
+  $("ai-refresh-btn").disabled = state.aiAsking;
+  document.querySelectorAll(".ai-prompt").forEach((button) => {
+    button.disabled = state.aiAsking;
+  });
+}
+
+function fillAiPrompt(button) {
+  if (state.aiAsking) return;
+  $("ai-question").value = button.dataset.question || "";
+  document.querySelectorAll(".ai-prompt").forEach((item) => item.classList.remove("active"));
+  button.classList.add("active");
+  $("ai-answer").textContent = "已填入快捷问题，确认后点击“提问”。";
+  $("ai-question").focus();
+}
+
+async function askAi() {
+  if (state.aiAsking) return;
+  const value = String($("ai-question").value || "").trim();
   if (!value) {
     $("ai-answer").textContent = "请输入问题。";
     return;
   }
   $("ai-question").value = value;
   $("ai-answer").textContent = "分析中...";
+  setAiBusy(true);
   try {
     const data = await api("/api/ai/ask", {
       method: "POST",
@@ -602,6 +805,8 @@ async function askAi(question) {
     await loadAiStatus();
   } catch (error) {
     $("ai-answer").textContent = friendlyError(error.message);
+  } finally {
+    setAiBusy(false);
   }
 }
 
@@ -743,6 +948,9 @@ function bindEvents() {
   });
   $("preview-report-btn").addEventListener("click", previewReport);
   $("send-report-btn").addEventListener("click", sendReport);
+  $("save-schedule-btn").addEventListener("click", saveSchedule);
+  $("reset-schedule-btn").addEventListener("click", resetScheduleForm);
+  $("schedule-scope").addEventListener("change", updateScheduleFormVisibility);
   $("tg-test-btn").addEventListener("click", async () => {
     $("telegram-result").textContent = "测试发送中...";
     try {
@@ -755,8 +963,9 @@ function bindEvents() {
   $("ai-refresh-btn").addEventListener("click", refreshAiPack);
   $("ai-ask-btn").addEventListener("click", () => askAi());
   document.querySelectorAll(".ai-prompt").forEach((button) => {
-    button.addEventListener("click", () => askAi(button.dataset.question));
+    button.addEventListener("click", () => fillAiPrompt(button));
   });
+  resetScheduleForm();
 }
 
 function initRoute() {

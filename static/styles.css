@@ -185,6 +185,14 @@ textarea {
   background: var(--accent-dark);
 }
 
+.primary-btn:disabled,
+.ghost-btn:disabled,
+.text-btn:disabled,
+.icon-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .ghost-btn,
 .icon-btn,
 .text-btn {
@@ -205,6 +213,10 @@ textarea {
   padding: 5px 9px;
   color: var(--accent-dark);
   font-size: 13px;
+}
+
+.text-btn.danger {
+  color: var(--red);
 }
 
 .icon-btn {
@@ -757,11 +769,45 @@ tbody tr:last-child td {
   white-space: pre-wrap;
 }
 
+.detail-strip {
+  white-space: normal;
+}
+
+.result-box:has(.alert-check-card) {
+  white-space: normal;
+}
+
+.detail-drawer {
+  display: grid;
+  gap: 12px;
+}
+
+.detail-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+}
+
+.detail-title {
+  min-width: 0;
+}
+
+.detail-title h3 {
+  overflow-wrap: anywhere;
+}
+
+.detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .detail-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
-  margin-top: 10px;
 }
 
 .detail-item {
@@ -779,8 +825,39 @@ tbody tr:last-child td {
 }
 
 .detail-item strong {
+  display: block;
   overflow-wrap: anywhere;
   font-weight: 400;
+}
+
+.detail-item small {
+  display: block;
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.advanced-bind {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.advanced-bind summary,
+.legacy-schedules summary,
+.debug-box summary {
+  color: var(--accent-dark);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.advanced-bind-body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 8px;
 }
 
 .inline-form {
@@ -794,6 +871,34 @@ tbody tr:last-child td {
 
 .inline-form select {
   width: auto;
+}
+
+.schedule-editor {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 253, 248, 0.54);
+}
+
+.schedule-editor .inline-form,
+.schedule-editor .check-row {
+  align-self: end;
+  margin-top: 0;
+}
+
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.check-row input {
+  width: auto;
+  min-height: 0;
 }
 
 .action-band {
@@ -826,12 +931,19 @@ tbody tr:last-child td {
   margin-top: 12px;
 }
 
+.ai-prompt.active {
+  color: #fffaf4;
+  border-color: var(--accent-dark);
+  background: var(--accent);
+}
+
 .source-row,
 .status-row,
 .alert-row,
 .schedule-row {
   display: flex;
   justify-content: space-between;
+  align-items: flex-start;
   gap: 12px;
   padding: 10px;
   border: 1px solid var(--line);
@@ -839,11 +951,82 @@ tbody tr:last-child td {
   background: rgba(255, 253, 248, 0.58);
 }
 
+.source-row > span,
+.status-row > span,
+.alert-row > span,
+.schedule-row > span {
+  min-width: 0;
+}
+
 .source-row strong,
 .status-row strong,
 .alert-row strong,
 .schedule-row strong {
   font-weight: 400;
+}
+
+.muted-row {
+  opacity: 0.74;
+}
+
+.schedule-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.legacy-schedules {
+  margin-top: 8px;
+}
+
+.legacy-schedules .stacked {
+  margin-top: 10px;
+}
+
+.alert-check-card {
+  display: grid;
+  gap: 8px;
+}
+
+.alert-check-card strong {
+  color: var(--ink);
+  font-weight: 400;
+}
+
+.alert-check-card p {
+  margin: 4px 0 0;
+}
+
+.alert-check-card ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.alert-check-card.bad strong {
+  color: var(--red);
+}
+
+.alert-check-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.debug-box {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.debug-box pre {
+  max-height: 220px;
+  overflow: auto;
+  margin: 8px 0 0;
+  color: var(--ink-soft);
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
 }
 
 .tiny {
@@ -916,6 +1099,7 @@ tbody tr:last-child td {
   .topbar,
   .panel-head,
   .ai-box,
+  .detail-main,
   .binding-panel {
     align-items: flex-start;
     grid-template-columns: 1fr;
@@ -923,8 +1107,21 @@ tbody tr:last-child td {
   }
 
   .top-actions,
+  .detail-actions,
   .binding-controls {
     flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .schedule-editor {
+    grid-template-columns: 1fr;
+  }
+
+  .schedule-row {
+    flex-direction: column;
+  }
+
+  .schedule-actions {
     justify-content: flex-start;
   }
 }

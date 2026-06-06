@@ -48,6 +48,8 @@ class WebAppTests(unittest.TestCase):
         self.patch_attr(k, "ALERTS_STATE_PATH", str(self.tmp_path / "alerts_state.json"))
         self.patch_attr(k, "BASELINES_PATH", str(self.tmp_path / "baselines.json"))
         self.patch_attr(k, "HISTORY_PATH", str(self.tmp_path / "history.json"))
+        self.patch_attr(k, "REPORT_SCHEDULES_PATH", str(self.tmp_path / "report_schedules.json"))
+        self.patch_attr(k, "TRAFFIC_DB_PATH", str(self.tmp_path / "traffic.db"))
         self.patch_attr(k, "TG_OFFSET_PATH", str(self.tmp_path / "tg_offset.txt"))
         self.patch_attr(k, "TG_CONFIRM_PATH", str(self.tmp_path / "tg_confirm.json"))
         self.patch_attr(k, "AI_PACK_CACHE_PATH", str(self.tmp_path / "ai_pack_cache.json"))
@@ -150,6 +152,9 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertTrue(response.json()["ok"])
         self.assertFalse((self.tmp_path / "alerts_state.json").exists())
+        summary = response.json()["data"]["summary"]
+        self.assertEqual(summary["level"], "warn")
+        self.assertIn("事件", summary["title"])
 
     def test_sensitive_values_are_not_leaked(self):
         self.login()
@@ -317,6 +322,73 @@ class WebAppTests(unittest.TestCase):
         cache = k.load_json(str(self.tmp_path / "ai_pack_cache.json"), {})
         self.assertEqual(cache["pack"]["last_24h"]["nodes"][0]["uuid"], "fresh")
         self.assertTrue(response.json()["data"]["cache_valid"])
+
+    def test_schedule_api_create_update_delete_and_run_now(self):
+        self.login()
+
+        create_response = self.client.post("/api/schedules", json={
+            "enabled": True,
+            "scope": "daily",
+            "mode": "full",
+            "time": "08:15",
+            "weekday": 0,
+            "month_day": 1,
+        })
+
+        self.assertEqual(create_response.status_code, 200, create_response.text)
+        created = create_response.json()["data"]["schedule"]
+        self.assertEqual(created["label"], "每日 08:15 发送完整日报")
+        schedule_id = created["id"]
+
+        update_response = self.client.patch(f"/api/schedules/{schedule_id}", json={
+            "enabled": False,
+            "scope": "weekly",
+            "mode": "top",
+            "time": "09:30",
+            "weekday": 2,
+            "month_day": 1,
+        })
+
+        self.assertEqual(update_response.status_code, 200, update_response.text)
+        updated = update_response.json()["data"]["schedule"]
+        self.assertFalse(updated["enabled"])
+        self.assertEqual(updated["scope"], "weekly")
+        self.assertIn("周三", updated["label"])
+
+        run_mock = Mock(return_value={
+            "sent": True,
+            "chat": "123456789",
+            "label": "每周周三 09:30 发送Top周报",
+        })
+        self.patch_attr(k, "run_report_schedule", run_mock)
+        run_response = self.client.post(f"/api/schedules/{schedule_id}/run-now")
+
+        self.assertEqual(run_response.status_code, 200, run_response.text)
+        self.assertEqual(run_response.json()["data"]["chat"], "123***789")
+        run_mock.assert_called_once()
+
+        list_response = self.client.get("/api/schedules")
+        self.assertEqual(list_response.status_code, 200, list_response.text)
+        self.assertEqual(len(list_response.json()["data"]["schedules"]), 1)
+
+        delete_response = self.client.delete(f"/api/schedules/{schedule_id}")
+        self.assertEqual(delete_response.status_code, 200, delete_response.text)
+        self.assertEqual(delete_response.json()["data"]["schedules"], [])
+
+    def test_schedule_api_rejects_invalid_time(self):
+        self.login()
+
+        response = self.client.post("/api/schedules", json={
+            "enabled": True,
+            "scope": "daily",
+            "mode": "full",
+            "time": "25:00",
+            "weekday": 0,
+            "month_day": 1,
+        })
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_schedule")
 
 
 if __name__ == "__main__":

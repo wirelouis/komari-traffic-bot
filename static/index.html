@@ -204,7 +204,7 @@
               <tbody id="nodes-table"></tbody>
             </table>
           </div>
-          <div id="node-detail" class="detail-strip">点击 Top 排行可跳到节点；点击表格行可打开 Komari 探针机器。</div>
+          <div id="node-detail" class="detail-strip">选择节点查看详情；点击打开按钮进入 Komari 机器。</div>
         </section>
       </section>
 
@@ -295,6 +295,52 @@
                 </div>
               </div>
               <div id="telegram-schedules" class="stacked"></div>
+              <div class="schedule-editor">
+                <input id="schedule-id" type="hidden">
+                <label>
+                  <span>频率</span>
+                  <select id="schedule-scope">
+                    <option value="daily">每日</option>
+                    <option value="weekly">每周</option>
+                    <option value="monthly">每月</option>
+                  </select>
+                </label>
+                <label>
+                  <span>时间</span>
+                  <input id="schedule-time" type="time" value="09:00">
+                </label>
+                <label id="schedule-weekday-wrap">
+                  <span>周几</span>
+                  <select id="schedule-weekday">
+                    <option value="0">周一</option>
+                    <option value="1">周二</option>
+                    <option value="2">周三</option>
+                    <option value="3">周四</option>
+                    <option value="4">周五</option>
+                    <option value="5">周六</option>
+                    <option value="6">周日</option>
+                  </select>
+                </label>
+                <label id="schedule-month-day-wrap">
+                  <span>日期</span>
+                  <input id="schedule-month-day" type="number" min="1" max="31" value="1">
+                </label>
+                <label>
+                  <span>报表</span>
+                  <select id="schedule-mode">
+                    <option value="full">完整</option>
+                    <option value="top">Top</option>
+                  </select>
+                </label>
+                <label class="check-row">
+                  <input id="schedule-enabled" type="checkbox" checked>
+                  <span>启用</span>
+                </label>
+                <div class="inline-form">
+                  <button id="save-schedule-btn" class="primary-btn">保存计划</button>
+                  <button id="reset-schedule-btn" class="ghost-btn">新建</button>
+                </div>
+              </div>
               <div class="inline-form">
                 <button id="tg-test-btn" class="ghost-btn">测试发送</button>
               </div>
