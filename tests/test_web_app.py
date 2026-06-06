@@ -74,6 +74,9 @@ class WebAppTests(unittest.TestCase):
         self.patch_attr(k, "KOMARI_BASE_URL", "https://komari.example")
         self.patch_attr(k, "AI_MODEL", "deepseek-test-model")
         self.patch_attr(k, "AI_PACK_CACHE_TTL_SECONDS", 3600)
+        self.patch_attr(k, "BOT_INSTANCE_NAME", "")
+        self.patch_attr(k, "TOP_N", 3)
+        self.patch_attr(k, "TASK_RUN_RETENTION_DAYS", 90)
 
     def login(self):
         response = self.client.post("/api/auth/login", json={"username": "admin", "password": "test-password"})
@@ -99,7 +102,7 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(payload["data"]["username"], "admin")
 
     def test_frontend_routes_return_index(self):
-        for path in ("/", "/nodes", "/alerts", "/telegram", "/ai", "/system"):
+        for path in ("/", "/nodes", "/alerts", "/telegram", "/ai", "/analytics", "/system"):
             with self.subTest(path=path):
                 response = self.client.get(path)
 
@@ -305,6 +308,7 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         payload = response.json()["data"]
         self.assertTrue(payload["configured"])
+        self.assertEqual(payload["model"], "deepseek-test-model")
         self.assertTrue(payload["cache_valid"])
         self.assertNotIn("secret-ai-key", response.text)
         self.assertEqual({item["key"]: item["count"] for item in payload["data_sources"]}, {
@@ -440,10 +444,42 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(payload["build"]["commit_short"], "abcdefabcdef")
         self.assertIn("maintenance", payload["data"])
         self.assertTrue(payload["config"]["komari_api_token_configured"])
+        self.assertEqual(payload["config"]["ai_model"], "deepseek-test-model")
+        self.assertEqual(payload["editable_config"]["values"]["top_n"], 3)
         self.assertNotIn("secret-telegram-token", text)
         self.assertNotIn("secret-komari-token", text)
         self.assertNotIn("secret-ai-key", text)
         self.assertNotIn("123456789", text)
+
+    def test_system_config_can_update_low_sensitive_runtime_values(self):
+        self.login()
+
+        response = self.client.post("/api/system/config", json={
+            "bot_instance_name": "prod-panel",
+            "top_n": 8,
+            "ai_pack_cache_ttl_seconds": 7200,
+            "task_run_retention_days": 30,
+        })
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()["data"]
+        self.assertEqual(payload["values"]["bot_instance_name"], "prod-panel")
+        self.assertEqual(payload["values"]["top_n"], 8)
+        self.assertEqual(payload["config"]["values"]["ai_pack_cache_ttl_seconds"], 7200)
+        self.assertEqual(k.BOT_INSTANCE_NAME, "prod-panel")
+        self.assertEqual(k.TOP_N, 8)
+        saved = k.load_json(str(self.tmp_path / "runtime_config.json"), {})
+        self.assertEqual(saved["config"]["task_run_retention_days"], 30)
+        runs = k.list_task_runs(limit=10, task_type="maintenance")
+        self.assertEqual(runs[0]["source"], "web:config")
+
+    def test_system_config_rejects_invalid_runtime_values(self):
+        self.login()
+
+        response = self.client.post("/api/system/config", json={"top_n": 0})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_runtime_config")
 
     def test_system_maintenance_prunes_task_runs_and_records_action(self):
         self.login()

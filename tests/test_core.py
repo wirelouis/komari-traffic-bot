@@ -122,6 +122,10 @@ class CoreTests(unittest.TestCase):
         self.patch_attr("ALERT_DAILY_TOTAL_BYTES", 0)
         self.patch_attr("ALERT_DAILY_NODE_BYTES", 0)
         self.patch_attr("ALERT_RECOVERY_NOTIFY", True)
+        self.patch_attr("BOT_INSTANCE_NAME", "")
+        self.patch_attr("TOP_N", 3)
+        self.patch_attr("AI_PACK_CACHE_TTL_SECONDS", 3600)
+        self.patch_attr("TASK_RUN_RETENTION_DAYS", 90)
 
     def test_parse_bytes_value_supports_units(self):
         self.assertEqual(k.parse_bytes_value(""), 0)
@@ -310,6 +314,24 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(k.aggregate_daily_usage(date(2026, 6, 1), date(2026, 6, 1))["n1"]["down"], 20)
         self.assertEqual(vacuum["table_counts"]["node_daily_usage"], 1)
         self.assertIn("after_size_human", vacuum)
+
+    def test_runtime_config_save_load_and_validate(self):
+        saved = k.save_runtime_config({
+            "bot_instance_name": "edge-prod",
+            "top_n": 6,
+            "ai_pack_cache_ttl_seconds": 1800,
+            "task_run_retention_days": 45,
+        })
+
+        self.assertEqual(saved["bot_instance_name"], "edge-prod")
+        self.assertEqual(k.TOP_N, 6)
+        self.assertEqual(k.load_runtime_config()["task_run_retention_days"], 45)
+        current = k.current_runtime_config()
+        self.assertEqual(current["values"]["ai_pack_cache_ttl_seconds"], 1800)
+        self.assertTrue(str(self.tmp_path) in current["path"])
+
+        with self.assertRaises(RuntimeError):
+            k.validate_runtime_config({"top_n": 0})
 
     def test_traffic_range_summary_aggregates_daily_and_weekly(self):
         k.upsert_daily_usage("2026-06-01", {

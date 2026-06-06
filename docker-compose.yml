@@ -15,18 +15,6 @@ services:
       retries: 3
     command: ["python", "/app/komari_traffic_report.py", "listen"]
 
-  cron:
-    image: ghcr.io/wirelouis/komari-traffic-bot:latest
-    env_file: .env
-    environment:
-      - TZ=Asia/Shanghai
-      - STAT_TZ=Asia/Shanghai
-    volumes:
-      - ./data:/data
-      - ./crontab:/app/crontab:ro
-    restart: unless-stopped
-    command: ["supercronic", "/app/crontab"]
-
   web:
     image: ghcr.io/wirelouis/komari-traffic-bot:latest
     env_file: .env

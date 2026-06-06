@@ -24,9 +24,9 @@ A **Dockerized traffic statistics extension** for **Komari Probe**, providing:
 ## ✨ Features
 
 - **Scheduled Reports**
-  - Daily report at 00:00 (yesterday)
-  - Weekly report (last week)
-  - Monthly report (last month)
+  - Configure delivery schedules in the Web console with daily / weekly / monthly plus a time
+  - Send full reports or Top reports
+  - Run now, last result, and task history are visible in the console
 - **Top Traffic Ranking**
   - `/top` – today Top N (up + down)
   - `/top 6h` – last 6 hours
@@ -172,23 +172,7 @@ LOG_LEVEL=INFO
 LOG_FILE=
 ENV
 ```
-### 3️⃣ Optional: create the legacy crontab
-
-New deployments should preferably create schedules in the Web console under Telegram delivery. You do not need to write crontab expressions for those app-managed schedules. The `cron` service below remains compatible with older deployments; avoid configuring the same daily/weekly/monthly report in both places, otherwise it may be sent twice.
-
-```
-cat > crontab <<'CRON'
-# Daily report at 00:00
-0 0 * * * python /app/komari_traffic_report.py report_daily
-
-# Weekly report (Monday)
-5 0 * * 1 python /app/komari_traffic_report.py report_weekly
-
-# Monthly report
-10 0 1 * * python /app/komari_traffic_report.py report_monthly
-CRON
-```
-### 4️⃣ docker-compose.yml
+### 3️⃣ docker-compose.yml
 ```
 version: "3.9"
 
@@ -209,18 +193,6 @@ services:
       retries: 3
     command: ["python", "/app/komari_traffic_report.py", "listen"]
 
-  cron:
-    image: ghcr.io/wirelouis/komari-traffic-bot:latest
-    env_file: .env
-    environment:
-      - TZ=Asia/Shanghai
-      - STAT_TZ=Asia/Shanghai
-    volumes:
-      - ./data:/data
-      - ./crontab:/app/crontab:ro
-    restart: unless-stopped
-    command: ["supercronic", "/app/crontab"]
-
   web:
     image: ghcr.io/wirelouis/komari-traffic-bot:latest
     env_file: .env
@@ -240,16 +212,16 @@ docker compose up -d
 ```
 Web console: `http://localhost:8080`
 
-If you only use Web-console app-managed schedules, the `cron` service is optional. Keep the `bot` service running in `listen` mode; it handles Telegram commands, sampling, and the built-in scheduler loop.
+Configure delivery schedules in the Web console under Telegram delivery. They are executed by the `bot` service running in `listen` mode. If an older deployment still has a `cron` service, remove that service and the `./crontab:/app/crontab:ro` mount from `docker-compose.yml` to avoid duplicate reports.
 
-### 5️⃣ Initialize baseline (run once)
+### 4️⃣ Initialize baseline (run once)
 ```
 docker compose exec bot \
   python /app/komari_traffic_report.py bootstrap
 ```
 ## 🧭 Web Console
 
-The Web console is a lightweight dashboard for traffic overview, node analysis, alert controls, Telegram sending, and AI Q&A.
+The Web console is a lightweight dashboard for traffic overview, node analysis, long-term analytics, alert controls, Telegram delivery, AI Q&A, and system health.
 
 - Username: `WEB_USERNAME` (default `admin`)
 - Password: `WEB_PASSWORD` (required)
@@ -258,7 +230,7 @@ The Web console is a lightweight dashboard for traffic overview, node analysis, 
 
 The node page automatically binds traffic nodes to Komari machines by `uuid`. You can also override a binding in the console. Manual overrides are stored only in `./data/node_bindings.json` and do not modify Komari itself; clicking a table row only selects the detail panel, and the “Open” button opens `KOMARI_BASE_URL/instance/{uuid}`.
 
-The Telegram delivery page can create app-managed schedules with plain controls such as daily / weekly / monthly plus a time. These schedules are stored in `./data/report_schedules.json`. Legacy `crontab` jobs remain supported for compatibility, but the Web console does not edit that file directly.
+The Telegram delivery page can create app-managed schedules with plain controls such as daily / weekly / monthly plus a time. These schedules are stored in `./data/report_schedules.json`. The System page can edit low-risk runtime settings such as instance label, Top size, AI cache TTL, and task-run retention; tokens, keys, and Web passwords are never editable or returned to the browser.
 
 The console never returns Telegram tokens, Komari tokens, AI keys, or the Web password to the browser.
 
@@ -337,7 +309,7 @@ python /app/komari_traffic_report.py check_alerts --dry-run
 
 ## 🔄 Upgrade
 ```
-docker pull ghcr.io/wirelouis/komari-traffic-bot:latest
+docker compose pull
 docker compose up -d
 ```
 
@@ -347,7 +319,7 @@ This version does not add new required environment variables. If you are using a
 - the `bot` service runs `python /app/komari_traffic_report.py listen`; app-managed schedules are executed there
 - `.env` sets `WEB_PASSWORD`
 - `KOMARI_BASE_URL` points to a Komari address reachable from your browser, used for node detail links
-- the legacy `cron` service can stay for compatibility, but new deployments should use Web-console schedules; do not configure the same schedule in both places
+- the old `cron` service and `crontab` mount are no longer needed; remove them from older compose files and manage delivery schedules in the Web console
 
 `./data/node_bindings.json`, `./data/report_schedules.json`, and `./data/traffic.db` are created automatically. `traffic.db` is preferred for weekly/monthly/longer rollups and now also stores `task_runs` execution history; legacy `history.json` plus compressed archives are migrated on read.
 

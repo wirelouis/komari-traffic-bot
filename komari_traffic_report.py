@@ -362,6 +362,86 @@ def save_json_atomic(path: str, data):
         os.unlink(tmp)
 
 
+def runtime_config_path() -> str:
+    return os.path.join(DATA_DIR, "runtime_config.json")
+
+
+def _parse_editable_int(payload: dict, key: str, current: int, min_value: int, max_value: int) -> int:
+    if key not in payload:
+        return int(current)
+    try:
+        value = int(payload.get(key))
+    except Exception:
+        raise RuntimeError(f"{key} must be an integer")
+    if value < min_value or value > max_value:
+        raise RuntimeError(f"{key} must be between {min_value} and {max_value}")
+    return value
+
+
+def validate_runtime_config(payload: dict) -> dict:
+    payload = payload if isinstance(payload, dict) else {}
+    instance_name = str(payload.get("bot_instance_name", BOT_INSTANCE_NAME) or "").strip()[:80]
+    return {
+        "bot_instance_name": instance_name,
+        "top_n": _parse_editable_int(payload, "top_n", TOP_N, 1, 50),
+        "ai_pack_cache_ttl_seconds": _parse_editable_int(payload, "ai_pack_cache_ttl_seconds", AI_PACK_CACHE_TTL_SECONDS, 0, 86400),
+        "task_run_retention_days": _parse_editable_int(payload, "task_run_retention_days", TASK_RUN_RETENTION_DAYS, 0, 3650),
+    }
+
+
+def apply_runtime_config(config: dict) -> dict:
+    global BOT_INSTANCE_NAME, TOP_N, AI_PACK_CACHE_TTL_SECONDS, TASK_RUN_RETENTION_DAYS
+    clean = validate_runtime_config(config)
+    BOT_INSTANCE_NAME = clean["bot_instance_name"]
+    TOP_N = clean["top_n"]
+    AI_PACK_CACHE_TTL_SECONDS = clean["ai_pack_cache_ttl_seconds"]
+    TASK_RUN_RETENTION_DAYS = clean["task_run_retention_days"]
+    return clean
+
+
+def load_runtime_config() -> dict:
+    stored = load_json(runtime_config_path(), {})
+    if isinstance(stored, dict) and isinstance(stored.get("config"), dict):
+        return validate_runtime_config(stored.get("config", {}))
+    return validate_runtime_config(stored if isinstance(stored, dict) else {})
+
+
+def save_runtime_config(config: dict) -> dict:
+    ensure_dirs()
+    clean = apply_runtime_config(config)
+    save_json_atomic(runtime_config_path(), {"version": 1, "config": clean, "updated_at": int(time.time())})
+    return clean
+
+
+def current_runtime_config() -> dict:
+    stored = load_json(runtime_config_path(), {})
+    stored_config = stored.get("config", {}) if isinstance(stored, dict) else {}
+    clean = validate_runtime_config({
+        "bot_instance_name": stored_config.get("bot_instance_name", BOT_INSTANCE_NAME),
+        "top_n": stored_config.get("top_n", TOP_N),
+        "ai_pack_cache_ttl_seconds": stored_config.get("ai_pack_cache_ttl_seconds", AI_PACK_CACHE_TTL_SECONDS),
+        "task_run_retention_days": stored_config.get("task_run_retention_days", TASK_RUN_RETENTION_DAYS),
+    })
+    return {
+        "path": runtime_config_path(),
+        "values": clean,
+        "editable": [
+            {"key": "bot_instance_name", "label": "实例名", "type": "text", "value": clean["bot_instance_name"], "note": "用于 Web 面板和 Telegram 报表标题。"},
+            {"key": "top_n", "label": "Top 节点数", "type": "number", "min": 1, "max": 50, "value": clean["top_n"], "note": "影响 Top 报表和面板排行。"},
+            {"key": "ai_pack_cache_ttl_seconds", "label": "AI 缓存 TTL（秒）", "type": "number", "min": 0, "max": 86400, "value": clean["ai_pack_cache_ttl_seconds"], "note": "0 表示每次实时生成。"},
+            {"key": "task_run_retention_days", "label": "任务记录保留天数", "type": "number", "min": 0, "max": 3650, "value": clean["task_run_retention_days"], "note": "0 表示关闭清理。"},
+        ],
+    }
+
+
+try:
+    stored_runtime = load_json(runtime_config_path(), {})
+    if isinstance(stored_runtime, dict) and isinstance(stored_runtime.get("config"), dict):
+        apply_runtime_config(stored_runtime.get("config", {}))
+except Exception:
+    pass
+
+
 def traffic_db_connect():
     ensure_dirs()
     conn = sqlite3.connect(TRAFFIC_DB_PATH)

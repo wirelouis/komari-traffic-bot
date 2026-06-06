@@ -74,6 +74,13 @@ class MaintenancePruneRequest(BaseModel):
     retention_days: int | None = None
 
 
+class RuntimeConfigRequest(BaseModel):
+    bot_instance_name: str | None = None
+    top_n: int | None = None
+    ai_pack_cache_ttl_seconds: int | None = None
+    task_run_retention_days: int | None = None
+
+
 def api_ok(data: Any = None, **extra):
     payload = {"ok": True, "data": data}
     payload.update(extra)
@@ -372,29 +379,6 @@ def file_status(path: str | Path, label: str) -> dict:
         return {"label": label, "path": str(p), "exists": False, "size": 0, "size_human": "0 B", "mtime": 0, "mtime_text": "", "error": str(exc)}
 
 
-def read_crontab_entries() -> list[dict]:
-    path = BASE_DIR / "crontab"
-    if not path.exists():
-        return []
-    entries = []
-    labels = {
-        "report_daily": "昨日流量日报",
-        "report_weekly": "上周流量周报",
-        "report_monthly": "上月流量月报",
-    }
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = line.split(maxsplit=5)
-        if len(parts) < 6:
-            continue
-        command = parts[5]
-        label = next((value for key, value in labels.items() if key in command), command)
-        entries.append({"schedule": " ".join(parts[:5]), "command": command, "label": label})
-    return entries
-
-
 def build_telegram_status_struct() -> dict:
     app_schedules = k.load_report_schedules().get("schedules", [])
     return {
@@ -403,7 +387,6 @@ def build_telegram_status_struct() -> dict:
         "chat": mask_value(k.TELEGRAM_CHAT_ID),
         "alert_chat": mask_value(k.telegram_alert_chat_id()),
         "schedules": app_schedules,
-        "cron_schedules": read_crontab_entries(),
         "scheduler": {"type": "app", "path": k.REPORT_SCHEDULES_PATH},
     }
 
@@ -435,7 +418,6 @@ def build_schedules_struct() -> dict:
         "schedules": [schedule_response(item) for item in data.get("schedules", [])],
         "last_runs": data.get("last_runs", {}),
         "path": k.REPORT_SCHEDULES_PATH,
-        "cron_schedules": read_crontab_entries(),
     }
 
 
@@ -522,10 +504,11 @@ def build_system_status_struct(include_recent: bool = True) -> dict:
             "telegram_chat": mask_value(k.TELEGRAM_CHAT_ID),
             "telegram_alert_chat": mask_value(k.telegram_alert_chat_id()),
             "ai_base_url": k.AI_API_BASE,
-            "ai_model": mask_value(k.AI_MODEL, visible=2) if k.AI_MODEL else "",
+            "ai_model": k.AI_MODEL,
             "web_username": web_username(),
             "web_password_configured": web_password_configured(),
         },
+        "editable_config": k.current_runtime_config(),
         "data": {
             "data_dir": str(k.DATA_DIR),
             "files": [
@@ -630,7 +613,7 @@ def build_ai_status_struct() -> dict:
             })
     return {
         "configured": k.ai_enabled(),
-        "model": mask_value(k.AI_MODEL, visible=2) if k.AI_MODEL else "",
+        "model": k.AI_MODEL,
         "cache_created_at": created_at,
         "cache_created_at_text": timestamp_text(created_at),
         "cache_age_seconds": max(0, now_ts - created_at) if created_at else 0,
@@ -804,6 +787,7 @@ def safe_records_summary(hours: int) -> dict:
 @app.get("/alerts")
 @app.get("/telegram")
 @app.get("/ai")
+@app.get("/analytics")
 @app.get("/system")
 async def index():
     index_path = STATIC_DIR / "index.html"
@@ -865,7 +849,7 @@ async def overview(_user: str = Depends(current_user)):
         "services": {
             "komari": {"configured": bool(k.KOMARI_BASE_URL), "base_url": k.KOMARI_BASE_URL},
             "telegram": {"configured": bool(k.TELEGRAM_BOT_TOKEN and k.TELEGRAM_CHAT_ID), "chat": mask_value(k.TELEGRAM_CHAT_ID)},
-            "ai": {"configured": k.ai_enabled(), "model": mask_value(k.AI_MODEL, visible=2) if k.AI_MODEL else ""},
+            "ai": {"configured": k.ai_enabled(), "model": k.AI_MODEL},
             "alerts": {"enabled": bool(k.ALERTS_ENABLED)},
         },
         "periods": {"today": today, "week": week, "month": month},
@@ -986,6 +970,40 @@ async def task_runs(limit: int = 50, task_type: str = Query("", alias="type"), _
 @app.get("/api/system/status")
 async def system_status(_user: str = Depends(current_user)):
     return api_ok(build_system_status_struct())
+
+
+@app.get("/api/system/config")
+async def system_config(_user: str = Depends(current_user)):
+    return api_ok(k.current_runtime_config())
+
+
+@app.post("/api/system/config")
+async def system_config_save(req: RuntimeConfigRequest, _user: str = Depends(current_user)):
+    payload = req.model_dump(exclude_unset=True) if hasattr(req, "model_dump") else req.dict(exclude_unset=True)
+    started = time.time()
+    try:
+        config = k.save_runtime_config(payload)
+        k.safe_record_task_run(
+            "maintenance",
+            "web:config",
+            "success",
+            started_at=started,
+            finished_at=time.time(),
+            summary="低敏配置已更新",
+            metadata={"keys": sorted(payload.keys())},
+        )
+    except Exception as exc:
+        k.safe_record_task_run(
+            "maintenance",
+            "web:config",
+            "failed",
+            started_at=started,
+            finished_at=time.time(),
+            error=str(exc),
+            metadata={"keys": sorted(payload.keys())},
+        )
+        return api_error(str(exc), status_code=400, code="invalid_runtime_config")
+    return api_ok({"config": k.current_runtime_config(), "values": config})
 
 
 @app.get("/api/system/maintenance")

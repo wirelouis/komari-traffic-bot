@@ -4,15 +4,15 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Komari Traffic Console</title>
-  <link rel="icon" type="image/svg+xml" href="/static/komari-traffic-icon.svg?v=20260606-product1">
-  <link rel="stylesheet" href="/static/styles.css?v=20260606-product1">
+  <link rel="icon" type="image/svg+xml" href="/static/komari-traffic-icon.svg?v=20260606-product4">
+  <link rel="stylesheet" href="/static/styles.css?v=20260606-product4">
 </head>
 <body>
   <main id="login-view" class="login-shell hidden">
     <section class="login-panel">
       <div class="login-brand">
         <span class="brand-mark">
-          <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260606-product1" alt="">
+          <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260606-product4" alt="">
           <span class="brand-fallback" hidden>K</span>
         </span>
         <div>
@@ -41,7 +41,7 @@
       <div class="sidebar-head">
         <a class="brand" href="/" data-route="/" aria-label="Komari Traffic 总览">
           <span class="brand-mark">
-            <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260606-product1" alt="">
+            <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260606-product4" alt="">
             <span class="brand-fallback" hidden>K</span>
           </span>
           <span class="brand-copy">
@@ -92,6 +92,16 @@
             <path d="M18.5 15.5 19 17l1.5.5-1.5.5-.5 1.5-.5-1.5-1.5-.5 1.5-.5.5-1.5Z"></path>
           </svg>
           <span class="nav-text">AI</span>
+        </a>
+        <a href="/analytics" class="nav-link" data-route="/analytics" title="分析">
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 19.5h16"></path>
+            <path d="M7 16V9"></path>
+            <path d="M12 16V5"></path>
+            <path d="M17 16v-4"></path>
+            <path d="M5.5 8.5 10 4l4.2 4.2L19 6"></path>
+          </svg>
+          <span class="nav-text">分析</span>
         </a>
         <a href="/system" class="nav-link" data-route="/system" title="系统">
           <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -413,6 +423,29 @@
         </section>
       </section>
 
+      <section class="route-view hidden" data-route="/analytics">
+        <section id="analytics" class="panel">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Analytics</p>
+              <h2>流量分析</h2>
+            </div>
+            <span id="analytics-status-pill" class="soft-label">SQLite</span>
+          </div>
+          <div class="inline-form range-controls">
+            <input id="traffic-range-from" type="date" aria-label="开始日期">
+            <input id="traffic-range-to" type="date" aria-label="结束日期">
+            <select id="traffic-range-group" aria-label="分组">
+              <option value="daily">按日</option>
+              <option value="weekly">按周</option>
+              <option value="monthly">按月</option>
+            </select>
+            <button id="load-traffic-range-btn" class="ghost-btn">查询</button>
+          </div>
+          <div id="traffic-range-result" class="stacked range-result"></div>
+        </section>
+      </section>
+
       <section class="route-view hidden" data-route="/system">
         <section id="system" class="panel">
           <div class="panel-head">
@@ -447,21 +480,15 @@
             <article class="sub-panel">
               <div class="panel-head">
                 <div>
-                  <p class="eyebrow">Range</p>
-                  <h3>SQLite 区间统计</h3>
+                  <p class="eyebrow">Editable</p>
+                  <h3>低敏配置</h3>
                 </div>
               </div>
-              <div class="inline-form range-controls">
-                <input id="traffic-range-from" type="date" aria-label="开始日期">
-                <input id="traffic-range-to" type="date" aria-label="结束日期">
-                <select id="traffic-range-group" aria-label="分组">
-                  <option value="daily">按日</option>
-                  <option value="weekly">按周</option>
-                  <option value="monthly">按月</option>
-                </select>
-                <button id="load-traffic-range-btn" class="ghost-btn">查询</button>
+              <div id="editable-config-form" class="config-editor"></div>
+              <div class="inline-form">
+                <button id="save-config-btn" class="primary-btn">保存配置</button>
               </div>
-              <div id="traffic-range-result" class="stacked range-result"></div>
+              <div id="config-result" class="result-box muted">仅开放不含 token 的运行配置。</div>
             </article>
             <article class="sub-panel">
               <div class="panel-head">
@@ -501,6 +528,6 @@
     </section>
   </main>
 
-  <script src="/static/app.js?v=20260606-product2"></script>
+  <script src="/static/app.js?v=20260606-product4"></script>
 </body>
 </html>

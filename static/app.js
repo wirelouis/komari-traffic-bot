@@ -26,10 +26,15 @@ const routeConfig = {
     title: "数据问答",
     subtitle: "刷新数据包、使用快捷问题，快速定位流量异常。",
   },
+  "/analytics": {
+    eyebrow: "Analytics",
+    title: "流量分析",
+    subtitle: "按日期范围查看 SQLite 长期统计、节点贡献和分组趋势。",
+  },
   "/system": {
     eyebrow: "System",
     title: "系统健康",
-    subtitle: "查看配置状态、SQLite 数据、任务运行记录、区间统计和维护动作。",
+    subtitle: "查看配置状态、运行记录、低敏配置和数据维护动作。",
   },
 };
 
@@ -41,7 +46,6 @@ const state = {
   nodes: [],
   machines: [],
   schedules: [],
-  cronSchedules: [],
   selectedNodeUuid: "",
   bindingSourceId: "",
   sidebarCollapsed: false,
@@ -173,6 +177,24 @@ function noteText(period) {
 function totalText(period) {
   if (!period?.ok) return "--";
   return period.data?.total?.total_human || "--";
+}
+
+function formatBytes(value) {
+  const units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+  let n = Math.max(0, Number(value || 0));
+  for (let i = 0; i < units.length; i += 1) {
+    if (n < 1024 || i === units.length - 1) {
+      return units[i] === "B" ? `${Math.round(n)} B` : `${n.toFixed(2)} ${units[i]}`;
+    }
+    n /= 1024;
+  }
+  return "0 B";
+}
+
+function percentOf(value, max) {
+  const n = Number(value || 0);
+  const m = Math.max(1, Number(max || 0));
+  return Math.max(0, Math.min(100, (n / m) * 100));
 }
 
 function metric(stat, key) {
@@ -343,24 +365,56 @@ function renderOverview(data) {
 }
 
 function renderChart(data) {
-  const nodes = data.records?.last_24h?.data?.top_nodes || data.records?.last_7d?.data?.top_nodes || [];
+  const byId = new Map();
+  const mergeNodes = (nodes, key) => {
+    (nodes || []).forEach((node) => {
+      const uuid = String(node.uuid || node.name || "");
+      if (!uuid) return;
+      const row = byId.get(uuid) || { uuid, name: node.name || uuid, last24: 0, last7d: 0 };
+      row.name = node.name || row.name;
+      row[key] = Number(node.total || 0);
+      row[`${key}_human`] = node.total_human || formatBytes(node.total);
+      byId.set(uuid, row);
+    });
+  };
+  mergeNodes(data.records?.last_24h?.data?.nodes || [], "last24");
+  mergeNodes(data.records?.last_7d?.data?.nodes || [], "last7d");
+  const nodes = [...byId.values()].sort((a, b) => (b.last7d + b.last24) - (a.last7d + a.last24));
   const chart = $("trend-chart");
   if (!nodes.length) {
     const msg = data.records?.last_24h?.error?.message || data.records?.last_7d?.error?.message || "暂无 records 数据";
     chart.innerHTML = `<div class="empty-state">${escapeHtml(friendlyError(msg))}</div>`;
     return;
   }
-  const max = Math.max(...nodes.map((n) => Number(n.total || 0)), 1);
+  const max = Math.max(...nodes.flatMap((n) => [n.last24, n.last7d]), 1);
+  const ticks = [0, 0.25, 0.5, 0.75, 1].map((ratio) => ({ ratio, label: formatBytes(max * ratio) }));
   chart.innerHTML = `
-    <div class="bar-chart" style="--bar-count: ${nodes.length}">
-      ${nodes.map((n) => {
-        const pct = Math.max(4, Math.round((Number(n.total || 0) / max) * 100));
-        return `
-          <button class="bar-item" data-jump-node="${escapeHtml(n.uuid)}" title="${escapeHtml(n.name)} · ${escapeHtml(n.total_human)}">
-            <span class="bar-track"><span class="bar-fill" style="height: ${pct}%"></span></span>
-            <span class="bar-label">${escapeHtml(n.name)}</span>
-          </button>`;
-      }).join("")}
+    <div class="traffic-chart">
+      <div class="traffic-chart-legend">
+        <span><i class="legend-dot day"></i>最近 24h</span>
+        <span><i class="legend-dot week"></i>最近 7d</span>
+        <span>${nodes.length} 个实例</span>
+      </div>
+      <div class="traffic-axis">
+        <span></span>
+        <div class="axis-ticks">${ticks.map((tick) => `<span style="left:${tick.ratio * 100}%">${escapeHtml(tick.label)}</span>`).join("")}</div>
+      </div>
+      <div class="traffic-chart-rows">
+        ${nodes.map((n) => `
+          <button class="traffic-chart-row" data-jump-node="${escapeHtml(n.uuid)}" title="${escapeHtml(n.name)}">
+            <span class="traffic-y-label">${escapeHtml(n.name)}</span>
+            <span class="traffic-bars">
+              <span class="traffic-bar-line">
+                <span class="traffic-bar day" style="width:${percentOf(n.last24, max).toFixed(2)}%"></span>
+                <span class="traffic-value">${escapeHtml(n.last24_human || formatBytes(n.last24))}</span>
+              </span>
+              <span class="traffic-bar-line">
+                <span class="traffic-bar week" style="width:${percentOf(n.last7d, max).toFixed(2)}%"></span>
+                <span class="traffic-value">${escapeHtml(n.last7d_human || formatBytes(n.last7d))}</span>
+              </span>
+            </span>
+          </button>`).join("")}
+      </div>
     </div>`;
   bindNodeJumpButtons();
 }
@@ -736,15 +790,12 @@ function renderTelegramStatus(data) {
   $("telegram-status-pill").classList.toggle("good", Boolean(data.configured));
   $("telegram-status-pill").classList.toggle("bad", !data.configured);
   const schedules = data.schedules || [];
-  const cronSchedules = data.cron_schedules || [];
   state.schedules = schedules;
-  state.cronSchedules = cronSchedules;
   $("telegram-summary").innerHTML = [
     miniCard("发送状态", data.configured ? "可发送" : "不可发送", data.bot_token_configured ? "Bot Token 已配置" : "缺少 Bot Token", data.configured ? "good" : "bad"),
     miniCard("默认 Chat", data.chat || "未配置"),
     miniCard("告警 Chat", data.alert_chat || "未配置"),
     miniCard("应用内计划", `${schedules.length} 条`, "面板可编辑"),
-    miniCard("旧 cron", `${cronSchedules.length} 条`, "兼容只读"),
   ].join("");
   const appRows = schedules.length
     ? schedules.map((item) => `
@@ -763,20 +814,7 @@ function renderTelegramStatus(data) {
         </span>
       </div>`).join("")
     : `<div class="empty-state">还没有应用内计划，可用下方表单新增每日、每周或每月推送。</div>`;
-  const cronRows = cronSchedules.length
-    ? `
-      <details class="legacy-schedules">
-        <summary>旧 crontab 兼容任务（${cronSchedules.length}）</summary>
-        <div class="stacked">
-          ${cronSchedules.map((item) => `
-            <div class="schedule-row muted-row">
-              <span><strong>${escapeHtml(item.label)}</strong><br><span class="tiny">${escapeHtml(item.command)}</span></span>
-              <span class="pill">${escapeHtml(item.schedule)}</span>
-            </div>`).join("")}
-        </div>
-      </details>`
-    : `<p class="tiny">未读取到旧 crontab；新部署推荐使用上方应用内计划。</p>`;
-  $("telegram-schedules").innerHTML = appRows + cronRows;
+  $("telegram-schedules").innerHTML = appRows;
   bindScheduleActions();
 }
 
@@ -787,7 +825,6 @@ async function loadTelegramStatus() {
     renderTelegramStatus({
       ...status,
       schedules: schedules.schedules || [],
-      cron_schedules: schedules.cron_schedules || status.cron_schedules || [],
       schedule_path: schedules.path,
     });
     await loadTaskRuns("telegram-task-runs", "report", 12);
@@ -960,6 +997,7 @@ function renderSystemStatus(data) {
       </div>`),
   ].join("");
   renderMaintenanceStatus(data.data?.maintenance || {});
+  renderEditableConfig(data.editable_config || {});
 }
 
 function renderMaintenanceStatus(status) {
@@ -975,6 +1013,61 @@ function renderMaintenanceStatus(status) {
     miniCard("数据库体积", status.db_size_human || "0 B", "traffic.db"),
     miniCard("关键表", `${counts.node_daily_usage || 0} daily`, `${counts.task_runs || 0} runs / ${counts.traffic_snapshots || 0} snapshots`),
   ].join("");
+}
+
+function renderEditableConfig(config) {
+  const target = $("editable-config-form");
+  const fields = config.editable || [];
+  if (!fields.length) {
+    target.innerHTML = `<div class="empty-state">暂无可编辑配置。</div>`;
+    return;
+  }
+  target.innerHTML = fields.map((field) => {
+    const type = field.type === "number" ? "number" : "text";
+    const attrs = [
+      `id="runtime-config-${escapeHtml(field.key)}"`,
+      `data-config-key="${escapeHtml(field.key)}"`,
+      `type="${type}"`,
+      field.min !== undefined ? `min="${escapeHtml(field.min)}"` : "",
+      field.max !== undefined ? `max="${escapeHtml(field.max)}"` : "",
+      `value="${escapeHtml(field.value ?? "")}"`,
+    ].filter(Boolean).join(" ");
+    return `
+      <label class="config-field">
+        <span>${escapeHtml(field.label || field.key)}</span>
+        <input ${attrs}>
+        <small>${escapeHtml(field.note || "")}</small>
+      </label>`;
+  }).join("");
+  $("config-result").textContent = config.path ? `配置文件：${config.path}` : "仅开放不含 token 的运行配置。";
+}
+
+function runtimeConfigPayload() {
+  const payload = {};
+  document.querySelectorAll("[data-config-key]").forEach((input) => {
+    const key = input.dataset.configKey;
+    if (!key) return;
+    payload[key] = input.type === "number" ? Number(input.value) : input.value;
+  });
+  return payload;
+}
+
+async function saveRuntimeConfig() {
+  $("config-result").textContent = "保存低敏配置中...";
+  $("save-config-btn").disabled = true;
+  try {
+    const data = await api("/api/system/config", {
+      method: "POST",
+      body: JSON.stringify(runtimeConfigPayload()),
+    });
+    renderEditableConfig(data.config || {});
+    $("config-result").textContent = "配置已保存并立即生效。";
+    await loadTaskRuns("system-task-runs", $("task-run-filter").value, 50);
+  } catch (error) {
+    $("config-result").textContent = friendlyError(error.message);
+  } finally {
+    $("save-config-btn").disabled = false;
+  }
 }
 
 function setMaintenanceBusy(busy) {
@@ -1014,36 +1107,113 @@ async function vacuumDb() {
 
 function renderTrafficRange(data) {
   const topNodes = data.top_nodes || [];
+  const nodes = data.nodes || [];
   const groups = data.groups || [];
+  const maxNode = Math.max(...nodes.map((node) => Number(node.total || 0)), 1);
+  const maxGroup = Math.max(...groups.map((group) => Number(group.total?.total || 0)), 1);
+  const source = data.source ? String(data.source) : "sqlite";
+  $("analytics-status-pill").textContent = source;
+  $("analytics-status-pill").classList.toggle("good", true);
   $("traffic-range-result").innerHTML = `
     <div class="range-summary">
       ${miniCard("区间合计", data.total?.total_human || "--", `${escapeHtml(data.from)} -> ${escapeHtml(data.to)}`)}
-      ${miniCard("覆盖天数", String(data.day_count || 0), `${(data.nodes || []).length} 个节点`)}
-      ${miniCard("分组", String(groups.length), data.group || "daily")}
+      ${miniCard("下行 / 上行", `${data.total?.down_human || "--"} / ${data.total?.up_human || "--"}`, "区间累计")}
+      ${miniCard("覆盖节点", String(nodes.length), `${data.day_count || 0} 天 / ${groups.length} 组`)}
+      ${miniCard("数据来源", source, data.group || "daily")}
     </div>
-    <div class="range-columns">
-      <div class="stacked">
-        <p class="tiny">Top 节点</p>
-        ${topNodes.length ? topNodes.map((node, index) => `
-          <div class="status-row">
-            <span><strong>${index + 1}. ${escapeHtml(node.name)}</strong><br><span class="tiny">下行 ${escapeHtml(node.down_human)} / 上行 ${escapeHtml(node.up_human)}</span></span>
-            <span class="pill">${escapeHtml(node.total_human)}</span>
-          </div>`).join("") : `<div class="empty-state">这个区间暂无节点汇总。</div>`}
-      </div>
-      <div class="stacked">
-        <p class="tiny">分组汇总</p>
-        ${groups.length ? groups.slice(0, 12).map((group) => `
-          <div class="status-row">
-            <span><strong>${escapeHtml(group.label)}</strong><br><span class="tiny">${(group.nodes || []).length} 个节点</span></span>
-            <span class="pill">${escapeHtml(group.total?.total_human || "--")}</span>
-          </div>`).join("") : `<div class="empty-state">暂无分组数据。</div>`}
-      </div>
+    <div class="analytics-grid">
+      <article class="analytics-panel analytics-wide">
+        <div class="panel-head compact-head">
+          <div>
+            <p class="eyebrow">Timeline</p>
+            <h3>分组趋势</h3>
+          </div>
+          <span class="soft-label">${escapeHtml(data.group || "daily")}</span>
+        </div>
+        <div class="analytics-axis">
+          <span>0</span>
+          <span>${escapeHtml(formatBytes(maxGroup / 2))}</span>
+          <span>${escapeHtml(formatBytes(maxGroup))}</span>
+        </div>
+        <div class="analytics-group-list">
+          ${groups.length ? groups.map((group) => `
+            <div class="analytics-group-row">
+              <span class="analytics-label" title="${escapeHtml(group.label)}">${escapeHtml(group.label)}</span>
+              <span class="analytics-track">
+                <span class="analytics-fill total" style="width:${percentOf(group.total?.total, maxGroup).toFixed(2)}%"></span>
+              </span>
+              <span class="analytics-value">${escapeHtml(group.total?.total_human || "--")}</span>
+            </div>`).join("") : `<div class="empty-state">暂无分组数据。</div>`}
+        </div>
+      </article>
+      <article class="analytics-panel">
+        <div class="panel-head compact-head">
+          <div>
+            <p class="eyebrow">Nodes</p>
+            <h3>节点贡献</h3>
+          </div>
+          <span class="soft-label">Top ${escapeHtml(String(topNodes.length || 0))}</span>
+        </div>
+        <div class="analytics-node-bars">
+          ${topNodes.length ? topNodes.map((node, index) => `
+            <button class="analytics-node-row" data-jump-node="${escapeHtml(node.uuid)}" title="跳到 ${escapeHtml(node.name)}">
+              <span class="analytics-rank">${index + 1}</span>
+              <span class="analytics-node-main">
+                <span class="analytics-node-title">${escapeHtml(node.name)}</span>
+                <span class="analytics-track">
+                  <span class="analytics-fill down" style="width:${percentOf(node.down, maxNode).toFixed(2)}%"></span>
+                  <span class="analytics-fill up" style="left:${percentOf(node.down, maxNode).toFixed(2)}%;width:${percentOf(node.up, maxNode).toFixed(2)}%"></span>
+                </span>
+                <span class="tiny">下行 ${escapeHtml(node.down_human)} / 上行 ${escapeHtml(node.up_human)}</span>
+              </span>
+              <span class="analytics-value">${escapeHtml(node.total_human)}</span>
+            </button>`).join("") : `<div class="empty-state">这个区间暂无节点汇总。</div>`}
+        </div>
+      </article>
     </div>`;
+  if (nodes.length) {
+    $("traffic-range-result").innerHTML += `
+      <article class="analytics-panel">
+        <div class="panel-head compact-head">
+          <div>
+            <p class="eyebrow">Details</p>
+            <h3>节点明细</h3>
+          </div>
+          <span class="soft-label">${nodes.length} 个节点</span>
+        </div>
+        <div class="analytics-table-wrap">
+          <table class="analytics-table">
+            <thead>
+              <tr>
+                <th>节点</th>
+                <th>下行</th>
+                <th>上行</th>
+                <th>合计</th>
+                <th>占比</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${nodes.map((node) => `
+                <tr>
+                  <td><button class="text-btn inline-node-link" data-jump-node="${escapeHtml(node.uuid)}">${escapeHtml(node.name)}</button></td>
+                  <td>${escapeHtml(node.down_human)}</td>
+                  <td>${escapeHtml(node.up_human)}</td>
+                  <td><strong>${escapeHtml(node.total_human)}</strong></td>
+                  <td>${percentOf(node.total, data.total?.total).toFixed(1)}%</td>
+                </tr>`).join("")}
+            </tbody>
+          </table>
+        </div>
+      </article>`;
+  }
+  bindNodeJumpButtons();
 }
 
 async function loadTrafficRange() {
   setDefaultRangeDates();
   $("traffic-range-result").innerHTML = `<div class="empty-state">查询 SQLite 区间统计中...</div>`;
+  $("analytics-status-pill").textContent = "查询中";
+  $("analytics-status-pill").classList.remove("good", "bad");
   try {
     const query = new URLSearchParams({
       from: $("traffic-range-from").value,
@@ -1052,18 +1222,21 @@ async function loadTrafficRange() {
     });
     renderTrafficRange(await api(`/api/traffic/range?${query.toString()}`));
   } catch (error) {
+    $("analytics-status-pill").textContent = "异常";
+    $("analytics-status-pill").classList.add("bad");
     $("traffic-range-result").innerHTML = `<div class="empty-state">${escapeHtml(friendlyError(error.message))}</div>`;
   }
 }
 
-async function loadSystemPage() {
+async function loadAnalyticsPage() {
   setDefaultRangeDates();
+  await loadTrafficRange();
+}
+
+async function loadSystemPage() {
   const system = await api("/api/system/status");
   renderSystemStatus(system);
-  await Promise.all([
-    loadTaskRuns("system-task-runs", $("task-run-filter").value, 50),
-    loadTrafficRange(),
-  ]);
+  await loadTaskRuns("system-task-runs", $("task-run-filter").value, 50);
 }
 
 async function loadCurrentRoute(forceOverview = false) {
@@ -1074,6 +1247,7 @@ async function loadCurrentRoute(forceOverview = false) {
     if (state.route === "/alerts") await loadAlerts();
     if (state.route === "/telegram") await loadTelegramStatus();
     if (state.route === "/ai") await loadAiStatus();
+    if (state.route === "/analytics") await loadAnalyticsPage();
     if (state.route === "/system") await loadSystemPage();
     updateStatus("已同步", true);
   } catch (error) {
@@ -1225,6 +1399,7 @@ function bindEvents() {
   $("load-traffic-range-btn").addEventListener("click", loadTrafficRange);
   $("traffic-range-group").addEventListener("change", loadTrafficRange);
   $("task-run-filter").addEventListener("change", () => loadTaskRuns("system-task-runs", $("task-run-filter").value, 50));
+  $("save-config-btn").addEventListener("click", saveRuntimeConfig);
   $("prune-task-runs-btn").addEventListener("click", pruneTaskRuns);
   $("vacuum-db-btn").addEventListener("click", vacuumDb);
   resetScheduleForm();
