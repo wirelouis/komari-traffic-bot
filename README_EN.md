@@ -145,6 +145,7 @@ SAMPLE_RETENTION_HOURS=2
 # History retention
 HISTORY_HOT_DAYS=60
 HISTORY_RETENTION_DAYS=400
+TASK_RUN_RETENTION_DAYS=90
 
 # Smart alerts
 ALERTS_ENABLED=1
@@ -307,6 +308,8 @@ report_schedules (app-managed Web-console delivery schedules)
 
 Upgrades and restarts will not lose data.
 
+`TASK_RUN_RETENTION_DAYS` controls the suggested retention window for Web-console task run history. The default is `90` days; set it to `0` to disable pruning. The System page maintenance actions only prune old `task_runs` rows or run SQLite vacuum; they do not delete daily, weekly, or monthly traffic rollups.
+
 ## 🚨 Smart Alerts
 
 Node consecutive sampling failure detection is enabled by default. Traffic threshold rules only trigger after you configure a threshold, so upgrades will not suddenly spam alerts.
@@ -359,7 +362,7 @@ docker compose ps
 docker image inspect ghcr.io/wirelouis/komari-traffic-bot:latest --format '{{.Id}}'
 ```
 
-To confirm the image is the one just built by GitHub Actions, check that the repository Actions page shows `build-and-publish` succeeded, then compare the digest printed by `docker compose pull` on the VPS. After upgrading, open the Web console System page and check SQLite, configuration health, and recent task runs. App-managed schedules are executed by the `bot` service; the Web console reads recent results from `traffic.db`.
+To confirm the image is the one just built by GitHub Actions, check that the repository Actions page shows `build-and-publish` succeeded, then compare the digest printed by `docker compose pull` on the VPS. After upgrading, open the Web console System page and check version/commit, SQLite, configuration health, and recent task runs. App-managed schedules are executed by the `bot` service; the Web console reads recent results from `traffic.db`.
 
 
 ## 🔐 Admin commands (admin chats only)

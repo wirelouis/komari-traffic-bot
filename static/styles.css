@@ -1000,6 +1000,14 @@ tbody tr:last-child td {
   margin-top: 12px;
 }
 
+.maintenance-panel {
+  margin-top: 14px;
+}
+
+.maintenance-actions {
+  margin-top: 12px;
+}
+
 .muted-row {
   opacity: 0.74;
 }

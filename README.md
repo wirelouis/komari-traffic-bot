@@ -140,6 +140,7 @@ SAMPLE_RETENTION_HOURS=2
 # 历史数据策略
 HISTORY_HOT_DAYS=60
 HISTORY_RETENTION_DAYS=400
+TASK_RUN_RETENTION_DAYS=90
 
 # 智能告警
 ALERTS_ENABLED=1
@@ -306,6 +307,8 @@ report_schedules（Web 面板应用内推送计划）
 
 升级 / 重启容器不会丢数据。
 
+`TASK_RUN_RETENTION_DAYS` 控制 Web 面板任务运行记录的建议保留天数，默认 `90` 天；设为 `0` 表示关闭清理。系统页的「数据维护」只会清理过旧的 `task_runs` 记录或执行 SQLite 压缩，不会删除每日/每周/月度流量汇总。
+
 ## 🚨 智能告警
 
 告警默认启用节点连续采样失败检测；流量阈值类规则只有在你配置对应阈值后才会触发，避免升级后突然刷屏。
@@ -358,7 +361,7 @@ docker compose ps
 docker image inspect ghcr.io/wirelouis/komari-traffic-bot:latest --format '{{.Id}}'
 ```
 
-如果你想确认拉到的是 GitHub Actions 刚构建的版本，可以在 GitHub 仓库的 Actions 页面查看 `build-and-publish` 是否成功，再对比 VPS 上 `docker compose pull` 输出的 digest。升级后打开 Web 面板的「系统」页，检查 SQLite、配置健康、最近任务运行记录是否正常；应用内计划任务由 `bot` 服务执行，Web 页会通过 `traffic.db` 展示最近运行结果。
+如果你想确认拉到的是 GitHub Actions 刚构建的版本，可以在 GitHub 仓库的 Actions 页面查看 `build-and-publish` 是否成功，再对比 VPS 上 `docker compose pull` 输出的 digest。升级后打开 Web 面板的「系统」页，检查版本/commit、SQLite、配置健康、最近任务运行记录是否正常；应用内计划任务由 `bot` 服务执行，Web 页会通过 `traffic.db` 展示最近运行结果。
 
 ## ⚠️ 常见问题
 /top 6h 没数据？

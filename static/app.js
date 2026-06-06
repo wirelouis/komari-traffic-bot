@@ -29,7 +29,7 @@ const routeConfig = {
   "/system": {
     eyebrow: "System",
     title: "系统健康",
-    subtitle: "查看配置状态、SQLite 数据、任务运行记录和区间统计。",
+    subtitle: "查看配置状态、SQLite 数据、任务运行记录、区间统计和维护动作。",
   },
 };
 
@@ -215,7 +215,7 @@ function setDefaultRangeDates() {
 }
 
 function runTypeLabel(type) {
-  const map = { report: "报表", alert: "告警", ai: "AI", sample: "采样" };
+  const map = { report: "报表", alert: "告警", ai: "AI", sample: "采样", maintenance: "维护" };
   return map[type] || type || "任务";
 }
 
@@ -911,11 +911,13 @@ function renderSystemStatus(data) {
   state.system = data;
   const summary = data.summary || {};
   const issues = summary.issues || [];
+  const build = data.build || {};
   $("system-status-pill").textContent = issues.length ? `${issues.length} 项待确认` : "健康";
   $("system-status-pill").classList.toggle("good", !issues.length);
   $("system-status-pill").classList.toggle("bad", Boolean(issues.length));
   $("system-summary").innerHTML = [
     miniCard("实例", data.instance || "default", `时区 ${data.stat_tz || "--"}`),
+    miniCard("版本", build.version || "dev", build.commit_short ? `commit ${build.commit_short}` : (build.build_date || "本地运行")),
     miniCard("健康项", `${summary.healthy || 0}/${summary.total || 0}`, issues.length ? issues.join("、") : "核心配置正常", issues.length ? "bad" : "good"),
     miniCard("最近失败", String(summary.recent_failures || 0), "最近 20 条任务记录", summary.recent_failures ? "bad" : "good"),
     miniCard("SQLite", data.data?.sqlite?.ok ? "可用" : "异常", `${data.data?.sqlite?.daily_rows || 0} daily / ${data.data?.sqlite?.task_runs || 0} runs`, data.data?.sqlite?.ok ? "good" : "bad"),
@@ -941,10 +943,15 @@ function renderSystemStatus(data) {
 
   const files = data.data?.files || [];
   const db = data.data?.sqlite || {};
+  const counts = db.table_counts || {};
   $("system-data").innerHTML = [
     `<div class="status-row">
       <span><strong>traffic.db</strong><br><span class="tiny">${escapeHtml(db.path || "")}</span></span>
       <span class="pill ${db.ok ? "good" : "bad"}">${escapeHtml(db.size_human || "0 B")}</span>
+    </div>`,
+    `<div class="status-row">
+      <span><strong>SQLite 表行数</strong><br><span class="tiny">daily ${counts.node_daily_usage || 0} / snapshots ${counts.traffic_snapshots || 0} / runs ${counts.task_runs || 0}</span></span>
+      <span class="pill">${escapeHtml(String(counts.period_rollups || 0))} rollups</span>
     </div>`,
     ...files.map((file) => `
       <div class="status-row ${file.exists ? "" : "muted-row"}">
@@ -952,6 +959,57 @@ function renderSystemStatus(data) {
         <span class="pill ${file.exists ? "good" : ""}">${escapeHtml(file.exists ? file.size_human : "未创建")}</span>
       </div>`),
   ].join("");
+  renderMaintenanceStatus(data.data?.maintenance || {});
+}
+
+function renderMaintenanceStatus(status) {
+  const ok = status.ok !== false;
+  const oldRuns = Number(status.old_task_runs || 0);
+  $("maintenance-status-pill").textContent = ok ? (oldRuns ? `${oldRuns} 条可清理` : "干净") : "异常";
+  $("maintenance-status-pill").classList.toggle("good", ok && !oldRuns);
+  $("maintenance-status-pill").classList.toggle("bad", !ok);
+  const counts = status.table_counts || {};
+  $("maintenance-summary").innerHTML = [
+    miniCard("运行记录保留", status.retention_enabled ? `${status.retention_days || 0} 天` : "关闭", status.cutoff_text ? `早于 ${status.cutoff_text}` : "不会自动清理"),
+    miniCard("旧运行记录", String(oldRuns), `${status.task_runs || 0} 条总记录`, oldRuns ? "bad" : "good"),
+    miniCard("数据库体积", status.db_size_human || "0 B", "traffic.db"),
+    miniCard("关键表", `${counts.node_daily_usage || 0} daily`, `${counts.task_runs || 0} runs / ${counts.traffic_snapshots || 0} snapshots`),
+  ].join("");
+}
+
+function setMaintenanceBusy(busy) {
+  $("prune-task-runs-btn").disabled = busy;
+  $("vacuum-db-btn").disabled = busy;
+}
+
+async function pruneTaskRuns() {
+  $("maintenance-result").textContent = "清理旧运行记录中...";
+  setMaintenanceBusy(true);
+  try {
+    const data = await postJson("/api/system/maintenance/prune-task-runs", {});
+    renderMaintenanceStatus(data.maintenance || {});
+    $("maintenance-result").textContent = `已清理 ${data.result?.deleted || 0} 条旧运行记录，当前剩余 ${data.result?.remaining || 0} 条。`;
+    await loadTaskRuns("system-task-runs", $("task-run-filter").value, 50);
+  } catch (error) {
+    $("maintenance-result").textContent = friendlyError(error.message);
+  } finally {
+    setMaintenanceBusy(false);
+  }
+}
+
+async function vacuumDb() {
+  $("maintenance-result").textContent = "压缩 SQLite 中...";
+  setMaintenanceBusy(true);
+  try {
+    const data = await postJson("/api/system/maintenance/vacuum", {});
+    renderMaintenanceStatus(data.maintenance || {});
+    $("maintenance-result").textContent = `SQLite 压缩完成：${data.result?.before_size_human || "0 B"} -> ${data.result?.after_size_human || "0 B"}，释放 ${data.result?.saved_human || "0 B"}。`;
+    await loadTaskRuns("system-task-runs", $("task-run-filter").value, 50);
+  } catch (error) {
+    $("maintenance-result").textContent = friendlyError(error.message);
+  } finally {
+    setMaintenanceBusy(false);
+  }
 }
 
 function renderTrafficRange(data) {
@@ -1167,6 +1225,8 @@ function bindEvents() {
   $("load-traffic-range-btn").addEventListener("click", loadTrafficRange);
   $("traffic-range-group").addEventListener("change", loadTrafficRange);
   $("task-run-filter").addEventListener("change", () => loadTaskRuns("system-task-runs", $("task-run-filter").value, 50));
+  $("prune-task-runs-btn").addEventListener("click", pruneTaskRuns);
+  $("vacuum-db-btn").addEventListener("click", vacuumDb);
   resetScheduleForm();
   setDefaultRangeDates();
 }

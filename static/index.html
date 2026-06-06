@@ -475,16 +475,32 @@
                   <option value="alert">告警</option>
                   <option value="ai">AI</option>
                   <option value="sample">采样</option>
+                  <option value="maintenance">维护</option>
                 </select>
               </div>
               <div id="system-task-runs" class="stacked"></div>
             </article>
           </div>
+          <article class="sub-panel maintenance-panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Maintenance</p>
+                <h3>数据维护</h3>
+              </div>
+              <span id="maintenance-status-pill" class="soft-label">--</span>
+            </div>
+            <div id="maintenance-summary" class="mini-grid"></div>
+            <div class="inline-form maintenance-actions">
+              <button id="prune-task-runs-btn" class="ghost-btn">清理旧运行记录</button>
+              <button id="vacuum-db-btn" class="ghost-btn">压缩 SQLite</button>
+            </div>
+            <div id="maintenance-result" class="result-box muted">等待操作。</div>
+          </article>
         </section>
       </section>
     </section>
   </main>
 
-  <script src="/static/app.js?v=20260606-product1"></script>
+  <script src="/static/app.js?v=20260606-product2"></script>
 </body>
 </html>

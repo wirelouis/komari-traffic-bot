@@ -70,6 +70,10 @@ class ScheduleRequest(BaseModel):
     chat: str = ""
 
 
+class MaintenancePruneRequest(BaseModel):
+    retention_days: int | None = None
+
+
 def api_ok(data: Any = None, **extra):
     payload = {"ok": True, "data": data}
     payload.update(extra)
@@ -338,6 +342,17 @@ def task_run_response(run: dict | None) -> dict | None:
     }
 
 
+def build_info() -> dict:
+    commit = k.GIT_COMMIT or ""
+    return {
+        "version": k.APP_VERSION,
+        "commit": commit,
+        "commit_short": commit[:12] if commit else "",
+        "build_date": k.BUILD_DATE,
+        "image_source": k.IMAGE_SOURCE,
+    }
+
+
 def file_status(path: str | Path, label: str) -> dict:
     p = Path(path)
     try:
@@ -432,6 +447,7 @@ def build_traffic_db_status() -> dict:
         "ok": True,
         "daily_rows": 0,
         "task_runs": 0,
+        "table_counts": {},
         "error": "",
     }
     try:
@@ -439,12 +455,32 @@ def build_traffic_db_status() -> dict:
         with k.traffic_db_session() as conn:
             result["daily_rows"] = int(conn.execute("SELECT COUNT(*) AS c FROM node_daily_usage").fetchone()["c"] or 0)
             result["task_runs"] = int(conn.execute("SELECT COUNT(*) AS c FROM task_runs").fetchone()["c"] or 0)
+        result["table_counts"] = k.traffic_db_table_counts()
     except Exception as exc:
         result["ok"] = False
         result["error"] = str(exc)
     result["exists"] = Path(k.TRAFFIC_DB_PATH).exists()
     result["size_human"] = file_status(k.TRAFFIC_DB_PATH, "traffic.db").get("size_human", "0 B")
     return result
+
+
+def build_maintenance_status() -> dict:
+    try:
+        status = k.traffic_db_maintenance_status()
+        status["ok"] = True
+        return status
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "retention_days": k.TASK_RUN_RETENTION_DAYS,
+            "retention_enabled": k.TASK_RUN_RETENTION_DAYS > 0,
+            "old_task_runs": 0,
+            "task_runs": 0,
+            "table_counts": {},
+            "db_size": 0,
+            "db_size_human": "0 B",
+        }
 
 
 def build_system_status_struct(include_recent: bool = True) -> dict:
@@ -472,6 +508,7 @@ def build_system_status_struct(include_recent: bool = True) -> dict:
         "now": k.now_dt().strftime("%Y-%m-%d %H:%M:%S %Z"),
         "stat_tz": k.STAT_TZ,
         "instance": k.BOT_INSTANCE_NAME or "default",
+        "build": build_info(),
         "summary": {
             "healthy": healthy_count,
             "total": len(service_items),
@@ -500,6 +537,7 @@ def build_system_status_struct(include_recent: bool = True) -> dict:
                 file_status(k.ALERTS_STATE_PATH, "alerts_state.json"),
             ],
             "sqlite": db_status,
+            "maintenance": build_maintenance_status(),
         },
         "runtime": {
             "process": "web",
@@ -948,6 +986,73 @@ async def task_runs(limit: int = 50, task_type: str = Query("", alias="type"), _
 @app.get("/api/system/status")
 async def system_status(_user: str = Depends(current_user)):
     return api_ok(build_system_status_struct())
+
+
+@app.get("/api/system/maintenance")
+async def system_maintenance(_user: str = Depends(current_user)):
+    return api_ok(build_maintenance_status())
+
+
+@app.post("/api/system/maintenance/prune-task-runs")
+async def system_prune_task_runs(req: MaintenancePruneRequest, _user: str = Depends(current_user)):
+    started = time.time()
+    try:
+        result = k.prune_task_runs(req.retention_days)
+        k.safe_record_task_run(
+            "maintenance",
+            "web:prune-task-runs",
+            "success",
+            started_at=started,
+            finished_at=time.time(),
+            summary=f"清理旧运行记录 {result.get('deleted', 0)} 条",
+            metadata={
+                "retention_days": result.get("retention_days"),
+                "deleted": result.get("deleted"),
+                "cutoff": result.get("cutoff"),
+            },
+        )
+    except Exception as exc:
+        k.safe_record_task_run(
+            "maintenance",
+            "web:prune-task-runs",
+            "failed",
+            started_at=started,
+            finished_at=time.time(),
+            error=str(exc),
+        )
+        return api_error(str(exc), status_code=400, code=type(exc).__name__)
+    return api_ok({"maintenance": build_maintenance_status(), "result": result})
+
+
+@app.post("/api/system/maintenance/vacuum")
+async def system_vacuum(_user: str = Depends(current_user)):
+    started = time.time()
+    try:
+        result = k.vacuum_traffic_db()
+        k.safe_record_task_run(
+            "maintenance",
+            "web:vacuum",
+            "success",
+            started_at=started,
+            finished_at=time.time(),
+            summary=f"SQLite 已压缩，释放 {result.get('saved_human', '0 B')}",
+            metadata={
+                "before_size": result.get("before_size"),
+                "after_size": result.get("after_size"),
+                "saved_bytes": result.get("saved_bytes"),
+            },
+        )
+    except Exception as exc:
+        k.safe_record_task_run(
+            "maintenance",
+            "web:vacuum",
+            "failed",
+            started_at=started,
+            finished_at=time.time(),
+            error=str(exc),
+        )
+        return api_error(str(exc), status_code=500, code=type(exc).__name__)
+    return api_ok({"maintenance": build_maintenance_status(), "result": result})
 
 
 @app.get("/api/alerts")

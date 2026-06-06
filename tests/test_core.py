@@ -292,6 +292,25 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(len(all_runs), 2)
         self.assertEqual(all_runs[0]["status"], "failed")
 
+    def test_task_run_prune_and_vacuum_keep_traffic_rollups(self):
+        k.upsert_daily_usage("2026-06-01", {
+            "n1": {"name": "Node One", "up": 10, "down": 20},
+        }, source="test")
+        k.record_task_run("report", "old", "success", started_at=1000, finished_at=1001, summary="old")
+        k.record_task_run("report", "recent", "success", started_at=150000, finished_at=150001, summary="recent")
+
+        status = k.traffic_db_maintenance_status(retention_days=1, now_ts=200000)
+        result = k.prune_task_runs(retention_days=1, now_ts=200000)
+        vacuum = k.vacuum_traffic_db()
+
+        self.assertEqual(status["old_task_runs"], 1)
+        self.assertEqual(result["deleted"], 1)
+        self.assertEqual(result["remaining"], 1)
+        self.assertEqual(k.list_task_runs(limit=10)[0]["summary"], "recent")
+        self.assertEqual(k.aggregate_daily_usage(date(2026, 6, 1), date(2026, 6, 1))["n1"]["down"], 20)
+        self.assertEqual(vacuum["table_counts"]["node_daily_usage"], 1)
+        self.assertIn("after_size_human", vacuum)
+
     def test_traffic_range_summary_aggregates_daily_and_weekly(self):
         k.upsert_daily_usage("2026-06-01", {
             "n1": {"name": "Node One", "up": 10, "down": 20},

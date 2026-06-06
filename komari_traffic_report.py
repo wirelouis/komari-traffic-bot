@@ -137,6 +137,12 @@ TRAFFIC_DB_PATH = os.path.join(DATA_DIR, "traffic.db")
 
 TIMEOUT = int(os.environ.get("KOMARI_TIMEOUT_SECONDS", "15"))  # Komari API timeout（秒）
 
+APP_VERSION = os.environ.get("APP_VERSION", "dev").strip() or "dev"
+GIT_COMMIT = os.environ.get("GIT_COMMIT", "").strip()
+BUILD_DATE = os.environ.get("BUILD_DATE", "").strip()
+IMAGE_SOURCE = os.environ.get("IMAGE_SOURCE", "ghcr.io/wirelouis/komari-traffic-bot").strip()
+TASK_RUN_RETENTION_DAYS = max(0, int(os.environ.get("TASK_RUN_RETENTION_DAYS", "90")))
+
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 LOG_FILE = os.environ.get("LOG_FILE", "").strip()
 
@@ -589,6 +595,108 @@ def list_task_runs(limit: int = 50, task_type: str | None = None) -> list[dict]:
             "metadata": _json_loads_object(row["metadata"]),
         })
     return runs
+
+
+def count_task_runs(task_type: str | None = None, before_ts: int | float | None = None) -> int:
+    init_traffic_db()
+    task_type = str(task_type or "").strip().lower()
+    clauses = []
+    params: list = []
+    if task_type:
+        clauses.append("type = ?")
+        params.append(task_type)
+    if before_ts is not None:
+        clauses.append("started_at < ?")
+        params.append(int(before_ts))
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    with traffic_db_session() as conn:
+        row = conn.execute(f"SELECT COUNT(*) AS c FROM task_runs {where}", params).fetchone()
+    return int(row["c"] or 0)
+
+
+def prune_task_runs(retention_days: int | None = None, now_ts: int | float | None = None) -> dict:
+    init_traffic_db()
+    days = TASK_RUN_RETENTION_DAYS if retention_days is None else int(retention_days)
+    if days < 0:
+        raise RuntimeError("retention_days must be >= 0")
+    if days == 0:
+        return {
+            "enabled": False,
+            "retention_days": 0,
+            "cutoff": 0,
+            "cutoff_text": "",
+            "deleted": 0,
+            "remaining": count_task_runs(),
+        }
+    now_value = int(now_ts if now_ts is not None else time.time())
+    cutoff = now_value - days * 86400
+    with traffic_db_session() as conn:
+        cur = conn.execute("DELETE FROM task_runs WHERE started_at < ?", (cutoff,))
+        deleted = int(cur.rowcount or 0)
+        row = conn.execute("SELECT COUNT(*) AS c FROM task_runs").fetchone()
+        remaining = int(row["c"] or 0)
+    return {
+        "enabled": True,
+        "retention_days": days,
+        "cutoff": cutoff,
+        "cutoff_text": datetime.fromtimestamp(cutoff, TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "deleted": deleted,
+        "remaining": remaining,
+    }
+
+
+def traffic_db_table_counts() -> dict:
+    init_traffic_db()
+    tables = ("node_daily_usage", "period_rollups", "traffic_snapshots", "task_runs")
+    counts = {}
+    with traffic_db_session() as conn:
+        for table in tables:
+            row = conn.execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()
+            counts[table] = int(row["c"] or 0)
+    return counts
+
+
+def traffic_db_maintenance_status(retention_days: int | None = None, now_ts: int | float | None = None) -> dict:
+    init_traffic_db()
+    days = TASK_RUN_RETENTION_DAYS if retention_days is None else int(retention_days)
+    if days < 0:
+        raise RuntimeError("retention_days must be >= 0")
+    now_value = int(now_ts if now_ts is not None else time.time())
+    cutoff = now_value - days * 86400 if days else 0
+    size = os.path.getsize(TRAFFIC_DB_PATH) if os.path.exists(TRAFFIC_DB_PATH) else 0
+    counts = traffic_db_table_counts()
+    return {
+        "retention_days": days,
+        "retention_enabled": days > 0,
+        "cutoff": cutoff,
+        "cutoff_text": datetime.fromtimestamp(cutoff, TZ).strftime("%Y-%m-%d %H:%M:%S %Z") if cutoff else "",
+        "old_task_runs": count_task_runs(before_ts=cutoff) if cutoff else 0,
+        "task_runs": counts.get("task_runs", 0),
+        "table_counts": counts,
+        "db_size": size,
+        "db_size_human": human_bytes(size),
+    }
+
+
+def vacuum_traffic_db() -> dict:
+    init_traffic_db()
+    before = os.path.getsize(TRAFFIC_DB_PATH) if os.path.exists(TRAFFIC_DB_PATH) else 0
+    conn = traffic_db_connect()
+    try:
+        conn.execute("VACUUM")
+        conn.commit()
+    finally:
+        conn.close()
+    after = os.path.getsize(TRAFFIC_DB_PATH) if os.path.exists(TRAFFIC_DB_PATH) else 0
+    return {
+        "before_size": before,
+        "after_size": after,
+        "before_size_human": human_bytes(before),
+        "after_size_human": human_bytes(after),
+        "saved_bytes": max(0, before - after),
+        "saved_human": human_bytes(max(0, before - after)),
+        "table_counts": traffic_db_table_counts(),
+    }
 
 
 def latest_task_run(task_type: str | None = None, source_prefix: str | None = None, metadata_key: str | None = None, metadata_value=None) -> dict | None:

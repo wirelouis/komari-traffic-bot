@@ -2,6 +2,7 @@ import os
 import tempfile
 import time
 import unittest
+from datetime import date
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -424,6 +425,9 @@ class WebAppTests(unittest.TestCase):
 
     def test_system_status_is_masked_and_reports_db(self):
         self.login()
+        self.patch_attr(k, "APP_VERSION", "test-version")
+        self.patch_attr(k, "GIT_COMMIT", "abcdefabcdef0000")
+        self.patch_attr(k, "BUILD_DATE", "2026-06-06T00:00:00Z")
         k.record_task_run("sample", "sample-worker", "success", started_at=1000, finished_at=1001, summary="采样")
 
         response = self.client.get("/api/system/status")
@@ -432,11 +436,50 @@ class WebAppTests(unittest.TestCase):
         text = response.text
         payload = response.json()["data"]
         self.assertEqual(payload["data"]["sqlite"]["task_runs"], 1)
+        self.assertEqual(payload["build"]["version"], "test-version")
+        self.assertEqual(payload["build"]["commit_short"], "abcdefabcdef")
+        self.assertIn("maintenance", payload["data"])
         self.assertTrue(payload["config"]["komari_api_token_configured"])
         self.assertNotIn("secret-telegram-token", text)
         self.assertNotIn("secret-komari-token", text)
         self.assertNotIn("secret-ai-key", text)
         self.assertNotIn("123456789", text)
+
+    def test_system_maintenance_prunes_task_runs_and_records_action(self):
+        self.login()
+        self.patch_attr(k, "TASK_RUN_RETENTION_DAYS", 1)
+        k.upsert_daily_usage("2026-06-01", {
+            "n1": {"name": "Node One", "up": 10, "down": 20},
+        }, source="test")
+        k.record_task_run("report", "old", "success", started_at=1000, finished_at=1001, summary="old")
+
+        response = self.client.post("/api/system/maintenance/prune-task-runs", json={})
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()["data"]
+        self.assertEqual(payload["result"]["deleted"], 1)
+        self.assertEqual(payload["maintenance"]["old_task_runs"], 0)
+        runs = k.list_task_runs(limit=10)
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]["type"], "maintenance")
+        self.assertEqual(runs[0]["source"], "web:prune-task-runs")
+        daily = k.aggregate_daily_usage(date(2026, 6, 1), date(2026, 6, 1))["n1"]
+        self.assertEqual(daily["up"] + daily["down"], 30)
+
+    def test_system_maintenance_vacuum_records_action(self):
+        self.login()
+        k.upsert_daily_usage("2026-06-01", {
+            "n1": {"name": "Node One", "up": 10, "down": 20},
+        }, source="test")
+
+        response = self.client.post("/api/system/maintenance/vacuum")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()["data"]
+        self.assertIn("after_size_human", payload["result"])
+        runs = k.list_task_runs(limit=10, task_type="maintenance")
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]["source"], "web:vacuum")
 
     def test_schedule_run_now_writes_task_run_when_core_runs(self):
         self.login()
