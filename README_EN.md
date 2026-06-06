@@ -346,7 +346,20 @@ This version does not add new required environment variables. If you are using a
 - `KOMARI_BASE_URL` points to a Komari address reachable from your browser, used for node detail links
 - the legacy `cron` service can stay for compatibility, but new deployments should use Web-console schedules; do not configure the same schedule in both places
 
-`./data/node_bindings.json`, `./data/report_schedules.json`, and `./data/traffic.db` are created automatically. `traffic.db` is preferred for weekly/monthly/longer rollups, and legacy `history.json` plus compressed archives are migrated on read.
+`./data/node_bindings.json`, `./data/report_schedules.json`, and `./data/traffic.db` are created automatically. `traffic.db` is preferred for weekly/monthly/longer rollups and now also stores `task_runs` execution history; legacy `history.json` plus compressed archives are migrated on read.
+
+### Confirm `latest` Is Fresh
+
+After a push to `main`, GitHub Actions builds and publishes `ghcr.io/wirelouis/komari-traffic-bot:latest`. On your VPS, update and verify with:
+
+```
+docker compose pull
+docker compose up -d
+docker compose ps
+docker image inspect ghcr.io/wirelouis/komari-traffic-bot:latest --format '{{.Id}}'
+```
+
+To confirm the image is the one just built by GitHub Actions, check that the repository Actions page shows `build-and-publish` succeeded, then compare the digest printed by `docker compose pull` on the VPS. After upgrading, open the Web console System page and check SQLite, configuration health, and recent task runs. App-managed schedules are executed by the `bot` service; the Web console reads recent results from `traffic.db`.
 
 
 ## 🔐 Admin commands (admin chats only)

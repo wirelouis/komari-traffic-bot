@@ -270,6 +270,46 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(summed["n2"], {"name": "Node Two", "up": 5, "down": 7})
         self.assertTrue((self.tmp_path / "traffic.db").exists())
 
+    def test_task_runs_record_and_filter(self):
+        k.record_task_run(
+            "report",
+            "web:composer",
+            "success",
+            started_at=1000,
+            finished_at=1002.5,
+            summary="sent",
+            metadata={"scope": "today"},
+        )
+        k.record_task_run("alert", "web:alerts-check", "failed", started_at=1003, finished_at=1004, error="boom")
+
+        report_runs = k.list_task_runs(limit=10, task_type="report")
+        all_runs = k.list_task_runs(limit=10)
+
+        self.assertEqual(len(report_runs), 1)
+        self.assertEqual(report_runs[0]["summary"], "sent")
+        self.assertEqual(report_runs[0]["metadata"]["scope"], "today")
+        self.assertEqual(report_runs[0]["duration_ms"], 2500)
+        self.assertEqual(len(all_runs), 2)
+        self.assertEqual(all_runs[0]["status"], "failed")
+
+    def test_traffic_range_summary_aggregates_daily_and_weekly(self):
+        k.upsert_daily_usage("2026-06-01", {
+            "n1": {"name": "Node One", "up": 10, "down": 20},
+            "n2": {"name": "Node Two", "up": 5, "down": 7},
+        }, source="test")
+        k.upsert_daily_usage("2026-06-02", {
+            "n1": {"name": "Node One", "up": 3, "down": 4},
+        }, source="test")
+
+        daily = k.traffic_range_summary(date(2026, 6, 1), date(2026, 6, 2), group="daily")
+        weekly = k.traffic_range_summary(date(2026, 6, 1), date(2026, 6, 2), group="weekly")
+
+        self.assertEqual(daily["total"]["total"], 49)
+        self.assertEqual(daily["nodes"][0]["uuid"], "n1")
+        self.assertEqual(len(daily["groups"]), 2)
+        self.assertEqual(weekly["groups"][0]["key"], "2026-06-01")
+        self.assertEqual(weekly["groups"][0]["total"]["total"], 49)
+
     def test_report_schedule_validation_and_due_key(self):
         schedule = k.validate_report_schedule({
             "enabled": True,
@@ -290,6 +330,19 @@ class CoreTests(unittest.TestCase):
             k.validate_report_schedule({"scope": "weekly", "mode": "full", "time": "09:00", "weekday": 7})
         with self.assertRaises(RuntimeError):
             k.validate_report_schedule({"scope": "monthly", "mode": "full", "time": "09:00", "month_day": 0})
+
+    def test_schedule_next_run_at(self):
+        daily = k.validate_report_schedule({"scope": "daily", "mode": "full", "time": "09:00"})
+        weekly = k.validate_report_schedule({"scope": "weekly", "mode": "top", "time": "08:30", "weekday": 2})
+        monthly = k.validate_report_schedule({"scope": "monthly", "mode": "full", "time": "10:15", "month_day": 6})
+
+        daily_next = k.schedule_next_run_at(daily, datetime(2026, 6, 6, 9, 1, tzinfo=k.TZ))
+        weekly_next = k.schedule_next_run_at(weekly, datetime(2026, 6, 6, 7, 0, tzinfo=k.TZ))
+        monthly_next = k.schedule_next_run_at(monthly, datetime(2026, 6, 6, 10, 16, tzinfo=k.TZ))
+
+        self.assertEqual(datetime.fromtimestamp(daily_next, k.TZ).strftime("%Y-%m-%d %H:%M"), "2026-06-07 09:00")
+        self.assertEqual(datetime.fromtimestamp(weekly_next, k.TZ).strftime("%Y-%m-%d %H:%M"), "2026-06-10 08:30")
+        self.assertEqual(datetime.fromtimestamp(monthly_next, k.TZ).strftime("%Y-%m-%d %H:%M"), "2026-07-06 10:15")
 
 
 if __name__ == "__main__":

@@ -940,7 +940,8 @@ tbody tr:last-child td {
 .source-row,
 .status-row,
 .alert-row,
-.schedule-row {
+.schedule-row,
+.task-run-row {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
@@ -954,15 +955,49 @@ tbody tr:last-child td {
 .source-row > span,
 .status-row > span,
 .alert-row > span,
-.schedule-row > span {
+.schedule-row > span,
+.task-run-row > span {
   min-width: 0;
 }
 
 .source-row strong,
 .status-row strong,
 .alert-row strong,
-.schedule-row strong {
+.schedule-row strong,
+.task-run-row strong {
   font-weight: 400;
+}
+
+.task-run-row.failed {
+  border-color: #e2c4be;
+}
+
+.bad-text {
+  color: var(--red);
+}
+
+.range-controls {
+  flex-wrap: wrap;
+  margin: 12px 0;
+}
+
+.range-controls input,
+.range-controls select {
+  width: auto;
+  min-width: 150px;
+}
+
+.range-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.range-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 12px;
 }
 
 .muted-row {
@@ -1036,7 +1071,9 @@ tbody tr:last-child td {
 
 @media (max-width: 1100px) {
   .mini-grid,
-  .detail-grid {
+  .detail-grid,
+  .range-summary,
+  .range-columns {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -1081,7 +1118,7 @@ tbody tr:last-child td {
   }
 
   nav {
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(6, minmax(0, 1fr));
   }
 
   .nav-link,
@@ -1144,7 +1181,9 @@ tbody tr:last-child td {
   }
 
   .mini-grid,
-  .detail-grid {
+  .detail-grid,
+  .range-summary,
+  .range-columns {
     grid-template-columns: 1fr;
   }
 

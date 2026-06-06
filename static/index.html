@@ -4,15 +4,15 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Komari Traffic Console</title>
-  <link rel="icon" type="image/svg+xml" href="/static/komari-traffic-icon.svg?v=20260606-ui3">
-  <link rel="stylesheet" href="/static/styles.css?v=20260606-ui3">
+  <link rel="icon" type="image/svg+xml" href="/static/komari-traffic-icon.svg?v=20260606-product1">
+  <link rel="stylesheet" href="/static/styles.css?v=20260606-product1">
 </head>
 <body>
   <main id="login-view" class="login-shell hidden">
     <section class="login-panel">
       <div class="login-brand">
         <span class="brand-mark">
-          <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260606-ui3" alt="">
+          <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260606-product1" alt="">
           <span class="brand-fallback" hidden>K</span>
         </span>
         <div>
@@ -41,7 +41,7 @@
       <div class="sidebar-head">
         <a class="brand" href="/" data-route="/" aria-label="Komari Traffic 总览">
           <span class="brand-mark">
-            <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260606-ui3" alt="">
+            <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260606-product1" alt="">
             <span class="brand-fallback" hidden>K</span>
           </span>
           <span class="brand-copy">
@@ -93,6 +93,15 @@
           </svg>
           <span class="nav-text">AI</span>
         </a>
+        <a href="/system" class="nav-link" data-route="/system" title="系统">
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 3.5 4.8 7.6v8.3L12 20l7.2-4.1V7.6L12 3.5Z"></path>
+            <path d="M12 8.2v7.6"></path>
+            <path d="M8.7 10.1 12 12l3.3-1.9"></path>
+            <path d="M8.2 15.5h7.6"></path>
+          </svg>
+          <span class="nav-text">系统</span>
+        </a>
       </nav>
     </aside>
 
@@ -133,6 +142,7 @@
             <small id="metric-time">--</small>
           </article>
         </section>
+        <section id="overview-health" class="mini-grid"></section>
 
         <section class="content-grid">
           <article class="panel wide">
@@ -347,6 +357,15 @@
               <p id="telegram-result" class="result-box muted">等待操作。</p>
             </article>
           </div>
+          <article class="sub-panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Runs</p>
+                <h3>推送运行历史</h3>
+              </div>
+            </div>
+            <div id="telegram-task-runs" class="stacked"></div>
+          </article>
         </section>
       </section>
 
@@ -393,9 +412,79 @@
           </div>
         </section>
       </section>
+
+      <section class="route-view hidden" data-route="/system">
+        <section id="system" class="panel">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">System</p>
+              <h2>系统健康</h2>
+            </div>
+            <span id="system-status-pill" class="soft-label">--</span>
+          </div>
+          <div id="system-summary" class="mini-grid"></div>
+          <div class="content-grid compact-grid">
+            <article class="sub-panel">
+              <div class="panel-head">
+                <div>
+                  <p class="eyebrow">Config</p>
+                  <h3>配置健康</h3>
+                </div>
+              </div>
+              <div id="system-services" class="stacked"></div>
+            </article>
+            <article class="sub-panel">
+              <div class="panel-head">
+                <div>
+                  <p class="eyebrow">Data</p>
+                  <h3>数据目录</h3>
+                </div>
+              </div>
+              <div id="system-data" class="stacked"></div>
+            </article>
+          </div>
+          <div class="content-grid compact-grid">
+            <article class="sub-panel">
+              <div class="panel-head">
+                <div>
+                  <p class="eyebrow">Range</p>
+                  <h3>SQLite 区间统计</h3>
+                </div>
+              </div>
+              <div class="inline-form range-controls">
+                <input id="traffic-range-from" type="date" aria-label="开始日期">
+                <input id="traffic-range-to" type="date" aria-label="结束日期">
+                <select id="traffic-range-group" aria-label="分组">
+                  <option value="daily">按日</option>
+                  <option value="weekly">按周</option>
+                  <option value="monthly">按月</option>
+                </select>
+                <button id="load-traffic-range-btn" class="ghost-btn">查询</button>
+              </div>
+              <div id="traffic-range-result" class="stacked range-result"></div>
+            </article>
+            <article class="sub-panel">
+              <div class="panel-head">
+                <div>
+                  <p class="eyebrow">History</p>
+                  <h3>任务运行记录</h3>
+                </div>
+                <select id="task-run-filter" aria-label="任务类型">
+                  <option value="">全部</option>
+                  <option value="report">报表</option>
+                  <option value="alert">告警</option>
+                  <option value="ai">AI</option>
+                  <option value="sample">采样</option>
+                </select>
+              </div>
+              <div id="system-task-runs" class="stacked"></div>
+            </article>
+          </div>
+        </section>
+      </section>
     </section>
   </main>
 
-  <script src="/static/app.js?v=20260606-ui3"></script>
+  <script src="/static/app.js?v=20260606-product1"></script>
 </body>
 </html>

@@ -433,7 +433,210 @@ def init_traffic_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS task_runs (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              type TEXT NOT NULL,
+              source TEXT NOT NULL,
+              status TEXT NOT NULL,
+              summary TEXT NOT NULL DEFAULT '',
+              error TEXT NOT NULL DEFAULT '',
+              started_at INTEGER NOT NULL,
+              finished_at INTEGER NOT NULL,
+              duration_ms INTEGER NOT NULL DEFAULT 0,
+              metadata TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_task_runs_type_started ON task_runs(type, started_at DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_task_runs_started ON task_runs(started_at DESC)")
         conn.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(1, ?)", (now_dt().isoformat(),))
+        conn.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(2, ?)", (now_dt().isoformat(),))
+
+
+def _json_dumps_compact(data) -> str:
+    try:
+        return json.dumps(data if data is not None else {}, ensure_ascii=False, separators=(",", ":"))
+    except TypeError:
+        return json.dumps({"value": str(data)}, ensure_ascii=False, separators=(",", ":"))
+
+
+def _json_loads_object(text: str) -> dict:
+    try:
+        value = json.loads(text or "{}")
+        return value if isinstance(value, dict) else {"value": value}
+    except Exception:
+        return {}
+
+
+def redact_sensitive_text(value) -> str:
+    text = str(value or "")
+    secrets_to_mask = [
+        TELEGRAM_BOT_TOKEN,
+        KOMARI_API_TOKEN,
+        AI_API_KEY,
+        TELEGRAM_CHAT_ID,
+        TELEGRAM_ALERT_CHAT_ID,
+    ]
+    for secret in secrets_to_mask:
+        secret = str(secret or "").strip()
+        if not secret:
+            continue
+        masked = "***" if len(secret) <= 6 else f"{secret[:3]}***{secret[-3:]}"
+        text = text.replace(secret, masked)
+    return text
+
+
+def redact_sensitive_data(value):
+    if isinstance(value, dict):
+        return {str(key): redact_sensitive_data(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [redact_sensitive_data(item) for item in value]
+    if isinstance(value, str):
+        return redact_sensitive_text(value)
+    return value
+
+
+def record_task_run(
+    task_type: str,
+    source: str,
+    status: str,
+    started_at: int | float | None = None,
+    finished_at: int | float | None = None,
+    summary: str = "",
+    error: str = "",
+    metadata: dict | None = None,
+) -> dict:
+    init_traffic_db()
+    now_raw = time.time()
+    started_raw = float(started_at if started_at is not None else now_raw)
+    finished_raw = float(finished_at if finished_at is not None else now_raw)
+    started = int(started_raw)
+    finished = int(finished_raw)
+    duration_ms = max(0, int((finished_raw - started_raw) * 1000))
+    task_type = str(task_type or "other").strip().lower()[:40] or "other"
+    source = str(source or "unknown").strip()[:120] or "unknown"
+    status = str(status or "unknown").strip().lower()[:40] or "unknown"
+    summary = redact_sensitive_text(summary)[:600]
+    error = redact_sensitive_text(error)[:1200]
+    safe_metadata = redact_sensitive_data(metadata or {})
+    metadata_json = _json_dumps_compact(safe_metadata)
+    with traffic_db_session() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO task_runs(type, source, status, summary, error, started_at, finished_at, duration_ms, metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (task_type, source, status, summary, error, started, finished, duration_ms, metadata_json),
+        )
+        run_id = int(cur.lastrowid)
+    return {
+        "id": run_id,
+        "type": task_type,
+        "source": source,
+        "status": status,
+        "summary": summary,
+        "error": error,
+        "started_at": started,
+        "finished_at": finished,
+        "duration_ms": duration_ms,
+        "metadata": safe_metadata,
+    }
+
+
+def safe_record_task_run(*args, **kwargs) -> dict | None:
+    try:
+        return record_task_run(*args, **kwargs)
+    except Exception:
+        logging.exception("failed to record task run")
+        return None
+
+
+def list_task_runs(limit: int = 50, task_type: str | None = None) -> list[dict]:
+    init_traffic_db()
+    limit = min(200, max(1, int(limit or 50)))
+    task_type = str(task_type or "").strip().lower()
+    params: list = []
+    where = ""
+    if task_type:
+        where = "WHERE type = ?"
+        params.append(task_type)
+    params.append(limit)
+    with traffic_db_session() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT id, type, source, status, summary, error, started_at, finished_at, duration_ms, metadata
+            FROM task_runs
+            {where}
+            ORDER BY started_at DESC, id DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+    runs = []
+    for row in rows:
+        runs.append({
+            "id": int(row["id"]),
+            "type": row["type"],
+            "source": row["source"],
+            "status": row["status"],
+            "summary": row["summary"],
+            "error": row["error"],
+            "started_at": int(row["started_at"] or 0),
+            "finished_at": int(row["finished_at"] or 0),
+            "duration_ms": int(row["duration_ms"] or 0),
+            "metadata": _json_loads_object(row["metadata"]),
+        })
+    return runs
+
+
+def latest_task_run(task_type: str | None = None, source_prefix: str | None = None, metadata_key: str | None = None, metadata_value=None) -> dict | None:
+    runs = list_task_runs(limit=200, task_type=task_type)
+    for run in runs:
+        if source_prefix and not str(run.get("source", "")).startswith(source_prefix):
+            continue
+        if metadata_key:
+            if str((run.get("metadata") or {}).get(metadata_key, "")) != str(metadata_value):
+                continue
+        return run
+    return None
+
+
+def run_with_task_record(task_type: str, source: str, func, summary_func=None, metadata: dict | None = None):
+    started = time.time()
+    try:
+        result = func()
+        summary = ""
+        if summary_func:
+            summary = str(summary_func(result) or "")
+        elif isinstance(result, dict):
+            summary = str(result.get("summary") or result.get("label") or "")
+        run = safe_record_task_run(
+            task_type,
+            source,
+            "success",
+            started_at=started,
+            finished_at=time.time(),
+            summary=summary,
+            metadata=metadata or {},
+        )
+        if isinstance(result, dict) and run:
+            result = dict(result)
+            result["task_run"] = run
+        return result
+    except Exception as exc:
+        safe_record_task_run(
+            task_type,
+            source,
+            "failed",
+            started_at=started,
+            finished_at=time.time(),
+            summary="",
+            error=str(exc),
+            metadata=metadata or {},
+        )
+        raise
 
 
 def upsert_daily_usage(day_str: str, deltas: dict, source: str = "history", source_from: str = "", source_to: str = "", reset_warnings: list[str] | None = None, skipped: list[str] | None = None):
@@ -511,6 +714,130 @@ def aggregate_daily_usage(from_day: date, to_day: date) -> dict:
             "down": int(row["down"] or 0),
         }
     return result
+
+
+def _traffic_node_rows_from_map(nodes_map: dict) -> list[dict]:
+    rows = []
+    for uuid, item in nodes_map.items():
+        up = max(0, int(item.get("up", 0) or 0))
+        down = max(0, int(item.get("down", 0) or 0))
+        total = up + down
+        rows.append({
+            "uuid": str(uuid),
+            "name": str(item.get("name") or uuid),
+            "up": up,
+            "down": down,
+            "total": total,
+            "up_human": human_bytes(up),
+            "down_human": human_bytes(down),
+            "total_human": human_bytes(total),
+        })
+    rows.sort(key=lambda item: (item["total"], item["down"], item["up"], item["name"].lower()), reverse=True)
+    return rows
+
+
+def _traffic_total_from_rows(rows: list[dict]) -> dict:
+    up = sum(int(item.get("up", 0) or 0) for item in rows)
+    down = sum(int(item.get("down", 0) or 0) for item in rows)
+    total = up + down
+    return {
+        "up": up,
+        "down": down,
+        "total": total,
+        "up_human": human_bytes(up),
+        "down_human": human_bytes(down),
+        "total_human": human_bytes(total),
+    }
+
+
+def _traffic_group_key(day_value: date, group: str) -> tuple[str, str]:
+    if group == "weekly":
+        start = start_of_week(day_value)
+        end = start + timedelta(days=6)
+        return start.strftime("%Y-%m-%d"), f"{start.strftime('%Y-%m-%d')} → {end.strftime('%Y-%m-%d')}"
+    if group == "monthly":
+        return yyyymm(day_value), yyyymm(day_value)
+    return day_value.strftime("%Y-%m-%d"), day_value.strftime("%Y-%m-%d")
+
+
+def traffic_range_summary(from_day: date, to_day: date, group: str = "daily") -> dict:
+    if from_day > to_day:
+        raise RuntimeError("from must be <= to")
+    group = str(group or "daily").strip().lower()
+    if group not in ("daily", "weekly", "monthly"):
+        raise RuntimeError("group must be daily, weekly, or monthly")
+
+    ensure_dirs()
+    migrate_history_to_traffic_db()
+    start = from_day.strftime("%Y-%m-%d")
+    end = to_day.strftime("%Y-%m-%d")
+    with traffic_db_session() as conn:
+        rows = conn.execute(
+            """
+            SELECT day, uuid, COALESCE(NULLIF(name, ''), uuid) AS name, SUM(up) AS up, SUM(down) AS down
+            FROM node_daily_usage
+            WHERE day >= ? AND day <= ?
+            GROUP BY day, uuid
+            ORDER BY day ASC, (SUM(up) + SUM(down)) DESC
+            """,
+            (start, end),
+        ).fetchall()
+
+    total_nodes: dict[str, dict] = {}
+    group_nodes: dict[str, dict] = {}
+    group_labels: dict[str, str] = {}
+    covered_days = set()
+    for row in rows:
+        day_text = str(row["day"])
+        try:
+            row_day = parse_date_yyyy_mm_dd(day_text)
+        except Exception:
+            continue
+        covered_days.add(day_text)
+        uuid = str(row["uuid"])
+        name = str(row["name"] or uuid)
+        up = int(row["up"] or 0)
+        down = int(row["down"] or 0)
+
+        if uuid not in total_nodes:
+            total_nodes[uuid] = {"name": name, "up": 0, "down": 0}
+        total_nodes[uuid]["up"] += up
+        total_nodes[uuid]["down"] += down
+        total_nodes[uuid]["name"] = name or total_nodes[uuid].get("name") or uuid
+
+        key, label = _traffic_group_key(row_day, group)
+        group_labels[key] = label
+        bucket = group_nodes.setdefault(key, {})
+        if uuid not in bucket:
+            bucket[uuid] = {"name": name, "up": 0, "down": 0}
+        bucket[uuid]["up"] += up
+        bucket[uuid]["down"] += down
+        bucket[uuid]["name"] = name or bucket[uuid].get("name") or uuid
+
+    node_rows = _traffic_node_rows_from_map(total_nodes)
+    groups = []
+    for key in sorted(group_nodes.keys()):
+        rows_for_group = _traffic_node_rows_from_map(group_nodes[key])
+        groups.append({
+            "key": key,
+            "label": group_labels.get(key, key),
+            "nodes": rows_for_group,
+            "top_nodes": rows_for_group[: max(0, int(TOP_N))],
+            "total": _traffic_total_from_rows(rows_for_group),
+        })
+
+    return {
+        "from": start,
+        "to": end,
+        "group": group,
+        "days": sorted(covered_days),
+        "day_count": len(covered_days),
+        "nodes": node_rows,
+        "top_nodes": node_rows[: max(0, int(TOP_N))],
+        "total": _traffic_total_from_rows(node_rows),
+        "groups": groups,
+        "source": "traffic_db",
+    }
 
 
 def migrate_history_to_traffic_db():
@@ -641,6 +968,25 @@ def schedule_due_key(item: dict, now: datetime) -> str | None:
     if item.get("scope") == "monthly" and now.day != int(item.get("month_day", 1)):
         return None
     return f"{item.get('id')}:{now.strftime('%Y-%m-%d %H:%M')}"
+
+
+def schedule_next_run_at(item: dict, now: datetime | None = None, horizon_days: int = 370) -> int | None:
+    schedule = normalize_report_schedule(item)
+    if not schedule.get("enabled"):
+        return None
+    now = now or now_dt()
+    hour, minute = _parse_hhmm(schedule.get("time", ""))
+    today = now.date()
+    for offset in range(max(1, int(horizon_days)) + 1):
+        day = today + timedelta(days=offset)
+        if schedule.get("scope") == "weekly" and day.weekday() != int(schedule.get("weekday", 0)):
+            continue
+        if schedule.get("scope") == "monthly" and day.day != int(schedule.get("month_day", 1)):
+            continue
+        candidate = datetime(day.year, day.month, day.day, hour, minute, tzinfo=TZ)
+        if candidate > now:
+            return int(candidate.timestamp())
+    return None
 
 
 def get_json(url: str):
@@ -2160,7 +2506,7 @@ def prune_samples(samples: list, now_ts: int):
     return pruned
 
 
-def take_sample_if_due(force: bool = False):
+def take_sample_if_due(force: bool = False, record: bool = True, source: str = "sample-worker"):
     """
     由 bot 循环周期性调用：最多每 SAMPLE_INTERVAL_SECONDS 采样一次
     """
@@ -2173,12 +2519,37 @@ def take_sample_if_due(force: bool = False):
     if (not force) and last_ts and (now_ts - last_ts < SAMPLE_INTERVAL_SECONDS):
         return
 
-    current, skipped = fetch_nodes_and_totals()
-    nodes_map = build_nodes_map_from_current(current)
+    started = time.time()
+    try:
+        current, skipped = fetch_nodes_and_totals()
+        nodes_map = build_nodes_map_from_current(current)
 
-    samples.append({"ts": now_ts, "nodes": nodes_map, "skipped": skipped})
-    samples = prune_samples(samples, now_ts)
-    save_samples({"samples": samples})
+        samples.append({"ts": now_ts, "nodes": nodes_map, "skipped": skipped})
+        samples = prune_samples(samples, now_ts)
+        save_samples({"samples": samples})
+        if record:
+            safe_record_task_run(
+                "sample",
+                source,
+                "success",
+                started_at=started,
+                finished_at=time.time(),
+                summary=f"采样 {len(nodes_map)} 个节点，跳过 {len(skipped)} 个",
+                metadata={"nodes": len(nodes_map), "skipped": skipped, "force": bool(force)},
+            )
+    except Exception as exc:
+        if record:
+            safe_record_task_run(
+                "sample",
+                source,
+                "failed",
+                started_at=started,
+                finished_at=time.time(),
+                summary="采样失败",
+                error=str(exc),
+                metadata={"force": bool(force)},
+            )
+        raise
 
 
 def sample_worker_loop():
@@ -2568,14 +2939,14 @@ def apply_alert_candidates(state: dict, candidates: list[dict], now_ts: int, dry
     return events
 
 
-def run_alert_check(dry_run: bool = False, notify: bool = True, force_sample: bool = False) -> dict:
+def _run_alert_check_impl(dry_run: bool = False, notify: bool = True, force_sample: bool = False) -> dict:
     ensure_dirs()
     now_ts = int(time.time())
     if not ALERTS_ENABLED:
         return {"enabled": False, "events": [], "active_count": 0}
 
     if force_sample:
-        take_sample_if_due(force=True)
+        take_sample_if_due(force=True, record=False, source="alert-check")
 
     state = load_alerts_state()
     work_state = json.loads(json.dumps(state)) if dry_run else state
@@ -2603,6 +2974,44 @@ def run_alert_check(dry_run: bool = False, notify: bool = True, force_sample: bo
         "muted_until": int(work_state.get("muted_until", 0) or 0),
         "dry_run": dry_run,
     }
+
+
+def run_alert_check(dry_run: bool = False, notify: bool = True, force_sample: bool = False, record: bool = True, source: str = "alert-check") -> dict:
+    started = time.time()
+    try:
+        result = _run_alert_check_impl(dry_run=dry_run, notify=notify, force_sample=force_sample)
+        events = result.get("events", []) or []
+        summary = "告警未启用" if not result.get("enabled", True) else f"事件 {len(events)} 个，active {int(result.get('active_count', 0) or 0)} 个"
+        if record:
+            safe_record_task_run(
+                "alert",
+                source,
+                "success",
+                started_at=started,
+                finished_at=time.time(),
+                summary=summary,
+                metadata={
+                    "dry_run": bool(dry_run),
+                    "notify": bool(notify),
+                    "force_sample": bool(force_sample),
+                    "events": len(events),
+                    "active_count": int(result.get("active_count", 0) or 0),
+                },
+            )
+        return result
+    except Exception as exc:
+        if record:
+            safe_record_task_run(
+                "alert",
+                source,
+                "failed",
+                started_at=started,
+                finished_at=time.time(),
+                summary="告警检查失败",
+                error=str(exc),
+                metadata={"dry_run": bool(dry_run), "notify": bool(notify), "force_sample": bool(force_sample)},
+            )
+        raise
 
 
 def format_alert_check_result(result: dict) -> str:
@@ -2752,13 +3161,32 @@ def scheduled_report_period_parts(scope: str):
     raise RuntimeError("scope must be daily, weekly, or monthly")
 
 
-def run_report_schedule(item: dict) -> dict:
+def _run_report_schedule_impl(item: dict) -> dict:
     schedule = normalize_report_schedule(item)
     start, now, tag = scheduled_report_period_parts(schedule["scope"])
     message = build_period_report_message(start, now, tag, top_only=(schedule["mode"] == "top"))
     chat = schedule.get("chat") or TELEGRAM_CHAT_ID
     telegram_send_to_chat(message, chat)
     return {"sent": True, "chat": chat, "schedule": schedule, "label": schedule_label(schedule)}
+
+
+def run_report_schedule(item: dict, source: str = "scheduler", record: bool = True) -> dict:
+    schedule = normalize_report_schedule(item)
+    metadata = {
+        "schedule_id": schedule.get("id", ""),
+        "scope": schedule.get("scope", ""),
+        "mode": schedule.get("mode", ""),
+        "label": schedule_label(schedule),
+    }
+    if not record:
+        return _run_report_schedule_impl(schedule)
+    return run_with_task_record(
+        "report",
+        source,
+        lambda: _run_report_schedule_impl(schedule),
+        summary_func=lambda result: result.get("label", "") if isinstance(result, dict) else "",
+        metadata=metadata,
+    )
 
 
 def scheduler_worker_loop():
@@ -2774,7 +3202,7 @@ def scheduler_worker_loop():
                 due_key = schedule_due_key(item, now)
                 if not due_key or data["last_runs"].get(item["id"]) == due_key:
                     continue
-                run_report_schedule(item)
+                run_report_schedule(item, source="scheduler")
                 data["last_runs"][item["id"]] = due_key
                 changed = True
             if changed:
@@ -3266,13 +3694,13 @@ def main():
     cmd = sys.argv[1].strip().lower()
 
     if cmd == "report_daily":
-        run_daily_send_yesterday()
+        run_with_task_record("report", "cli:report_daily", run_daily_send_yesterday, summary_func=lambda _result: "昨日流量日报")
         return 0
     if cmd == "report_weekly":
-        run_weekly_send_last_week()
+        run_with_task_record("report", "cli:report_weekly", run_weekly_send_last_week, summary_func=lambda _result: "上周流量周报")
         return 0
     if cmd == "report_monthly":
-        run_monthly_send_last_month()
+        run_with_task_record("report", "cli:report_monthly", run_monthly_send_last_month, summary_func=lambda _result: "上月流量月报")
         return 0
     if cmd == "listen":
         listen_commands()

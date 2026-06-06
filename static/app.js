@@ -26,6 +26,11 @@ const routeConfig = {
     title: "数据问答",
     subtitle: "刷新数据包、使用快捷问题，快速定位流量异常。",
   },
+  "/system": {
+    eyebrow: "System",
+    title: "系统健康",
+    subtitle: "查看配置状态、SQLite 数据、任务运行记录和区间统计。",
+  },
 };
 
 const state = {
@@ -41,6 +46,7 @@ const state = {
   bindingSourceId: "",
   sidebarCollapsed: false,
   aiAsking: false,
+  system: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -194,6 +200,62 @@ function miniCard(label, value, note = "", status = "") {
     </article>`;
 }
 
+function isoDay(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function setDefaultRangeDates() {
+  const to = new Date();
+  const from = new Date(to.getTime() - 29 * 24 * 3600 * 1000);
+  if (!$("traffic-range-to").value) $("traffic-range-to").value = isoDay(to);
+  if (!$("traffic-range-from").value) $("traffic-range-from").value = isoDay(from);
+}
+
+function runTypeLabel(type) {
+  const map = { report: "报表", alert: "告警", ai: "AI", sample: "采样" };
+  return map[type] || type || "任务";
+}
+
+function runStatusClass(status) {
+  if (status === "success") return "good";
+  if (status === "failed") return "bad";
+  return "";
+}
+
+function runStatusText(status) {
+  if (status === "success") return "成功";
+  if (status === "failed") return "失败";
+  return status || "未知";
+}
+
+function renderTaskRuns(targetId, runs) {
+  const target = $(targetId);
+  const items = runs || [];
+  target.innerHTML = items.length
+    ? items.map((run) => `
+      <div class="task-run-row ${run.status === "failed" ? "failed" : ""}">
+        <span>
+          <strong>${escapeHtml(runTypeLabel(run.type))} · ${escapeHtml(run.source || "unknown")}</strong><br>
+          <span class="tiny">${escapeHtml(run.started_at_text || "未记录时间")} · ${escapeHtml(run.duration_text || "--")}</span>
+          ${run.summary ? `<br><span class="tiny">${escapeHtml(run.summary)}</span>` : ""}
+          ${run.error ? `<br><span class="tiny bad-text">${escapeHtml(run.error)}</span>` : ""}
+        </span>
+        <span class="pill ${runStatusClass(run.status)}">${escapeHtml(runStatusText(run.status))}</span>
+      </div>`).join("")
+    : `<div class="empty-state">暂无运行记录。</div>`;
+}
+
+async function loadTaskRuns(targetId, type = "", limit = 50) {
+  const query = new URLSearchParams({ limit: String(limit) });
+  if (type) query.set("type", type);
+  const data = await api(`/api/tasks/runs?${query.toString()}`);
+  renderTaskRuns(targetId, data.runs || []);
+  return data.runs || [];
+}
+
 function nodeByUuid(uuid) {
   return state.nodes.find((node) => String(node.uuid) === String(uuid));
 }
@@ -218,6 +280,30 @@ function bindNodeJumpButtons() {
   document.querySelectorAll("[data-jump-node]").forEach((button) => {
     button.addEventListener("click", () => jumpToNode(button.dataset.jumpNode));
   });
+}
+
+function renderOverviewHealth(system) {
+  const target = $("overview-health");
+  if (!target) return;
+  if (!system) {
+    target.innerHTML = [
+      miniCard("系统健康", "加载中", "等待系统状态"),
+      miniCard("最近任务", "--", "等待运行记录"),
+      miniCard("SQLite", "--", "等待数据目录"),
+      miniCard("计划任务", "--", "等待 scheduler 状态"),
+    ].join("");
+    return;
+  }
+  const summary = system.summary || {};
+  const latestReport = system.latest_runs?.report;
+  const db = system.data?.sqlite || {};
+  const schedules = system.runtime?.schedules || {};
+  target.innerHTML = [
+    miniCard("系统健康", `${summary.healthy || 0}/${summary.total || 0}`, (summary.issues || []).length ? `待确认：${(summary.issues || []).join("、")}` : "核心配置正常", (summary.issues || []).length ? "bad" : "good"),
+    miniCard("最近任务", latestReport?.status ? runStatusText(latestReport.status) : "暂无", latestReport?.started_at_text || "未记录", latestReport?.status === "failed" ? "bad" : ""),
+    miniCard("SQLite", db.ok ? "可用" : "异常", `${db.daily_rows || 0} daily / ${db.task_runs || 0} runs`, db.ok ? "good" : "bad"),
+    miniCard("计划任务", `${schedules.enabled || 0}/${schedules.total || 0}`, "启用 / 总数"),
+  ].join("");
 }
 
 function renderOverview(data) {
@@ -282,6 +368,12 @@ function renderChart(data) {
 async function loadOverview() {
   const overview = await api("/api/overview");
   renderOverview(overview);
+  try {
+    const system = await api("/api/system/status");
+    renderOverviewHealth(system);
+  } catch (_error) {
+    renderOverviewHealth(null);
+  }
 }
 
 function renderNodesTable() {
@@ -620,7 +712,8 @@ async function runScheduleNow(id) {
   $("telegram-result").textContent = "立即发送中...";
   try {
     const data = await postJson(`/api/schedules/${encodeURIComponent(id)}/run-now`, {});
-    $("telegram-result").textContent = `已发送：${data.label || "计划任务"}，目标 ${data.chat || "默认 Chat"}`;
+    $("telegram-result").textContent = `已发送：${data.label || "计划任务"}，目标 ${data.chat || "默认 Chat"}；运行记录已写入。`;
+    await loadTelegramStatus();
   } catch (error) {
     $("telegram-result").textContent = friendlyError(error.message);
   }
@@ -658,7 +751,9 @@ function renderTelegramStatus(data) {
       <div class="schedule-row ${item.enabled ? "" : "muted-row"}">
         <span>
           <strong>${escapeHtml(item.label || "推送计划")}</strong><br>
-          <span class="tiny">${item.enabled ? "已启用" : "已停用"} · ${item.mode === "top" ? "Top 报表" : "完整报表"} · ${item.chat_masked ? `Chat ${escapeHtml(item.chat_masked)}` : "默认 Chat"}</span>
+          <span class="tiny">${item.enabled ? "已启用" : "已停用"} · ${item.mode === "top" ? "Top 报表" : "完整报表"} · ${item.chat_masked ? `Chat ${escapeHtml(item.chat_masked)}` : "默认 Chat"}</span><br>
+          <span class="tiny">上次：${escapeHtml(item.last_run?.started_at_text || "暂无")} ${item.last_status ? `· ${escapeHtml(runStatusText(item.last_status))}` : ""}</span><br>
+          <span class="tiny">下次：${escapeHtml(item.next_run_text || (item.enabled ? "等待计算" : "已停用"))}</span>
         </span>
         <span class="schedule-actions">
           <span class="pill ${item.enabled ? "good" : ""}">${item.enabled ? "启用" : "停用"}</span>
@@ -695,6 +790,7 @@ async function loadTelegramStatus() {
       cron_schedules: schedules.cron_schedules || status.cron_schedules || [],
       schedule_path: schedules.path,
     });
+    await loadTaskRuns("telegram-task-runs", "report", 12);
   } catch (error) {
     $("telegram-summary").innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
   }
@@ -722,7 +818,8 @@ async function sendReport() {
   $("telegram-result").textContent = "发送中...";
   try {
     const data = await postJson("/api/telegram/report", reportRequestBody());
-    $("telegram-result").textContent = `已发送到 ${data.chat}`;
+    $("telegram-result").textContent = `已发送到 ${data.chat}；运行记录已写入。`;
+    await loadTelegramStatus();
   } catch (error) {
     $("telegram-result").textContent = friendlyError(error.message);
   }
@@ -810,6 +907,107 @@ async function askAi() {
   }
 }
 
+function renderSystemStatus(data) {
+  state.system = data;
+  const summary = data.summary || {};
+  const issues = summary.issues || [];
+  $("system-status-pill").textContent = issues.length ? `${issues.length} 项待确认` : "健康";
+  $("system-status-pill").classList.toggle("good", !issues.length);
+  $("system-status-pill").classList.toggle("bad", Boolean(issues.length));
+  $("system-summary").innerHTML = [
+    miniCard("实例", data.instance || "default", `时区 ${data.stat_tz || "--"}`),
+    miniCard("健康项", `${summary.healthy || 0}/${summary.total || 0}`, issues.length ? issues.join("、") : "核心配置正常", issues.length ? "bad" : "good"),
+    miniCard("最近失败", String(summary.recent_failures || 0), "最近 20 条任务记录", summary.recent_failures ? "bad" : "good"),
+    miniCard("SQLite", data.data?.sqlite?.ok ? "可用" : "异常", `${data.data?.sqlite?.daily_rows || 0} daily / ${data.data?.sqlite?.task_runs || 0} runs`, data.data?.sqlite?.ok ? "good" : "bad"),
+  ].join("");
+
+  const services = data.services || [];
+  const runtime = data.runtime || {};
+  $("system-services").innerHTML = [
+    ...services.map((item) => `
+      <div class="status-row">
+        <span><strong>${escapeHtml(item.label)}</strong><br><span class="tiny">${escapeHtml(item.detail || "--")}</span></span>
+        <span class="pill ${item.ok ? "good" : "bad"}">${item.ok ? "正常" : "待配置"}</span>
+      </div>`),
+    `<div class="status-row muted-row">
+      <span><strong>运行进程</strong><br><span class="tiny">${escapeHtml(runtime.scheduler_note || "")}</span></span>
+      <span class="pill">${escapeHtml(runtime.process || "web")}</span>
+    </div>`,
+    `<div class="status-row">
+      <span><strong>应用内计划</strong><br><span class="tiny">${escapeHtml(runtime.schedules?.path || "")}</span></span>
+      <span class="pill">${escapeHtml(`${runtime.schedules?.enabled || 0}/${runtime.schedules?.total || 0}`)}</span>
+    </div>`,
+  ].join("");
+
+  const files = data.data?.files || [];
+  const db = data.data?.sqlite || {};
+  $("system-data").innerHTML = [
+    `<div class="status-row">
+      <span><strong>traffic.db</strong><br><span class="tiny">${escapeHtml(db.path || "")}</span></span>
+      <span class="pill ${db.ok ? "good" : "bad"}">${escapeHtml(db.size_human || "0 B")}</span>
+    </div>`,
+    ...files.map((file) => `
+      <div class="status-row ${file.exists ? "" : "muted-row"}">
+        <span><strong>${escapeHtml(file.label)}</strong><br><span class="tiny">${escapeHtml(file.path || "")}</span></span>
+        <span class="pill ${file.exists ? "good" : ""}">${escapeHtml(file.exists ? file.size_human : "未创建")}</span>
+      </div>`),
+  ].join("");
+}
+
+function renderTrafficRange(data) {
+  const topNodes = data.top_nodes || [];
+  const groups = data.groups || [];
+  $("traffic-range-result").innerHTML = `
+    <div class="range-summary">
+      ${miniCard("区间合计", data.total?.total_human || "--", `${escapeHtml(data.from)} -> ${escapeHtml(data.to)}`)}
+      ${miniCard("覆盖天数", String(data.day_count || 0), `${(data.nodes || []).length} 个节点`)}
+      ${miniCard("分组", String(groups.length), data.group || "daily")}
+    </div>
+    <div class="range-columns">
+      <div class="stacked">
+        <p class="tiny">Top 节点</p>
+        ${topNodes.length ? topNodes.map((node, index) => `
+          <div class="status-row">
+            <span><strong>${index + 1}. ${escapeHtml(node.name)}</strong><br><span class="tiny">下行 ${escapeHtml(node.down_human)} / 上行 ${escapeHtml(node.up_human)}</span></span>
+            <span class="pill">${escapeHtml(node.total_human)}</span>
+          </div>`).join("") : `<div class="empty-state">这个区间暂无节点汇总。</div>`}
+      </div>
+      <div class="stacked">
+        <p class="tiny">分组汇总</p>
+        ${groups.length ? groups.slice(0, 12).map((group) => `
+          <div class="status-row">
+            <span><strong>${escapeHtml(group.label)}</strong><br><span class="tiny">${(group.nodes || []).length} 个节点</span></span>
+            <span class="pill">${escapeHtml(group.total?.total_human || "--")}</span>
+          </div>`).join("") : `<div class="empty-state">暂无分组数据。</div>`}
+      </div>
+    </div>`;
+}
+
+async function loadTrafficRange() {
+  setDefaultRangeDates();
+  $("traffic-range-result").innerHTML = `<div class="empty-state">查询 SQLite 区间统计中...</div>`;
+  try {
+    const query = new URLSearchParams({
+      from: $("traffic-range-from").value,
+      to: $("traffic-range-to").value,
+      group: $("traffic-range-group").value,
+    });
+    renderTrafficRange(await api(`/api/traffic/range?${query.toString()}`));
+  } catch (error) {
+    $("traffic-range-result").innerHTML = `<div class="empty-state">${escapeHtml(friendlyError(error.message))}</div>`;
+  }
+}
+
+async function loadSystemPage() {
+  setDefaultRangeDates();
+  const system = await api("/api/system/status");
+  renderSystemStatus(system);
+  await Promise.all([
+    loadTaskRuns("system-task-runs", $("task-run-filter").value, 50),
+    loadTrafficRange(),
+  ]);
+}
+
 async function loadCurrentRoute(forceOverview = false) {
   updateStatus("加载中", true);
   try {
@@ -818,6 +1016,7 @@ async function loadCurrentRoute(forceOverview = false) {
     if (state.route === "/alerts") await loadAlerts();
     if (state.route === "/telegram") await loadTelegramStatus();
     if (state.route === "/ai") await loadAiStatus();
+    if (state.route === "/system") await loadSystemPage();
     updateStatus("已同步", true);
   } catch (error) {
     if (error.status === 401) {
@@ -965,7 +1164,11 @@ function bindEvents() {
   document.querySelectorAll(".ai-prompt").forEach((button) => {
     button.addEventListener("click", () => fillAiPrompt(button));
   });
+  $("load-traffic-range-btn").addEventListener("click", loadTrafficRange);
+  $("traffic-range-group").addEventListener("change", loadTrafficRange);
+  $("task-run-filter").addEventListener("change", () => loadTaskRuns("system-task-runs", $("task-run-filter").value, 50));
   resetScheduleForm();
+  setDefaultRangeDates();
 }
 
 function initRoute() {

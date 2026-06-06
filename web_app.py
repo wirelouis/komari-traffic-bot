@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -315,6 +315,48 @@ def timestamp_text(ts: int | float | str | None) -> str:
     return datetime.fromtimestamp(value, k.TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
+def task_run_response(run: dict | None) -> dict | None:
+    if not run:
+        return None
+    started_at = int(run.get("started_at") or 0)
+    finished_at = int(run.get("finished_at") or 0)
+    duration_ms = int(run.get("duration_ms") or 0)
+    return {
+        "id": run.get("id"),
+        "type": run.get("type", ""),
+        "source": run.get("source", ""),
+        "status": run.get("status", ""),
+        "summary": run.get("summary", ""),
+        "error": run.get("error", ""),
+        "started_at": started_at,
+        "started_at_text": timestamp_text(started_at),
+        "finished_at": finished_at,
+        "finished_at_text": timestamp_text(finished_at),
+        "duration_ms": duration_ms,
+        "duration_text": f"{duration_ms}ms" if duration_ms < 1000 else f"{duration_ms / 1000:.1f}s",
+        "metadata": run.get("metadata", {}) if isinstance(run.get("metadata", {}), dict) else {},
+    }
+
+
+def file_status(path: str | Path, label: str) -> dict:
+    p = Path(path)
+    try:
+        stat = p.stat()
+        return {
+            "label": label,
+            "path": str(p),
+            "exists": True,
+            "size": stat.st_size,
+            "size_human": k.human_bytes(stat.st_size),
+            "mtime": int(stat.st_mtime),
+            "mtime_text": timestamp_text(stat.st_mtime),
+        }
+    except FileNotFoundError:
+        return {"label": label, "path": str(p), "exists": False, "size": 0, "size_human": "0 B", "mtime": 0, "mtime_text": ""}
+    except Exception as exc:
+        return {"label": label, "path": str(p), "exists": False, "size": 0, "size_human": "0 B", "mtime": 0, "mtime_text": "", "error": str(exc)}
+
+
 def read_crontab_entries() -> list[dict]:
     path = BASE_DIR / "crontab"
     if not path.exists():
@@ -355,6 +397,13 @@ def schedule_response(schedule: dict) -> dict:
     item = k.normalize_report_schedule(schedule)
     item["label"] = k.schedule_label(item)
     item["chat_masked"] = mask_value(item.get("chat") or k.TELEGRAM_CHAT_ID)
+    next_run = k.schedule_next_run_at(item)
+    item["next_run"] = next_run or 0
+    item["next_run_text"] = timestamp_text(next_run)
+    last_run = k.latest_task_run("report", metadata_key="schedule_id", metadata_value=item.get("id"))
+    item["last_run"] = task_run_response(last_run)
+    item["last_status"] = (last_run or {}).get("status", "")
+    item["last_summary"] = (last_run or {}).get("summary", "")
     return item
 
 
@@ -372,6 +421,100 @@ def build_schedules_struct() -> dict:
         "last_runs": data.get("last_runs", {}),
         "path": k.REPORT_SCHEDULES_PATH,
         "cron_schedules": read_crontab_entries(),
+    }
+
+
+def build_traffic_db_status() -> dict:
+    result = {
+        "path": k.TRAFFIC_DB_PATH,
+        "exists": Path(k.TRAFFIC_DB_PATH).exists(),
+        "size_human": file_status(k.TRAFFIC_DB_PATH, "traffic.db").get("size_human", "0 B"),
+        "ok": True,
+        "daily_rows": 0,
+        "task_runs": 0,
+        "error": "",
+    }
+    try:
+        k.init_traffic_db()
+        with k.traffic_db_session() as conn:
+            result["daily_rows"] = int(conn.execute("SELECT COUNT(*) AS c FROM node_daily_usage").fetchone()["c"] or 0)
+            result["task_runs"] = int(conn.execute("SELECT COUNT(*) AS c FROM task_runs").fetchone()["c"] or 0)
+    except Exception as exc:
+        result["ok"] = False
+        result["error"] = str(exc)
+    result["exists"] = Path(k.TRAFFIC_DB_PATH).exists()
+    result["size_human"] = file_status(k.TRAFFIC_DB_PATH, "traffic.db").get("size_human", "0 B")
+    return result
+
+
+def build_system_status_struct(include_recent: bool = True) -> dict:
+    schedules = k.load_report_schedules().get("schedules", [])
+    alert_status = build_alert_status_struct()
+    ai_status = build_ai_status_struct()
+    db_status = build_traffic_db_status()
+    recent_runs = [task_run_response(run) for run in k.list_task_runs(limit=20)] if include_recent else []
+    latest = {
+        "report": task_run_response(k.latest_task_run("report")),
+        "alert": task_run_response(k.latest_task_run("alert")),
+        "ai": task_run_response(k.latest_task_run("ai")),
+        "sample": task_run_response(k.latest_task_run("sample")),
+    }
+    service_items = [
+        {"key": "komari", "label": "Komari", "ok": bool(k.KOMARI_BASE_URL), "detail": k.KOMARI_BASE_URL or "未配置"},
+        {"key": "telegram", "label": "Telegram", "ok": bool(k.TELEGRAM_BOT_TOKEN and k.TELEGRAM_CHAT_ID), "detail": mask_value(k.TELEGRAM_CHAT_ID) or "未配置 Chat"},
+        {"key": "ai", "label": "AI", "ok": bool(ai_status.get("configured")), "detail": ai_status.get("model") or "未配置模型"},
+        {"key": "alerts", "label": "告警", "ok": bool(alert_status.get("enabled")), "detail": f"active {alert_status.get('active_count', 0)}"},
+        {"key": "web", "label": "Web 登录", "ok": web_password_configured(), "detail": "临时 session secret" if WEB_SESSION_SECRET_TEMPORARY else "已配置"},
+        {"key": "sqlite", "label": "SQLite", "ok": bool(db_status.get("ok")), "detail": db_status.get("size_human") or "0 B"},
+    ]
+    healthy_count = sum(1 for item in service_items if item.get("ok"))
+    return {
+        "now": k.now_dt().strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "stat_tz": k.STAT_TZ,
+        "instance": k.BOT_INSTANCE_NAME or "default",
+        "summary": {
+            "healthy": healthy_count,
+            "total": len(service_items),
+            "issues": [item["label"] for item in service_items if not item.get("ok")],
+            "recent_failures": len([run for run in recent_runs if run and run.get("status") != "success"]),
+        },
+        "services": service_items,
+        "config": {
+            "komari_base_url": k.KOMARI_BASE_URL,
+            "komari_api_token_configured": bool(k.KOMARI_API_TOKEN),
+            "telegram_chat": mask_value(k.TELEGRAM_CHAT_ID),
+            "telegram_alert_chat": mask_value(k.telegram_alert_chat_id()),
+            "ai_base_url": k.AI_API_BASE,
+            "ai_model": mask_value(k.AI_MODEL, visible=2) if k.AI_MODEL else "",
+            "web_username": web_username(),
+            "web_password_configured": web_password_configured(),
+        },
+        "data": {
+            "data_dir": str(k.DATA_DIR),
+            "files": [
+                file_status(k.HISTORY_PATH, "history.json"),
+                file_status(k.SAMPLES_PATH, "samples.json"),
+                file_status(k.REPORT_SCHEDULES_PATH, "report_schedules.json"),
+                file_status(node_bindings_path(), "node_bindings.json"),
+                file_status(k.AI_PACK_CACHE_PATH, "ai_pack_cache.json"),
+                file_status(k.ALERTS_STATE_PATH, "alerts_state.json"),
+            ],
+            "sqlite": db_status,
+        },
+        "runtime": {
+            "process": "web",
+            "sample_thread_alive": bool(k.SAMPLE_THREAD and k.SAMPLE_THREAD.is_alive()),
+            "scheduler_thread_alive": bool(k.SCHEDULER_THREAD and k.SCHEDULER_THREAD.is_alive()),
+            "sample_interval_seconds": k.SAMPLE_INTERVAL_SECONDS,
+            "scheduler_note": "Docker 部署中通常由 bot/listen 服务执行采样和应用内计划，Web 服务负责展示状态。",
+            "schedules": {
+                "total": len(schedules),
+                "enabled": len([item for item in schedules if item.get("enabled")]),
+                "path": k.REPORT_SCHEDULES_PATH,
+            },
+        },
+        "latest_runs": latest,
+        "recent_runs": recent_runs,
     }
 
 
@@ -623,6 +766,7 @@ def safe_records_summary(hours: int) -> dict:
 @app.get("/alerts")
 @app.get("/telegram")
 @app.get("/ai")
+@app.get("/system")
 async def index():
     index_path = STATIC_DIR / "index.html"
     if not index_path.exists():
@@ -776,6 +920,36 @@ async def node_detail(uuid: str, hours: int = 24, _user: str = Depends(current_u
     return api_ok({"node": matched, "range": summary["data"], "hourly": hourly})
 
 
+@app.get("/api/traffic/range")
+async def traffic_range(
+    from_day: str = Query(..., alias="from"),
+    to_day: str = Query(..., alias="to"),
+    group: str = "daily",
+    _user: str = Depends(current_user),
+):
+    try:
+        start = k.parse_date_yyyy_mm_dd(from_day)
+        end = k.parse_date_yyyy_mm_dd(to_day)
+        data = k.traffic_range_summary(start, end, group=group)
+    except Exception as exc:
+        return api_error(str(exc), status_code=400, code="invalid_range")
+    return api_ok(data)
+
+
+@app.get("/api/tasks/runs")
+async def task_runs(limit: int = 50, task_type: str = Query("", alias="type"), _user: str = Depends(current_user)):
+    try:
+        runs = [task_run_response(run) for run in k.list_task_runs(limit=limit, task_type=task_type)]
+    except Exception as exc:
+        return api_error(str(exc), status_code=500, code=type(exc).__name__)
+    return api_ok({"runs": runs, "limit": min(200, max(1, int(limit or 50))), "type": task_type})
+
+
+@app.get("/api/system/status")
+async def system_status(_user: str = Depends(current_user)):
+    return api_ok(build_system_status_struct())
+
+
 @app.get("/api/alerts")
 async def alerts(_user: str = Depends(current_user)):
     return api_ok(build_alert_status_struct())
@@ -783,7 +957,7 @@ async def alerts(_user: str = Depends(current_user)):
 
 @app.post("/api/alerts/check")
 async def alerts_check(req: AlertCheckRequest, _user: str = Depends(current_user)):
-    result = k.run_alert_check(dry_run=not req.notify, notify=req.notify, force_sample=True)
+    result = k.run_alert_check(dry_run=not req.notify, notify=req.notify, force_sample=True, source="web:alerts-check")
     result["summary"] = summarize_alert_check_result(result, notify=req.notify)
     return api_ok(result)
 
@@ -871,7 +1045,7 @@ async def run_schedule_now(schedule_id: str, _user: str = Depends(current_user))
     if not item:
         return api_error("schedule not found", status_code=404, code="schedule_not_found")
     try:
-        result = k.run_report_schedule(item)
+        result = k.run_report_schedule(item, source="web:run-now")
     except Exception as exc:
         return api_error(str(exc), status_code=502, code=type(exc).__name__)
     result["chat"] = mask_value(result.get("chat", ""))
@@ -898,8 +1072,22 @@ async def telegram_report(req: TelegramReportRequest, _user: str = Depends(curre
         scope, mode, message = report_message_from_request(req)
     except ValueError as exc:
         return api_error(str(exc), status_code=400, code="invalid_report_request")
-    k.telegram_send(message)
-    return api_ok({"sent": True, "scope": scope, "mode": mode, "chat": mask_value(k.TELEGRAM_CHAT_ID)})
+    def send_now():
+        k.telegram_send(message)
+        return {"sent": True, "scope": scope, "mode": mode, "chat": k.TELEGRAM_CHAT_ID, "label": f"Web 手动发送 {scope}/{mode}"}
+
+    try:
+        result = k.run_with_task_record(
+            "report",
+            "web:composer",
+            send_now,
+            summary_func=lambda item: item.get("label", ""),
+            metadata={"scope": scope, "mode": mode},
+        )
+    except Exception as exc:
+        return api_error(str(exc), status_code=502, code=type(exc).__name__)
+    result["chat"] = mask_value(result.get("chat", ""))
+    return api_ok(result)
 
 
 @app.get("/api/ai/status")
@@ -911,8 +1099,15 @@ async def ai_status(_user: str = Depends(current_user)):
 async def ai_refresh(_user: str = Depends(current_user)):
     if not k.ai_enabled():
         return api_error("AI is not configured", status_code=400, code="ai_disabled")
-    pack = k.build_ai_data_pack()
-    k.save_ai_pack_cache(pack)
+    def refresh_pack():
+        pack = k.build_ai_data_pack()
+        k.save_ai_pack_cache(pack)
+        return {"summary": "AI 数据包缓存已刷新"}
+
+    try:
+        k.run_with_task_record("ai", "web:refresh", refresh_pack)
+    except Exception as exc:
+        return api_error(str(exc), status_code=502, code=type(exc).__name__)
     return api_ok(build_ai_status_struct())
 
 

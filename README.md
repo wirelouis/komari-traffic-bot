@@ -345,7 +345,20 @@ docker compose up -d
 - `KOMARI_BASE_URL` 指向浏览器可访问的 Komari 地址，用于节点详情跳转
 - 旧 `cron` 服务仍可保留兼容，但新部署推荐在 Web 面板里配置推送计划；同一条计划不要两边同时配置
 
-`./data/node_bindings.json`、`./data/report_schedules.json` 和 `./data/traffic.db` 会自动创建，不需要手动准备。`traffic.db` 会优先用于周/月/更长周期聚合，旧 `history.json` 和压缩归档会在读取时自动迁移。
+`./data/node_bindings.json`、`./data/report_schedules.json` 和 `./data/traffic.db` 会自动创建，不需要手动准备。`traffic.db` 会优先用于周/月/更长周期聚合，并记录 `task_runs` 任务运行历史；旧 `history.json` 和压缩归档会在读取时自动迁移。
+
+### 确认 latest 已更新
+
+推送到 `main` 后，GitHub Actions 会自动构建并发布 `ghcr.io/wirelouis/komari-traffic-bot:latest`。在 VPS 上可以按下面顺序确认：
+
+```
+docker compose pull
+docker compose up -d
+docker compose ps
+docker image inspect ghcr.io/wirelouis/komari-traffic-bot:latest --format '{{.Id}}'
+```
+
+如果你想确认拉到的是 GitHub Actions 刚构建的版本，可以在 GitHub 仓库的 Actions 页面查看 `build-and-publish` 是否成功，再对比 VPS 上 `docker compose pull` 输出的 digest。升级后打开 Web 面板的「系统」页，检查 SQLite、配置健康、最近任务运行记录是否正常；应用内计划任务由 `bot` 服务执行，Web 页会通过 `traffic.db` 展示最近运行结果。
 
 ## ⚠️ 常见问题
 /top 6h 没数据？

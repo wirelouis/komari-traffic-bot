@@ -98,7 +98,7 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(payload["data"]["username"], "admin")
 
     def test_frontend_routes_return_index(self):
-        for path in ("/", "/nodes", "/alerts", "/telegram", "/ai"):
+        for path in ("/", "/nodes", "/alerts", "/telegram", "/ai", "/system"):
             with self.subTest(path=path):
                 response = self.client.get(path)
 
@@ -138,7 +138,7 @@ class WebAppTests(unittest.TestCase):
     def test_alert_check_dry_run_does_not_persist_state(self):
         self.login()
         self.patch_attr(k, "ALERT_TOTAL_WINDOW_BYTES", 100)
-        self.patch_attr(k, "take_sample_if_due", lambda force=False: None)
+        self.patch_attr(k, "take_sample_if_due", lambda **_kwargs: None)
         self.patch_attr(k.time, "time", lambda: 4600)
         k.save_samples({
             "samples": [
@@ -389,6 +389,79 @@ class WebAppTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"]["code"], "invalid_schedule")
+
+    def test_traffic_range_api_returns_sqlite_rollup(self):
+        self.login()
+        k.upsert_daily_usage("2026-06-01", {
+            "n1": {"name": "Node One", "up": 10, "down": 20},
+            "n2": {"name": "Node Two", "up": 5, "down": 7},
+        }, source="test")
+        k.upsert_daily_usage("2026-06-02", {
+            "n1": {"name": "Node One", "up": 3, "down": 4},
+        }, source="test")
+
+        response = self.client.get("/api/traffic/range?from=2026-06-01&to=2026-06-02&group=weekly")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()["data"]
+        self.assertEqual(payload["total"]["total"], 49)
+        self.assertEqual(payload["groups"][0]["key"], "2026-06-01")
+        self.assertEqual(payload["top_nodes"][0]["uuid"], "n1")
+
+    def test_task_runs_api_filters_and_formats(self):
+        self.login()
+        k.record_task_run("report", "web:composer", "success", started_at=1000, finished_at=1001, summary="sent")
+        k.record_task_run("alert", "web:alerts-check", "failed", started_at=1002, finished_at=1003, error="boom")
+
+        response = self.client.get("/api/tasks/runs?type=report&limit=10")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        runs = response.json()["data"]["runs"]
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]["type"], "report")
+        self.assertEqual(runs[0]["summary"], "sent")
+        self.assertIn("started_at_text", runs[0])
+
+    def test_system_status_is_masked_and_reports_db(self):
+        self.login()
+        k.record_task_run("sample", "sample-worker", "success", started_at=1000, finished_at=1001, summary="采样")
+
+        response = self.client.get("/api/system/status")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        text = response.text
+        payload = response.json()["data"]
+        self.assertEqual(payload["data"]["sqlite"]["task_runs"], 1)
+        self.assertTrue(payload["config"]["komari_api_token_configured"])
+        self.assertNotIn("secret-telegram-token", text)
+        self.assertNotIn("secret-komari-token", text)
+        self.assertNotIn("secret-ai-key", text)
+        self.assertNotIn("123456789", text)
+
+    def test_schedule_run_now_writes_task_run_when_core_runs(self):
+        self.login()
+        self.patch_attr(k, "build_period_report_message", lambda _start, _now, tag, top_only=False: f"message:{tag}:{top_only}")
+        send_mock = Mock(return_value={"ok": True})
+        self.patch_attr(k, "telegram_send_to_chat", send_mock)
+        create_response = self.client.post("/api/schedules", json={
+            "enabled": True,
+            "scope": "daily",
+            "mode": "top",
+            "time": "08:15",
+            "weekday": 0,
+            "month_day": 1,
+        })
+        schedule_id = create_response.json()["data"]["schedule"]["id"]
+
+        run_response = self.client.post(f"/api/schedules/{schedule_id}/run-now")
+
+        self.assertEqual(run_response.status_code, 200, run_response.text)
+        self.assertEqual(run_response.json()["data"]["task_run"]["status"], "success")
+        runs = k.list_task_runs(limit=10, task_type="report")
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]["metadata"]["schedule_id"], schedule_id)
+        self.assertEqual(runs[0]["source"], "web:run-now")
+        send_mock.assert_called_once()
 
 
 if __name__ == "__main__":
