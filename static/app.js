@@ -1,7 +1,40 @@
+const SIDEBAR_STORAGE_KEY = "komari.sidebarCollapsed";
+
+const routeConfig = {
+  "/": {
+    eyebrow: "Dashboard",
+    title: "流量分析工作台",
+    subtitle: "查看探针流量、节点排行和服务状态。",
+  },
+  "/nodes": {
+    eyebrow: "Nodes",
+    title: "节点流量分析",
+    subtitle: "按时间窗口比较节点上下行、合计流量和资源使用率。",
+  },
+  "/alerts": {
+    eyebrow: "Alerts",
+    title: "告警控制",
+    subtitle: "查看当前告警、静默状态和阈值配置。",
+  },
+  "/telegram": {
+    eyebrow: "Telegram",
+    title: "推送控制",
+    subtitle: "测试 Telegram 连通性，或手动推送周期报表。",
+  },
+  "/ai": {
+    eyebrow: "AI",
+    title: "数据问答",
+    subtitle: "基于当前探针数据向 AI 提问，快速定位异常流量。",
+  },
+};
+
 const state = {
+  authenticated: false,
   overview: null,
+  route: "/",
   nodesHours: 24,
   nodes: [],
+  sidebarCollapsed: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -22,15 +55,27 @@ function stripHtml(value) {
   return String(value ?? "").replace(/<[^>]+>/g, "");
 }
 
+function friendlyError(value) {
+  const text = String(value || "").trim();
+  if (!text) return "请求失败";
+  if (/Invalid URL|No scheme supplied|MissingSchema|KOMARI_BASE_URL/i.test(text)) {
+    return "Komari API 未配置或不可达，暂时没有可展示的数据。";
+  }
+  return text;
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     credentials: "same-origin",
-    headers: { "Content-Type": "application/json" },
     ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...(options.headers || {}),
+    },
   });
   const data = await response.json().catch(() => ({ ok: false, error: { message: "响应无法解析" } }));
   if (!response.ok || data.ok === false) {
-    const error = new Error(data.error?.message || "请求失败");
+    const error = new Error(friendlyError(data.error?.message || "请求失败"));
     error.payload = data;
     error.status = response.status;
     throw error;
@@ -38,8 +83,54 @@ async function api(path, options = {}) {
   return data.data;
 }
 
+function normalizeRoute(value) {
+  let path = "/";
+  try {
+    path = new URL(value, window.location.origin).pathname;
+  } catch (_error) {
+    path = "/";
+  }
+  if (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1);
+  return routeConfig[path] ? path : "/";
+}
+
+function updateTopbar(route) {
+  const config = routeConfig[route] || routeConfig["/"];
+  $("topbar-eyebrow").textContent = config.eyebrow;
+  $("topbar-title").textContent = config.title;
+  $("topbar-subtitle").textContent = config.subtitle;
+  document.title = `${config.title} - Komari Traffic Console`;
+}
+
+function showRoute(route) {
+  const nextRoute = normalizeRoute(route);
+  state.route = nextRoute;
+  document.querySelectorAll(".route-view").forEach((view) => {
+    view.classList.toggle("hidden", view.dataset.route !== nextRoute);
+  });
+  document.querySelectorAll("[data-route]").forEach((link) => {
+    link.classList.toggle("active", link.dataset.route === nextRoute);
+  });
+  updateTopbar(nextRoute);
+}
+
+async function navigateRoute(route, options = {}) {
+  const nextRoute = normalizeRoute(route);
+  const currentRoute = normalizeRoute(window.location.pathname);
+  if (options.replace || (!routeConfig[window.location.pathname] && window.location.pathname !== nextRoute)) {
+    window.history.replaceState({ route: nextRoute }, "", nextRoute);
+  } else if (options.push && currentRoute !== nextRoute) {
+    window.history.pushState({ route: nextRoute }, "", nextRoute);
+  }
+  showRoute(nextRoute);
+  window.scrollTo(0, 0);
+  if (options.load !== false && state.authenticated) {
+    await loadCurrentRoute(Boolean(options.forceOverview));
+  }
+}
+
 function noteText(period) {
-  if (!period?.ok) return period?.error?.message || "不可用";
+  if (!period?.ok) return friendlyError(period?.error?.message || "不可用");
   const data = period.data;
   if (data.note === "baseline_missing") return "基线缺失";
   return `${data.nodes?.length || 0} 个节点`;
@@ -74,6 +165,7 @@ function renderOverview(data) {
   ].filter(Boolean).join(" / ") || "未配置";
   $("metric-time").textContent = data.now || "--";
   $("ai-status").textContent = data.services?.ai?.configured ? "已配置" : "未配置";
+  $("range-label").textContent = "24h / 7d";
 
   const topNodes = periods.today?.data?.top_nodes || periods.today?.data?.nodes?.slice(0, 5) || [];
   $("top-list").innerHTML = topNodes.length
@@ -88,7 +180,7 @@ function renderChart(data) {
   const chart = $("trend-chart");
   if (!nodes.length) {
     const msg = data.records?.last_24h?.error?.message || data.records?.last_7d?.error?.message || "暂无 records 数据";
-    chart.innerHTML = `<div class="detail-strip">${escapeHtml(msg)}</div>`;
+    chart.innerHTML = `<div class="empty-state">${escapeHtml(friendlyError(msg))}</div>`;
     return;
   }
   const width = 680;
@@ -117,13 +209,17 @@ function renderChart(data) {
 }
 
 function metric(stat, key) {
-  const value = stat?.[key]?.avg;
+  const value = stat?.[key];
   return value === null || value === undefined ? "--" : `${value}%`;
+}
+
+async function loadOverview() {
+  const overview = await api("/api/overview");
+  renderOverview(overview);
 }
 
 async function loadNodes(hours = state.nodesHours) {
   state.nodesHours = hours;
-  $("range-label").textContent = `${hours}h`;
   try {
     const data = await api(`/api/nodes?hours=${hours}`);
     state.nodes = data.nodes || [];
@@ -143,7 +239,7 @@ async function loadNodes(hours = state.nodesHours) {
       row.addEventListener("click", () => loadNodeDetail(row.dataset.uuid));
     });
   } catch (error) {
-    $("nodes-table").innerHTML = `<tr><td colspan="7">${escapeHtml(error.message)}</td></tr>`;
+    $("nodes-table").innerHTML = `<tr><td colspan="7">${escapeHtml(friendlyError(error.message))}</td></tr>`;
   }
 }
 
@@ -154,7 +250,7 @@ async function loadNodeDetail(uuid) {
     const n = data.node;
     $("node-detail").textContent = `${n.name}\n合计 ${n.total_human}，下行 ${n.down_human}，上行 ${n.up_human}\nCPU 平均 ${metric(n.cpu, "avg")}，RAM 平均 ${metric(n.ram, "avg")}，Disk 平均 ${metric(n.disk, "avg")}`;
   } catch (error) {
-    $("node-detail").textContent = error.message;
+    $("node-detail").textContent = friendlyError(error.message);
   }
 }
 
@@ -175,32 +271,35 @@ async function loadAlerts() {
   try {
     renderAlerts(await api("/api/alerts"));
   } catch (error) {
-    $("alerts-body").textContent = error.message;
+    $("alerts-body").textContent = friendlyError(error.message);
   }
 }
 
-async function loadAll() {
+async function loadCurrentRoute(forceOverview = false) {
   updateStatus("加载中", true);
   try {
-    const overview = await api("/api/overview");
-    renderOverview(overview);
-    await Promise.all([loadNodes(state.nodesHours), loadAlerts()]);
+    const needsOverview = forceOverview || state.route === "/" || !state.overview || state.route === "/telegram" || state.route === "/ai";
+    if (needsOverview) await loadOverview();
+    if (state.route === "/nodes") await loadNodes(state.nodesHours);
+    if (state.route === "/alerts") await loadAlerts();
     updateStatus("已同步", true);
   } catch (error) {
     if (error.status === 401) {
+      state.authenticated = false;
       setVisible("login-view", true);
       setVisible("app-view", false);
       return;
     }
-    updateStatus(error.message, false);
+    updateStatus(friendlyError(error.message), false);
   }
 }
 
 async function checkSession() {
   const data = await api("/api/auth/session");
-  setVisible("login-view", !data.authenticated);
-  setVisible("app-view", data.authenticated);
-  if (data.authenticated) await loadAll();
+  state.authenticated = Boolean(data.authenticated);
+  setVisible("login-view", !state.authenticated);
+  setVisible("app-view", state.authenticated);
+  if (state.authenticated) await loadCurrentRoute(true);
 }
 
 async function doLogin(event) {
@@ -214,11 +313,12 @@ async function doLogin(event) {
         password: $("login-password").value,
       }),
     });
+    state.authenticated = true;
     setVisible("login-view", false);
     setVisible("app-view", true);
-    await loadAll();
+    await loadCurrentRoute(true);
   } catch (error) {
-    $("login-error").textContent = error.message;
+    $("login-error").textContent = friendlyError(error.message);
   }
 }
 
@@ -231,18 +331,72 @@ async function postAction(path, body, resultEl) {
     await loadAlerts();
     return data;
   } catch (error) {
-    if (el) el.textContent = error.message;
+    if (el) el.textContent = friendlyError(error.message);
     throw error;
   }
 }
 
+function canUseDesktopSidebar() {
+  return window.matchMedia("(min-width: 921px)").matches;
+}
+
+function loadSidebarPreference() {
+  try {
+    state.sidebarCollapsed = window.localStorage.getItem(SIDEBAR_STORAGE_KEY) === "true";
+  } catch (_error) {
+    state.sidebarCollapsed = false;
+  }
+}
+
+function saveSidebarPreference() {
+  try {
+    window.localStorage.setItem(SIDEBAR_STORAGE_KEY, state.sidebarCollapsed ? "true" : "false");
+  } catch (_error) {
+    // Ignore storage failures in private browsing or restricted WebViews.
+  }
+}
+
+function applySidebarState() {
+  const collapsed = state.sidebarCollapsed && canUseDesktopSidebar();
+  $("app-view").classList.toggle("sidebar-collapsed", collapsed);
+  const toggle = $("sidebar-toggle");
+  toggle.setAttribute("aria-expanded", String(!collapsed));
+  toggle.setAttribute("aria-label", collapsed ? "展开导航" : "收起导航");
+  toggle.setAttribute("title", collapsed ? "展开导航" : "收起导航");
+}
+
+function bindIconFallbacks() {
+  document.querySelectorAll(".brand-icon").forEach((img) => {
+    img.addEventListener("error", () => {
+      img.hidden = true;
+      const fallback = img.nextElementSibling;
+      if (fallback) fallback.hidden = false;
+    });
+  });
+}
+
 function bindEvents() {
   $("login-form").addEventListener("submit", doLogin);
-  $("refresh-btn").addEventListener("click", loadAll);
+  $("refresh-btn").addEventListener("click", () => loadCurrentRoute(true));
   $("logout-btn").addEventListener("click", async () => {
     await api("/api/auth/logout", { method: "POST", body: "{}" }).catch(() => null);
+    state.authenticated = false;
+    state.overview = null;
     setVisible("login-view", true);
     setVisible("app-view", false);
+  });
+  $("sidebar-toggle").addEventListener("click", () => {
+    state.sidebarCollapsed = !state.sidebarCollapsed;
+    saveSidebarPreference();
+    applySidebarState();
+  });
+  window.addEventListener("resize", applySidebarState);
+  window.addEventListener("popstate", () => navigateRoute(window.location.pathname, { load: true }));
+  document.querySelectorAll("[data-route]").forEach((link) => {
+    link.addEventListener("click", (event) => {
+      event.preventDefault();
+      navigateRoute(link.dataset.route, { push: true });
+    });
   });
   document.querySelectorAll("#range-tabs button").forEach((button) => {
     button.addEventListener("click", () => {
@@ -274,20 +428,27 @@ function bindEvents() {
       });
       $("ai-answer").textContent = stripHtml(data.answer || "");
     } catch (error) {
-      $("ai-answer").textContent = error.message;
+      $("ai-answer").textContent = friendlyError(error.message);
     }
-  });
-  document.querySelectorAll(".nav-link").forEach((link) => {
-    link.addEventListener("click", () => {
-      document.querySelectorAll(".nav-link").forEach((item) => item.classList.remove("active"));
-      link.classList.add("active");
-    });
   });
 }
 
+function initRoute() {
+  const initialRoute = normalizeRoute(window.location.pathname);
+  if (initialRoute !== window.location.pathname) {
+    window.history.replaceState({ route: initialRoute }, "", initialRoute);
+  }
+  showRoute(initialRoute);
+}
+
+loadSidebarPreference();
+bindIconFallbacks();
 bindEvents();
+initRoute();
+applySidebarState();
 checkSession().catch((error) => {
+  state.authenticated = false;
   setVisible("login-view", true);
   setVisible("app-view", false);
-  $("login-error").textContent = error.message;
+  $("login-error").textContent = friendlyError(error.message);
 });

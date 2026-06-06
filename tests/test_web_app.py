@@ -90,6 +90,24 @@ class WebAppTests(unittest.TestCase):
         self.assertTrue(payload["data"]["authenticated"])
         self.assertEqual(payload["data"]["username"], "admin")
 
+    def test_frontend_routes_return_index(self):
+        for path in ("/", "/nodes", "/alerts", "/telegram", "/ai"):
+            with self.subTest(path=path):
+                response = self.client.get(path)
+
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.headers["content-type"].split(";")[0], "text/html")
+                self.assertEqual(response.headers["cache-control"], "no-store")
+                self.assertIn("Komari Traffic Console", response.text)
+                self.assertIn("/static/app.js", response.text)
+
+    def test_brand_icon_static_asset(self):
+        response = self.client.get("/static/komari-traffic-icon.svg")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["content-type"].split(";")[0], "image/svg+xml")
+        self.assertIn("Komari Traffic", response.text)
+
     def test_missing_web_password_is_clear(self):
         with patch.dict(os.environ, {"WEB_PASSWORD": ""}):
             response = self.client.post("/api/auth/login", json={"username": "admin", "password": ""})

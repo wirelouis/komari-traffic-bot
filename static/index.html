@@ -4,13 +4,22 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Komari Traffic Console</title>
-  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="icon" type="image/svg+xml" href="/static/komari-traffic-icon.svg?v=20260606-ui2">
+  <link rel="stylesheet" href="/static/styles.css?v=20260606-ui2">
 </head>
 <body>
   <main id="login-view" class="login-shell hidden">
     <section class="login-panel">
-      <p class="eyebrow">Komari Traffic</p>
-      <h1>流量分析控制台</h1>
+      <div class="login-brand">
+        <span class="brand-mark">
+          <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260606-ui2" alt="">
+          <span class="brand-fallback" hidden>K</span>
+        </span>
+        <div>
+          <p class="eyebrow">Komari Traffic</p>
+          <h1>流量分析控制台</h1>
+        </div>
+      </div>
       <p class="muted">登录后查看节点流量、告警状态和 Telegram 推送。</p>
       <form id="login-form" class="form-stack">
         <label>
@@ -29,27 +38,51 @@
 
   <main id="app-view" class="app-shell hidden">
     <aside class="sidebar">
-      <div class="brand">
-        <span class="brand-mark">K</span>
-        <div>
-          <strong>Komari Traffic</strong>
-          <span>Analysis Console</span>
-        </div>
+      <div class="sidebar-head">
+        <a class="brand" href="/" data-route="/" aria-label="Komari Traffic 总览">
+          <span class="brand-mark">
+            <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260606-ui2" alt="">
+            <span class="brand-fallback" hidden>K</span>
+          </span>
+          <span class="brand-copy">
+            <strong>Komari Traffic</strong>
+            <span>Analysis Console</span>
+          </span>
+        </a>
+        <button id="sidebar-toggle" class="icon-btn sidebar-toggle" type="button" aria-label="收起导航" aria-expanded="true" title="收起导航">
+          <span class="sidebar-toggle-icon" aria-hidden="true">&lsaquo;</span>
+        </button>
       </div>
-      <nav>
-        <a href="#overview" class="nav-link active">总览</a>
-        <a href="#nodes" class="nav-link">节点</a>
-        <a href="#alerts" class="nav-link">告警</a>
-        <a href="#telegram" class="nav-link">推送</a>
-        <a href="#ai" class="nav-link">AI</a>
+      <nav aria-label="主导航">
+        <a href="/" class="nav-link active" data-route="/" title="总览">
+          <span class="nav-icon" aria-hidden="true">总</span>
+          <span class="nav-text">总览</span>
+        </a>
+        <a href="/nodes" class="nav-link" data-route="/nodes" title="节点">
+          <span class="nav-icon" aria-hidden="true">节</span>
+          <span class="nav-text">节点</span>
+        </a>
+        <a href="/alerts" class="nav-link" data-route="/alerts" title="告警">
+          <span class="nav-icon" aria-hidden="true">警</span>
+          <span class="nav-text">告警</span>
+        </a>
+        <a href="/telegram" class="nav-link" data-route="/telegram" title="推送">
+          <span class="nav-icon" aria-hidden="true">推</span>
+          <span class="nav-text">推送</span>
+        </a>
+        <a href="/ai" class="nav-link" data-route="/ai" title="AI">
+          <span class="nav-icon" aria-hidden="true">AI</span>
+          <span class="nav-text">AI</span>
+        </a>
       </nav>
     </aside>
 
     <section class="workspace">
       <header class="topbar">
         <div>
-          <p class="eyebrow">Dashboard</p>
-          <h1>流量分析工作台</h1>
+          <p id="topbar-eyebrow" class="eyebrow">Dashboard</p>
+          <h1 id="topbar-title">流量分析工作台</h1>
+          <p id="topbar-subtitle" class="topbar-subtitle muted">查看探针流量、节点排行和服务状态。</p>
         </div>
         <div class="top-actions">
           <span id="status-pill" class="status-pill">加载中</span>
@@ -58,87 +91,91 @@
         </div>
       </header>
 
-      <section id="overview" class="section-grid metrics-grid">
-        <article class="metric-panel">
-          <span>今日</span>
-          <strong id="metric-today">--</strong>
-          <small id="metric-today-note">等待数据</small>
-        </article>
-        <article class="metric-panel">
-          <span>本周</span>
-          <strong id="metric-week">--</strong>
-          <small id="metric-week-note">等待数据</small>
-        </article>
-        <article class="metric-panel">
-          <span>本月</span>
-          <strong id="metric-month">--</strong>
-          <small id="metric-month-note">等待数据</small>
-        </article>
-        <article class="metric-panel">
-          <span>状态</span>
-          <strong id="metric-services">--</strong>
-          <small id="metric-time">--</small>
-        </article>
+      <section class="route-view" data-route="/">
+        <section id="overview" class="section-grid metrics-grid">
+          <article class="metric-panel">
+            <span>今日</span>
+            <strong id="metric-today">--</strong>
+            <small id="metric-today-note">等待数据</small>
+          </article>
+          <article class="metric-panel">
+            <span>本周</span>
+            <strong id="metric-week">--</strong>
+            <small id="metric-week-note">等待数据</small>
+          </article>
+          <article class="metric-panel">
+            <span>本月</span>
+            <strong id="metric-month">--</strong>
+            <small id="metric-month-note">等待数据</small>
+          </article>
+          <article class="metric-panel">
+            <span>状态</span>
+            <strong id="metric-services">--</strong>
+            <small id="metric-time">--</small>
+          </article>
+        </section>
+
+        <section class="content-grid">
+          <article class="panel wide">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Traffic</p>
+                <h2>最近 24h / 7d 摘要</h2>
+              </div>
+              <span id="range-label" class="soft-label">records</span>
+            </div>
+            <div id="trend-chart" class="chart-box"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Top</p>
+                <h2>今日 Top 节点</h2>
+              </div>
+            </div>
+            <ol id="top-list" class="top-list"></ol>
+          </article>
+        </section>
       </section>
 
-      <section class="content-grid">
-        <article class="panel wide">
+      <section class="route-view hidden" data-route="/nodes">
+        <section id="nodes" class="panel">
           <div class="panel-head">
             <div>
-              <p class="eyebrow">Traffic</p>
-              <h2>最近 24h / 7d 摘要</h2>
+              <p class="eyebrow">Nodes</p>
+              <h2>节点流量分析</h2>
             </div>
-            <span id="range-label" class="soft-label">records</span>
-          </div>
-          <div id="trend-chart" class="chart-box"></div>
-        </article>
-
-        <article class="panel">
-          <div class="panel-head">
-            <div>
-              <p class="eyebrow">Top</p>
-              <h2>今日 Top 节点</h2>
+            <div class="segmented" id="range-tabs">
+              <button data-hours="1">1h</button>
+              <button data-hours="6">6h</button>
+              <button data-hours="24" class="active">24h</button>
+              <button data-hours="168">7d</button>
+              <button data-hours="720">30d</button>
             </div>
           </div>
-          <ol id="top-list" class="top-list"></ol>
-        </article>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>节点</th>
+                  <th>下行</th>
+                  <th>上行</th>
+                  <th>合计</th>
+                  <th>CPU</th>
+                  <th>RAM</th>
+                  <th>Disk</th>
+                </tr>
+              </thead>
+              <tbody id="nodes-table"></tbody>
+            </table>
+          </div>
+          <div id="node-detail" class="detail-strip">点击节点查看详情。</div>
+        </section>
       </section>
 
-      <section id="nodes" class="panel">
-        <div class="panel-head">
-          <div>
-            <p class="eyebrow">Nodes</p>
-            <h2>节点流量分析</h2>
-          </div>
-          <div class="segmented" id="range-tabs">
-            <button data-hours="1">1h</button>
-            <button data-hours="6">6h</button>
-            <button data-hours="24" class="active">24h</button>
-            <button data-hours="168">7d</button>
-            <button data-hours="720">30d</button>
-          </div>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>节点</th>
-                <th>下行</th>
-                <th>上行</th>
-                <th>合计</th>
-                <th>CPU</th>
-                <th>RAM</th>
-                <th>Disk</th>
-              </tr>
-            </thead>
-            <tbody id="nodes-table"></tbody>
-          </table>
-        </div>
-        <div id="node-detail" class="detail-strip">点击节点查看详情。</div>
-      </section>
-
-      <section class="content-grid">
-        <article id="alerts" class="panel">
+      <section class="route-view hidden" data-route="/alerts">
+        <section id="alerts" class="panel">
           <div class="panel-head">
             <div>
               <p class="eyebrow">Alerts</p>
@@ -153,9 +190,11 @@
             <button id="unmute-btn" class="ghost-btn">解除</button>
             <button id="check-alerts-btn" class="primary-btn">检查</button>
           </div>
-        </article>
+        </section>
+      </section>
 
-        <article id="telegram" class="panel">
+      <section class="route-view hidden" data-route="/telegram">
+        <section id="telegram" class="panel">
           <div class="panel-head">
             <div>
               <p class="eyebrow">Telegram</p>
@@ -176,26 +215,28 @@
             <button id="send-report-btn" class="primary-btn">发送报表</button>
           </div>
           <p id="telegram-result" class="muted"></p>
-        </article>
+        </section>
       </section>
 
-      <section id="ai" class="panel">
-        <div class="panel-head">
-          <div>
-            <p class="eyebrow">AI</p>
-            <h2>数据问答</h2>
+      <section class="route-view hidden" data-route="/ai">
+        <section id="ai" class="panel">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">AI</p>
+              <h2>数据问答</h2>
+            </div>
+            <span id="ai-status" class="soft-label">--</span>
           </div>
-          <span id="ai-status" class="soft-label">--</span>
-        </div>
-        <div class="ai-box">
-          <textarea id="ai-question" rows="3" placeholder="例如：今天哪个节点流量异常？"></textarea>
-          <button id="ai-ask-btn" class="primary-btn">提问</button>
-        </div>
-        <div id="ai-answer" class="answer-box">等待提问。</div>
+          <div class="ai-box">
+            <textarea id="ai-question" rows="3" placeholder="例如：今天哪个节点流量异常？"></textarea>
+            <button id="ai-ask-btn" class="primary-btn">提问</button>
+          </div>
+          <div id="ai-answer" class="answer-box">等待提问。</div>
+        </section>
       </section>
     </section>
   </main>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=20260606-ui2"></script>
 </body>
 </html>

@@ -267,11 +267,15 @@ def safe_records_summary(hours: int) -> dict:
 
 
 @app.get("/")
+@app.get("/nodes")
+@app.get("/alerts")
+@app.get("/telegram")
+@app.get("/ai")
 async def index():
     index_path = STATIC_DIR / "index.html"
     if not index_path.exists():
         return api_error("static/index.html not found", status_code=500, code="static_missing")
-    return FileResponse(str(index_path))
+    return FileResponse(str(index_path), headers={"Cache-Control": "no-store"})
 
 
 @app.post("/api/auth/login")

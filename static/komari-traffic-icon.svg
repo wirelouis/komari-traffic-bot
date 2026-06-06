@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
+  <title id="title">Komari Traffic</title>
+  <desc id="desc">Warm paper traffic mark with a K monogram and flow bars.</desc>
+  <rect width="64" height="64" rx="14" fill="#2b2926"/>
+  <path d="M14 43V21c0-3 2-5 5-5h2v14l12-14h9L30 30l13 17h-9L24 34l-3 4v9h-2c-3 0-5-1-5-4Z" fill="#fffaf4"/>
+  <path d="M40 21h10" stroke="#d8b589" stroke-width="5" stroke-linecap="round"/>
+  <path d="M36 32h14" stroke="#b8784d" stroke-width="5" stroke-linecap="round"/>
+  <path d="M43 43h7" stroke="#7f9a84" stroke-width="5" stroke-linecap="round"/>
+</svg>
