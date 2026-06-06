@@ -250,6 +250,8 @@ The Web console is a lightweight dashboard for traffic overview, node analysis, 
 - Port: `WEB_PORT` (default `8080`)
 - Session secret: `WEB_SESSION_SECRET`; empty values generate a temporary secret, so sessions expire after container restart
 
+The node page automatically binds traffic nodes to Komari machines by `uuid`. You can also override a binding in the console. Manual overrides are stored only in `./data/node_bindings.json` and do not modify Komari itself; clicking a bound node opens `KOMARI_BASE_URL/server/{uuid}`.
+
 The console never returns Telegram tokens, Komari tokens, AI keys, or the Web password to the browser.
 
 ## 🤖 Telegram Command Examples
@@ -290,6 +292,8 @@ Telegram update offset
 
 alerts_state (active alerts / cooldown / mute state)
 
+node_bindings (manual Web-console overrides from traffic nodes to Komari machines)
+
 Upgrades and restarts will not lose data.
 
 ## 🚨 Smart Alerts
@@ -322,6 +326,15 @@ python /app/komari_traffic_report.py check_alerts --dry-run
 docker pull ghcr.io/wirelouis/komari-traffic-bot:latest
 docker compose up -d
 ```
+
+This version does not add new required environment variables. If you are using an older `docker-compose.yml`, check that:
+
+- the `web` service exists and mounts `./data:/data`
+- `.env` sets `WEB_PASSWORD`
+- `KOMARI_BASE_URL` points to a Komari address reachable from your browser, used for node detail links
+- if you customize schedules, the `cron` service still mounts `./crontab:/app/crontab:ro`
+
+`./data/node_bindings.json` is created automatically by the Web console.
 
 
 ## 🔐 Admin commands (admin chats only)
