@@ -168,11 +168,11 @@ def save_node_bindings(data: dict):
     k.save_json_atomic(str(node_bindings_path()), payload)
 
 
-def komari_server_url(uuid: str) -> str:
+def komari_instance_url(uuid: str) -> str:
     base = k.KOMARI_BASE_URL.rstrip("/")
     if not base or not uuid:
         return ""
-    return f"{base}/server/{quote(str(uuid), safe='')}"
+    return f"{base}/instance/{quote(str(uuid), safe='')}"
 
 
 def normalize_machine(node: dict) -> dict:
@@ -187,7 +187,7 @@ def normalize_machine(node: dict) -> dict:
         "arch": node.get("arch") or "",
         "version": node.get("version") or "",
         "tags": node.get("tags") if isinstance(node.get("tags"), list) else [],
-        "web_url": komari_server_url(uuid),
+        "web_url": komari_instance_url(uuid),
     }
     return machine
 

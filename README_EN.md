@@ -250,7 +250,7 @@ The Web console is a lightweight dashboard for traffic overview, node analysis, 
 - Port: `WEB_PORT` (default `8080`)
 - Session secret: `WEB_SESSION_SECRET`; empty values generate a temporary secret, so sessions expire after container restart
 
-The node page automatically binds traffic nodes to Komari machines by `uuid`. You can also override a binding in the console. Manual overrides are stored only in `./data/node_bindings.json` and do not modify Komari itself; clicking a bound node opens `KOMARI_BASE_URL/server/{uuid}`.
+The node page automatically binds traffic nodes to Komari machines by `uuid`. You can also override a binding in the console. Manual overrides are stored only in `./data/node_bindings.json` and do not modify Komari itself; clicking a bound node opens `KOMARI_BASE_URL/instance/{uuid}`.
 
 The console never returns Telegram tokens, Komari tokens, AI keys, or the Web password to the browser.
 

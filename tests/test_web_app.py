@@ -183,7 +183,7 @@ class WebAppTests(unittest.TestCase):
         payload = response.json()["data"]
         self.assertTrue(payload["configured"])
         self.assertEqual([m["uuid"] for m in payload["machines"]], ["uuid-a", "uuid-b"])
-        self.assertEqual(payload["machines"][0]["web_url"], "https://komari.example/server/uuid-a")
+        self.assertEqual(payload["machines"][0]["web_url"], "https://komari.example/instance/uuid-a")
         self.assertEqual(payload["machines"][1]["tags"], ["edge"])
 
     def test_node_binding_save_and_clear(self):
@@ -262,10 +262,10 @@ class WebAppTests(unittest.TestCase):
         by_uuid = {node["uuid"]: node for node in nodes}
         self.assertEqual(by_uuid["traffic-node"]["binding"]["mode"], "manual")
         self.assertEqual(by_uuid["traffic-node"]["komari"]["machine"]["name"], "Probe One")
-        self.assertEqual(by_uuid["traffic-node"]["komari"]["web_url"], "https://komari.example/server/machine-1")
+        self.assertEqual(by_uuid["traffic-node"]["komari"]["web_url"], "https://komari.example/instance/machine-1")
         self.assertEqual(by_uuid["auto-node"]["binding"]["mode"], "auto")
-        self.assertEqual(by_uuid["auto-node"]["komari"]["web_url"], "https://komari.example/server/auto-node")
-        self.assertEqual(response.json()["data"]["top_nodes"][0]["komari"]["web_url"], "https://komari.example/server/machine-1")
+        self.assertEqual(by_uuid["auto-node"]["komari"]["web_url"], "https://komari.example/instance/auto-node")
+        self.assertEqual(response.json()["data"]["top_nodes"][0]["komari"]["web_url"], "https://komari.example/instance/machine-1")
 
     def test_telegram_preview_does_not_send(self):
         self.login()
