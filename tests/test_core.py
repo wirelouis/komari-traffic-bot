@@ -123,7 +123,16 @@ class CoreTests(unittest.TestCase):
         self.patch_attr("ALERT_DAILY_NODE_BYTES", 0)
         self.patch_attr("ALERT_RECOVERY_NOTIFY", True)
         self.patch_attr("BOT_INSTANCE_NAME", "")
+        self.patch_attr("KOMARI_BASE_URL", "")
+        self.patch_attr("TELEGRAM_CHAT_ID", "")
+        self.patch_attr("TELEGRAM_ALERT_CHAT_ID", "")
+        self.patch_attr("AI_API_BASE", "")
+        self.patch_attr("AI_MODEL", "")
         self.patch_attr("TOP_N", 3)
+        self.patch_attr("TIMEOUT", 10)
+        self.patch_attr("KOMARI_FETCH_WORKERS", 4)
+        self.patch_attr("SAMPLE_INTERVAL_SECONDS", 300)
+        self.patch_attr("SAMPLE_RETENTION_HOURS", 48)
         self.patch_attr("AI_PACK_CACHE_TTL_SECONDS", 3600)
         self.patch_attr("TASK_RUN_RETENTION_DAYS", 90)
 
@@ -318,20 +327,57 @@ class CoreTests(unittest.TestCase):
     def test_runtime_config_save_load_and_validate(self):
         saved = k.save_runtime_config({
             "bot_instance_name": "edge-prod",
+            "komari_base_url": "https://komari-new.example/",
+            "telegram_chat_id": "987654321",
+            "telegram_alert_chat_id": "123123123",
+            "ai_api_base": "https://ai-new.example/v1/",
+            "ai_model": "gpt-5.4-mini",
             "top_n": 6,
+            "komari_timeout_seconds": 20,
+            "komari_fetch_workers": 8,
+            "sample_interval_seconds": 120,
+            "sample_retention_hours": 24,
             "ai_pack_cache_ttl_seconds": 1800,
             "task_run_retention_days": 45,
+            "alerts_enabled": False,
+            "alert_recovery_notify": False,
+            "alert_cooldown_seconds": 600,
+            "alert_window_minutes": 30,
+            "alert_node_missing_samples": 3,
+            "alert_silence_windows": "23:00-07:00",
+            "alert_total_window_bytes": "2GiB",
         })
 
         self.assertEqual(saved["bot_instance_name"], "edge-prod")
+        self.assertEqual(saved["komari_base_url"], "https://komari-new.example")
+        self.assertEqual(saved["alert_total_window_bytes"], 2 * 1024 ** 3)
+        self.assertEqual(k.KOMARI_BASE_URL, "https://komari-new.example")
+        self.assertEqual(k.TELEGRAM_CHAT_ID, "987654321")
+        self.assertEqual(k.AI_API_BASE, "https://ai-new.example/v1")
+        self.assertEqual(k.AI_MODEL, "gpt-5.4-mini")
         self.assertEqual(k.TOP_N, 6)
+        self.assertEqual(k.TIMEOUT, 20)
+        self.assertFalse(k.ALERTS_ENABLED)
+        self.assertEqual(k.ALERT_SILENCE_WINDOWS, "23:00-07:00")
+        self.assertEqual(k.ALERT_TOTAL_WINDOW_BYTES, 2 * 1024 ** 3)
         self.assertEqual(k.load_runtime_config()["task_run_retention_days"], 45)
         current = k.current_runtime_config()
         self.assertEqual(current["values"]["ai_pack_cache_ttl_seconds"], 1800)
+        self.assertEqual(current["values"]["alert_total_window_bytes"], 2 * 1024 ** 3)
         self.assertTrue(str(self.tmp_path) in current["path"])
+        fields = {item["key"]: item for item in current["editable"]}
+        self.assertEqual(fields["alerts_enabled"]["type"], "boolean")
+        self.assertEqual(fields["alert_total_window_bytes"]["type"], "bytes")
+        self.assertEqual(fields["alert_total_window_bytes"]["value"], "2.00 GiB")
 
         with self.assertRaises(RuntimeError):
             k.validate_runtime_config({"top_n": 0})
+        with self.assertRaises(RuntimeError):
+            k.validate_runtime_config({"alert_silence_windows": "bad"})
+        with self.assertRaises(RuntimeError):
+            k.validate_runtime_config({"alert_total_window_bytes": "10XB"})
+        with self.assertRaises(RuntimeError):
+            k.validate_runtime_config({"telegram_chat_id": "bad id"})
 
     def test_traffic_range_summary_aggregates_daily_and_weekly(self):
         k.upsert_daily_usage("2026-06-01", {

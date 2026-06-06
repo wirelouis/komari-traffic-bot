@@ -82,8 +82,31 @@ def parse_bytes_value(value, name: str = "value") -> int:
     return max(0, int(number * unit_map[unit]))
 
 
+def bytes_config_text(value: int) -> str:
+    n = int(value or 0)
+    return "" if n <= 0 else human_bytes(n)
+
+
 def parse_bytes_env(name: str) -> int:
     return parse_bytes_value(os.environ.get(name, ""), name=name)
+
+
+def validate_silence_windows_text(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    for part in re.split(r"[,;]\s*", text):
+        if not part:
+            continue
+        m = re.fullmatch(r"(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})", part.strip())
+        if not m:
+            raise RuntimeError(f"ALERT_SILENCE_WINDOWS invalid segment: {part}")
+        sh, sm, eh, em = [int(x) for x in m.groups()]
+        if not (0 <= sh <= 23 and 0 <= eh <= 23 and 0 <= sm <= 59 and 0 <= em <= 59):
+            raise RuntimeError(f"ALERT_SILENCE_WINDOWS time out of range: {part}")
+        if sh * 60 + sm == eh * 60 + em:
+            raise RuntimeError(f"ALERT_SILENCE_WINDOWS empty segment: {part}")
+    return text
 
 
 STAT_TZ = os.environ.get("STAT_TZ", "Asia/Shanghai")
@@ -378,24 +401,95 @@ def _parse_editable_int(payload: dict, key: str, current: int, min_value: int, m
     return value
 
 
+def _parse_editable_bool(payload: dict, key: str, current: bool) -> bool:
+    if key not in payload:
+        return bool(current)
+    return parse_bool_value(payload.get(key), default=bool(current))
+
+
+def _parse_editable_text(payload: dict, key: str, current: str, max_len: int = 240) -> str:
+    if key not in payload:
+        return str(current or "").strip()
+    return str(payload.get(key) or "").strip()[:max_len]
+
+
+def _parse_editable_bytes(payload: dict, key: str, current: int, max_value: int = 1024 ** 6) -> int:
+    if key not in payload:
+        return int(current)
+    value = parse_bytes_value(payload.get(key), name=key)
+    if value < 0 or value > max_value:
+        raise RuntimeError(f"{key} must be between 0 and {human_bytes(max_value)}")
+    return value
+
+
 def validate_runtime_config(payload: dict) -> dict:
     payload = payload if isinstance(payload, dict) else {}
     instance_name = str(payload.get("bot_instance_name", BOT_INSTANCE_NAME) or "").strip()[:80]
+    komari_base_url = _parse_editable_text(payload, "komari_base_url", KOMARI_BASE_URL).rstrip("/")
+    telegram_chat_id = _parse_editable_text(payload, "telegram_chat_id", TELEGRAM_CHAT_ID, 120)
+    telegram_alert_chat_id = _parse_editable_text(payload, "telegram_alert_chat_id", TELEGRAM_ALERT_CHAT_ID, 120)
+    ai_api_base = _parse_editable_text(payload, "ai_api_base", AI_API_BASE).rstrip("/")
+    ai_model = _parse_editable_text(payload, "ai_model", AI_MODEL, 120)
+    for key, value in (("telegram_chat_id", telegram_chat_id), ("telegram_alert_chat_id", telegram_alert_chat_id)):
+        if value and any(ch.isspace() for ch in value):
+            raise RuntimeError(f"{key} must be a single chat id without whitespace")
     return {
         "bot_instance_name": instance_name,
+        "komari_base_url": komari_base_url,
+        "telegram_chat_id": telegram_chat_id,
+        "telegram_alert_chat_id": telegram_alert_chat_id,
+        "ai_api_base": ai_api_base,
+        "ai_model": ai_model,
         "top_n": _parse_editable_int(payload, "top_n", TOP_N, 1, 50),
+        "komari_timeout_seconds": _parse_editable_int(payload, "komari_timeout_seconds", TIMEOUT, 3, 120),
+        "komari_fetch_workers": _parse_editable_int(payload, "komari_fetch_workers", KOMARI_FETCH_WORKERS, 1, 32),
+        "sample_interval_seconds": _parse_editable_int(payload, "sample_interval_seconds", SAMPLE_INTERVAL_SECONDS, 60, 3600),
+        "sample_retention_hours": _parse_editable_int(payload, "sample_retention_hours", SAMPLE_RETENTION_HOURS, 1, 168),
         "ai_pack_cache_ttl_seconds": _parse_editable_int(payload, "ai_pack_cache_ttl_seconds", AI_PACK_CACHE_TTL_SECONDS, 0, 86400),
         "task_run_retention_days": _parse_editable_int(payload, "task_run_retention_days", TASK_RUN_RETENTION_DAYS, 0, 3650),
+        "alerts_enabled": _parse_editable_bool(payload, "alerts_enabled", ALERTS_ENABLED),
+        "alert_recovery_notify": _parse_editable_bool(payload, "alert_recovery_notify", ALERT_RECOVERY_NOTIFY),
+        "alert_cooldown_seconds": _parse_editable_int(payload, "alert_cooldown_seconds", ALERT_COOLDOWN_SECONDS, 0, 86400),
+        "alert_window_minutes": _parse_editable_int(payload, "alert_window_minutes", ALERT_WINDOW_MINUTES, 5, 1440),
+        "alert_node_missing_samples": _parse_editable_int(payload, "alert_node_missing_samples", ALERT_NODE_MISSING_SAMPLES, 1, 20),
+        "alert_silence_windows": validate_silence_windows_text(payload.get("alert_silence_windows", ALERT_SILENCE_WINDOWS)),
+        "alert_total_window_bytes": _parse_editable_bytes(payload, "alert_total_window_bytes", ALERT_TOTAL_WINDOW_BYTES),
+        "alert_node_window_bytes": _parse_editable_bytes(payload, "alert_node_window_bytes", ALERT_NODE_WINDOW_BYTES),
+        "alert_daily_total_bytes": _parse_editable_bytes(payload, "alert_daily_total_bytes", ALERT_DAILY_TOTAL_BYTES),
+        "alert_daily_node_bytes": _parse_editable_bytes(payload, "alert_daily_node_bytes", ALERT_DAILY_NODE_BYTES),
     }
 
 
 def apply_runtime_config(config: dict) -> dict:
-    global BOT_INSTANCE_NAME, TOP_N, AI_PACK_CACHE_TTL_SECONDS, TASK_RUN_RETENTION_DAYS
+    global BOT_INSTANCE_NAME, TOP_N, TIMEOUT, KOMARI_FETCH_WORKERS, SAMPLE_INTERVAL_SECONDS, SAMPLE_RETENTION_HOURS
+    global AI_PACK_CACHE_TTL_SECONDS, TASK_RUN_RETENTION_DAYS
+    global KOMARI_BASE_URL, TELEGRAM_CHAT_ID, TELEGRAM_ALERT_CHAT_ID, AI_API_BASE, AI_MODEL
+    global ALERTS_ENABLED, ALERT_RECOVERY_NOTIFY, ALERT_COOLDOWN_SECONDS, ALERT_WINDOW_MINUTES, ALERT_NODE_MISSING_SAMPLES
+    global ALERT_SILENCE_WINDOWS, ALERT_TOTAL_WINDOW_BYTES, ALERT_NODE_WINDOW_BYTES, ALERT_DAILY_TOTAL_BYTES, ALERT_DAILY_NODE_BYTES
     clean = validate_runtime_config(config)
     BOT_INSTANCE_NAME = clean["bot_instance_name"]
+    KOMARI_BASE_URL = clean["komari_base_url"]
+    TELEGRAM_CHAT_ID = clean["telegram_chat_id"]
+    TELEGRAM_ALERT_CHAT_ID = clean["telegram_alert_chat_id"]
+    AI_API_BASE = clean["ai_api_base"]
+    AI_MODEL = clean["ai_model"]
     TOP_N = clean["top_n"]
+    TIMEOUT = clean["komari_timeout_seconds"]
+    KOMARI_FETCH_WORKERS = clean["komari_fetch_workers"]
+    SAMPLE_INTERVAL_SECONDS = clean["sample_interval_seconds"]
+    SAMPLE_RETENTION_HOURS = clean["sample_retention_hours"]
     AI_PACK_CACHE_TTL_SECONDS = clean["ai_pack_cache_ttl_seconds"]
     TASK_RUN_RETENTION_DAYS = clean["task_run_retention_days"]
+    ALERTS_ENABLED = clean["alerts_enabled"]
+    ALERT_RECOVERY_NOTIFY = clean["alert_recovery_notify"]
+    ALERT_COOLDOWN_SECONDS = clean["alert_cooldown_seconds"]
+    ALERT_WINDOW_MINUTES = clean["alert_window_minutes"]
+    ALERT_NODE_MISSING_SAMPLES = clean["alert_node_missing_samples"]
+    ALERT_SILENCE_WINDOWS = clean["alert_silence_windows"]
+    ALERT_TOTAL_WINDOW_BYTES = clean["alert_total_window_bytes"]
+    ALERT_NODE_WINDOW_BYTES = clean["alert_node_window_bytes"]
+    ALERT_DAILY_TOTAL_BYTES = clean["alert_daily_total_bytes"]
+    ALERT_DAILY_NODE_BYTES = clean["alert_daily_node_bytes"]
     return clean
 
 
@@ -418,18 +512,64 @@ def current_runtime_config() -> dict:
     stored_config = stored.get("config", {}) if isinstance(stored, dict) else {}
     clean = validate_runtime_config({
         "bot_instance_name": stored_config.get("bot_instance_name", BOT_INSTANCE_NAME),
+        "komari_base_url": stored_config.get("komari_base_url", KOMARI_BASE_URL),
+        "telegram_chat_id": stored_config.get("telegram_chat_id", TELEGRAM_CHAT_ID),
+        "telegram_alert_chat_id": stored_config.get("telegram_alert_chat_id", TELEGRAM_ALERT_CHAT_ID),
+        "ai_api_base": stored_config.get("ai_api_base", AI_API_BASE),
+        "ai_model": stored_config.get("ai_model", AI_MODEL),
         "top_n": stored_config.get("top_n", TOP_N),
+        "komari_timeout_seconds": stored_config.get("komari_timeout_seconds", TIMEOUT),
+        "komari_fetch_workers": stored_config.get("komari_fetch_workers", KOMARI_FETCH_WORKERS),
+        "sample_interval_seconds": stored_config.get("sample_interval_seconds", SAMPLE_INTERVAL_SECONDS),
+        "sample_retention_hours": stored_config.get("sample_retention_hours", SAMPLE_RETENTION_HOURS),
         "ai_pack_cache_ttl_seconds": stored_config.get("ai_pack_cache_ttl_seconds", AI_PACK_CACHE_TTL_SECONDS),
         "task_run_retention_days": stored_config.get("task_run_retention_days", TASK_RUN_RETENTION_DAYS),
+        "alerts_enabled": stored_config.get("alerts_enabled", ALERTS_ENABLED),
+        "alert_recovery_notify": stored_config.get("alert_recovery_notify", ALERT_RECOVERY_NOTIFY),
+        "alert_cooldown_seconds": stored_config.get("alert_cooldown_seconds", ALERT_COOLDOWN_SECONDS),
+        "alert_window_minutes": stored_config.get("alert_window_minutes", ALERT_WINDOW_MINUTES),
+        "alert_node_missing_samples": stored_config.get("alert_node_missing_samples", ALERT_NODE_MISSING_SAMPLES),
+        "alert_silence_windows": stored_config.get("alert_silence_windows", ALERT_SILENCE_WINDOWS),
+        "alert_total_window_bytes": stored_config.get("alert_total_window_bytes", ALERT_TOTAL_WINDOW_BYTES),
+        "alert_node_window_bytes": stored_config.get("alert_node_window_bytes", ALERT_NODE_WINDOW_BYTES),
+        "alert_daily_total_bytes": stored_config.get("alert_daily_total_bytes", ALERT_DAILY_TOTAL_BYTES),
+        "alert_daily_node_bytes": stored_config.get("alert_daily_node_bytes", ALERT_DAILY_NODE_BYTES),
     })
+    def field(key: str, label: str, field_type: str = "text", note: str = "", **extra) -> dict:
+        value = clean[key]
+        if field_type == "bytes":
+            value = bytes_config_text(value)
+        item = {"key": key, "label": label, "type": field_type, "value": value, "note": note}
+        item.update(extra)
+        return item
+
     return {
         "path": runtime_config_path(),
         "values": clean,
         "editable": [
-            {"key": "bot_instance_name", "label": "实例名", "type": "text", "value": clean["bot_instance_name"], "note": "用于 Web 面板和 Telegram 报表标题。"},
-            {"key": "top_n", "label": "Top 节点数", "type": "number", "min": 1, "max": 50, "value": clean["top_n"], "note": "影响 Top 报表和面板排行。"},
-            {"key": "ai_pack_cache_ttl_seconds", "label": "AI 缓存 TTL（秒）", "type": "number", "min": 0, "max": 86400, "value": clean["ai_pack_cache_ttl_seconds"], "note": "0 表示每次实时生成。"},
-            {"key": "task_run_retention_days", "label": "任务记录保留天数", "type": "number", "min": 0, "max": 3650, "value": clean["task_run_retention_days"], "note": "0 表示关闭清理。"},
+            field("bot_instance_name", "实例名", note="用于 Web 面板和 Telegram 报表标题。", group="基础"),
+            field("komari_base_url", "Komari 地址", note="只保存面板访问地址，不包含 API token。", group="基础"),
+            field("telegram_chat_id", "默认推送 Chat", note="只保存 Chat ID，不包含 Bot Token。", group="基础"),
+            field("telegram_alert_chat_id", "告警推送 Chat", note="留空时沿用默认推送 Chat。", group="基础"),
+            field("ai_api_base", "AI 接口地址", note="只保存接口地址，不包含 API Key。", group="基础"),
+            field("ai_model", "AI 模型", note="例如 gpt-5.4-mini，可直接显示和修改。", group="基础"),
+            field("top_n", "Top 节点数", "number", "影响 Top 报表和面板排行。", min=1, max=50, group="基础"),
+            field("komari_timeout_seconds", "Komari 超时（秒）", "number", "探针接口慢时可适当调大。", min=3, max=120, group="基础"),
+            field("komari_fetch_workers", "节点并发数", "number", "节点很多时可适当调大，太大会增加探针压力。", min=1, max=32, group="基础"),
+            field("sample_interval_seconds", "采样间隔（秒）", "number", "用于短时间 Top 和告警检测。", min=60, max=3600, group="基础"),
+            field("sample_retention_hours", "短时采样保留（小时）", "number", "用于最近 Nh 查询，不影响长期 SQLite 汇总。", min=1, max=168, group="基础"),
+            field("ai_pack_cache_ttl_seconds", "AI 缓存 TTL（秒）", "number", "0 表示每次实时生成。", min=0, max=86400, group="基础"),
+            field("task_run_retention_days", "任务记录保留天数", "number", "0 表示关闭清理。", min=0, max=3650, group="基础"),
+            field("alerts_enabled", "启用告警", "boolean", "关闭后不会产生新的告警事件。", group="告警"),
+            field("alert_recovery_notify", "恢复后通知", "boolean", "异常恢复时是否发送恢复提示。", group="告警"),
+            field("alert_cooldown_seconds", "重复提醒冷却（秒）", "number", "同一个异常多久后才再次提醒。", min=0, max=86400, group="告警"),
+            field("alert_window_minutes", "窗口检测范围（分钟）", "number", "用于最近窗口流量阈值。", min=5, max=1440, group="告警"),
+            field("alert_node_missing_samples", "节点失败次数阈值", "number", "节点连续采样失败达到这个次数才告警。", min=1, max=20, group="告警"),
+            field("alert_silence_windows", "静默时段", note="格式如 23:00-07:00；多个用逗号分隔。", group="告警"),
+            field("alert_total_window_bytes", "窗口总流量阈值", "bytes", "留空或 0 表示关闭；支持 MiB/GiB/TiB。", group="告警"),
+            field("alert_node_window_bytes", "窗口单节点阈值", "bytes", "留空或 0 表示关闭；支持 MiB/GiB/TiB。", group="告警"),
+            field("alert_daily_total_bytes", "今日总流量阈值", "bytes", "留空或 0 表示关闭；支持 MiB/GiB/TiB。", group="告警"),
+            field("alert_daily_node_bytes", "今日单节点阈值", "bytes", "留空或 0 表示关闭；支持 MiB/GiB/TiB。", group="告警"),
         ],
     }
 
@@ -2793,7 +2933,7 @@ def parse_silence_windows(value: str) -> list[tuple[int, int]]:
     解析静默窗口，格式：HH:MM-HH:MM,23:00-07:00。
     返回当天分钟数区间，支持跨午夜。
     """
-    text = (value or "").strip()
+    text = validate_silence_windows_text(value)
     if not text:
         return []
 
@@ -2802,15 +2942,9 @@ def parse_silence_windows(value: str) -> list[tuple[int, int]]:
         if not part:
             continue
         m = re.fullmatch(r"(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})", part.strip())
-        if not m:
-            raise RuntimeError(f"ALERT_SILENCE_WINDOWS invalid segment: {part}")
         sh, sm, eh, em = [int(x) for x in m.groups()]
-        if not (0 <= sh <= 23 and 0 <= eh <= 23 and 0 <= sm <= 59 and 0 <= em <= 59):
-            raise RuntimeError(f"ALERT_SILENCE_WINDOWS time out of range: {part}")
         start = sh * 60 + sm
         end = eh * 60 + em
-        if start == end:
-            raise RuntimeError(f"ALERT_SILENCE_WINDOWS empty segment: {part}")
         windows.append((start, end))
     return windows
 

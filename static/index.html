@@ -4,15 +4,15 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Komari Traffic Console</title>
-  <link rel="icon" type="image/svg+xml" href="/static/komari-traffic-icon.svg?v=20260606-product4">
-  <link rel="stylesheet" href="/static/styles.css?v=20260606-product4">
+  <link rel="icon" type="image/svg+xml" href="/static/komari-traffic-icon.svg?v=20260606-product6">
+  <link rel="stylesheet" href="/static/styles.css?v=20260606-product6">
 </head>
 <body>
   <main id="login-view" class="login-shell hidden">
     <section class="login-panel">
       <div class="login-brand">
         <span class="brand-mark">
-          <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260606-product4" alt="">
+          <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260606-product6" alt="">
           <span class="brand-fallback" hidden>K</span>
         </span>
         <div>
@@ -21,14 +21,14 @@
         </div>
       </div>
       <p class="muted">登录后查看节点流量、告警状态和 Telegram 推送。</p>
-      <form id="login-form" class="form-stack">
+      <form id="login-form" class="form-stack" autocomplete="off" data-lpignore="true">
         <label>
           <span>用户名</span>
-          <input id="login-username" autocomplete="username" value="admin">
+          <input id="login-username" name="komari-user-field" autocomplete="new-password" autocapitalize="none" spellcheck="false" data-lpignore="true" readonly>
         </label>
         <label>
           <span>密码</span>
-          <input id="login-password" type="password" autocomplete="current-password">
+          <input id="login-password" name="komari-pass-field" type="password" autocomplete="new-password" data-lpignore="true" readonly>
         </label>
         <button type="submit" class="primary-btn">登录</button>
       </form>
@@ -41,7 +41,7 @@
       <div class="sidebar-head">
         <a class="brand" href="/" data-route="/" aria-label="Komari Traffic 总览">
           <span class="brand-mark">
-            <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260606-product4" alt="">
+            <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260606-product6" alt="">
             <span class="brand-fallback" hidden>K</span>
           </span>
           <span class="brand-copy">
@@ -123,6 +123,11 @@
           <p id="topbar-subtitle" class="topbar-subtitle muted">查看探针流量、节点排行和服务状态。</p>
         </div>
         <div class="top-actions">
+          <div class="segmented theme-switch" id="theme-switch" aria-label="主题">
+            <button type="button" data-theme="auto" class="active">自动</button>
+            <button type="button" data-theme="light">白天</button>
+            <button type="button" data-theme="dark">夜晚</button>
+          </div>
           <span id="status-pill" class="status-pill">加载中</span>
           <button id="refresh-btn" class="ghost-btn">刷新</button>
           <button id="logout-btn" class="ghost-btn">退出</button>
@@ -258,6 +263,19 @@
               <div id="alert-thresholds" class="stacked"></div>
             </article>
           </div>
+          <article class="sub-panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Settings</p>
+                <h3>告警配置</h3>
+              </div>
+            </div>
+            <div id="alert-config-form" class="config-editor compact-config"></div>
+            <div class="inline-form">
+              <button id="save-alert-config-btn" class="primary-btn">保存告警配置</button>
+            </div>
+            <div id="alert-config-result" class="result-box muted">可直接调整阈值、静默窗口和冷却时间。</div>
+          </article>
           <div class="action-band">
             <div class="inline-form">
               <button id="check-alerts-btn" class="ghost-btn">检查一次</button>
@@ -470,7 +488,7 @@
               <div class="panel-head">
                 <div>
                   <p class="eyebrow">Data</p>
-                  <h3>数据目录</h3>
+                  <h3>数据状态</h3>
                 </div>
               </div>
               <div id="system-data" class="stacked"></div>
@@ -528,6 +546,6 @@
     </section>
   </main>
 
-  <script src="/static/app.js?v=20260606-product4"></script>
+  <script src="/static/app.js?v=20260606-product6"></script>
 </body>
 </html>

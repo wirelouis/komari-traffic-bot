@@ -76,9 +76,28 @@ class MaintenancePruneRequest(BaseModel):
 
 class RuntimeConfigRequest(BaseModel):
     bot_instance_name: str | None = None
+    komari_base_url: str | None = None
+    telegram_chat_id: str | None = None
+    telegram_alert_chat_id: str | None = None
+    ai_api_base: str | None = None
+    ai_model: str | None = None
     top_n: int | None = None
+    komari_timeout_seconds: int | None = None
+    komari_fetch_workers: int | None = None
+    sample_interval_seconds: int | None = None
+    sample_retention_hours: int | None = None
     ai_pack_cache_ttl_seconds: int | None = None
     task_run_retention_days: int | None = None
+    alerts_enabled: bool | None = None
+    alert_recovery_notify: bool | None = None
+    alert_cooldown_seconds: int | None = None
+    alert_window_minutes: int | None = None
+    alert_node_missing_samples: int | None = None
+    alert_silence_windows: str | None = None
+    alert_total_window_bytes: str | int | None = None
+    alert_node_window_bytes: str | int | None = None
+    alert_daily_total_bytes: str | int | None = None
+    alert_daily_node_bytes: str | int | None = None
 
 
 def api_ok(data: Any = None, **extra):
@@ -477,15 +496,93 @@ def build_system_status_struct(include_recent: bool = True) -> dict:
         "ai": task_run_response(k.latest_task_run("ai")),
         "sample": task_run_response(k.latest_task_run("sample")),
     }
+    maintenance = build_maintenance_status()
+    recent_failures = len([run for run in recent_runs if run and run.get("status") != "success"])
     service_items = [
-        {"key": "komari", "label": "Komari", "ok": bool(k.KOMARI_BASE_URL), "detail": k.KOMARI_BASE_URL or "未配置"},
-        {"key": "telegram", "label": "Telegram", "ok": bool(k.TELEGRAM_BOT_TOKEN and k.TELEGRAM_CHAT_ID), "detail": mask_value(k.TELEGRAM_CHAT_ID) or "未配置 Chat"},
-        {"key": "ai", "label": "AI", "ok": bool(ai_status.get("configured")), "detail": ai_status.get("model") or "未配置模型"},
-        {"key": "alerts", "label": "告警", "ok": bool(alert_status.get("enabled")), "detail": f"active {alert_status.get('active_count', 0)}"},
-        {"key": "web", "label": "Web 登录", "ok": web_password_configured(), "detail": "临时 session secret" if WEB_SESSION_SECRET_TEMPORARY else "已配置"},
-        {"key": "sqlite", "label": "SQLite", "ok": bool(db_status.get("ok")), "detail": db_status.get("size_human") or "0 B"},
+        {
+            "key": "komari",
+            "label": "探针连接",
+            "level": "ok" if k.KOMARI_BASE_URL else "bad",
+            "ok": bool(k.KOMARI_BASE_URL),
+            "detail": "已填写 Komari 地址。" if k.KOMARI_BASE_URL else "还没有填写 Komari 地址。",
+            "message": "节点数据可以读取。" if k.KOMARI_BASE_URL else "面板暂时无法读取探针数据。",
+            "fix": "" if k.KOMARI_BASE_URL else "在 .env 中设置 KOMARI_BASE_URL，然后重启容器。",
+        },
+        {
+            "key": "telegram",
+            "label": "Telegram 推送",
+            "level": "ok" if k.TELEGRAM_BOT_TOKEN and k.TELEGRAM_CHAT_ID else "bad",
+            "ok": bool(k.TELEGRAM_BOT_TOKEN and k.TELEGRAM_CHAT_ID),
+            "detail": mask_value(k.TELEGRAM_CHAT_ID) or "未配置 Chat",
+            "message": "报表和告警可以推送。" if k.TELEGRAM_BOT_TOKEN and k.TELEGRAM_CHAT_ID else "推送目标还没有配置完整。",
+            "fix": "" if k.TELEGRAM_BOT_TOKEN and k.TELEGRAM_CHAT_ID else "检查 TELEGRAM_BOT_TOKEN 和 TELEGRAM_CHAT_ID。",
+        },
+        {
+            "key": "ai",
+            "label": "AI 问答",
+            "level": "ok" if ai_status.get("configured") else "warn",
+            "ok": bool(ai_status.get("configured")),
+            "detail": ai_status.get("model") or "未配置模型",
+            "message": "AI 问答可用。" if ai_status.get("configured") else "AI 未启用，不影响流量统计和推送。",
+            "fix": "" if ai_status.get("configured") else "需要 AI 问答时再配置 AI_API_BASE / AI_API_KEY / AI_MODEL。",
+        },
+        {
+            "key": "alerts",
+            "label": "告警",
+            "level": "ok" if alert_status.get("enabled") else "warn",
+            "ok": bool(alert_status.get("enabled")),
+            "detail": f"当前 {alert_status.get('active_count', 0)} 个未恢复事件",
+            "message": "告警正在工作。" if alert_status.get("enabled") else "告警已关闭，不会产生新的提醒。",
+            "fix": "" if alert_status.get("enabled") else "可在告警页或系统页重新启用。",
+        },
+        {
+            "key": "web",
+            "label": "Web 登录",
+            "level": "warn" if WEB_SESSION_SECRET_TEMPORARY else ("ok" if web_password_configured() else "bad"),
+            "ok": web_password_configured() and not WEB_SESSION_SECRET_TEMPORARY,
+            "detail": "会话密钥未固定" if WEB_SESSION_SECRET_TEMPORARY else "登录保护已配置",
+            "message": "容器重启后需要重新登录。" if WEB_SESSION_SECRET_TEMPORARY else "登录状态稳定。",
+            "fix": "公网部署建议设置 WEB_SESSION_SECRET。" if WEB_SESSION_SECRET_TEMPORARY else "",
+        },
+        {
+            "key": "sqlite",
+            "label": "长期统计",
+            "level": "ok" if db_status.get("ok") else "bad",
+            "ok": bool(db_status.get("ok")),
+            "detail": "统计库可用" if db_status.get("ok") else "统计库异常",
+            "message": "每日/每周/每月统计可以继续累积。" if db_status.get("ok") else "长期统计可能无法保存。",
+            "fix": "" if db_status.get("ok") else "检查 data 目录权限和容器日志。",
+        },
     ]
-    healthy_count = sum(1 for item in service_items if item.get("ok"))
+    data_status = [
+        {
+            "key": "db",
+            "label": "长期统计",
+            "level": "ok" if db_status.get("ok") else "bad",
+            "message": "长期统计库正常。" if db_status.get("ok") else "长期统计库无法读取或写入。",
+            "detail": "历史流量会继续自动保存。" if db_status.get("ok") else "无法保存历史流量。",
+            "fix": "" if db_status.get("ok") else db_status.get("error") or "检查 data 目录权限。",
+        },
+        {
+            "key": "runs",
+            "label": "任务记录",
+            "level": "bad" if recent_failures else "ok",
+            "message": "最近任务没有失败。" if not recent_failures else f"最近有 {recent_failures} 次任务失败。",
+            "detail": "只保留最近需要排查的记录。",
+            "fix": "" if not recent_failures else "查看下方最近记录里的红色失败原因。",
+        },
+        {
+            "key": "maintenance",
+            "label": "数据维护",
+            "level": "bad" if not maintenance.get("ok", True) else ("warn" if maintenance.get("old_task_runs") else "ok"),
+            "message": "数据维护状态正常。" if maintenance.get("ok", True) and not maintenance.get("old_task_runs") else ("有旧运行记录可以清理。" if maintenance.get("ok", True) else "数据维护检查失败。"),
+            "detail": f"保留策略：{maintenance.get('retention_days', k.TASK_RUN_RETENTION_DAYS)} 天。",
+            "fix": "" if maintenance.get("ok", True) else maintenance.get("error", "检查容器日志。"),
+        },
+    ]
+    healthy_count = sum(1 for item in service_items if item.get("level") == "ok")
+    warnings = [item["label"] for item in service_items + data_status if item.get("level") == "warn"]
+    issues = [item["label"] for item in service_items + data_status if item.get("level") == "bad"]
     return {
         "now": k.now_dt().strftime("%Y-%m-%d %H:%M:%S %Z"),
         "stat_tz": k.STAT_TZ,
@@ -494,10 +591,13 @@ def build_system_status_struct(include_recent: bool = True) -> dict:
         "summary": {
             "healthy": healthy_count,
             "total": len(service_items),
-            "issues": [item["label"] for item in service_items if not item.get("ok")],
-            "recent_failures": len([run for run in recent_runs if run and run.get("status") != "success"]),
+            "issues": issues,
+            "warnings": warnings,
+            "recent_failures": recent_failures,
         },
         "services": service_items,
+        "health_items": service_items,
+        "data_status": data_status,
         "config": {
             "komari_base_url": k.KOMARI_BASE_URL,
             "komari_api_token_configured": bool(k.KOMARI_API_TOKEN),
@@ -508,7 +608,6 @@ def build_system_status_struct(include_recent: bool = True) -> dict:
             "web_username": web_username(),
             "web_password_configured": web_password_configured(),
         },
-        "editable_config": k.current_runtime_config(),
         "data": {
             "data_dir": str(k.DATA_DIR),
             "files": [
@@ -520,7 +619,7 @@ def build_system_status_struct(include_recent: bool = True) -> dict:
                 file_status(k.ALERTS_STATE_PATH, "alerts_state.json"),
             ],
             "sqlite": db_status,
-            "maintenance": build_maintenance_status(),
+            "maintenance": maintenance,
         },
         "runtime": {
             "process": "web",

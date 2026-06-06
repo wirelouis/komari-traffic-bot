@@ -1,4 +1,6 @@
 const SIDEBAR_STORAGE_KEY = "komari.sidebarCollapsed";
+const THEME_STORAGE_KEY = "komari.themeMode";
+const THEME_MODES = ["auto", "light", "dark"];
 
 const routeConfig = {
   "/": {
@@ -49,6 +51,7 @@ const state = {
   selectedNodeUuid: "",
   bindingSourceId: "",
   sidebarCollapsed: false,
+  themeMode: "auto",
   aiAsking: false,
   system: null,
 };
@@ -57,6 +60,35 @@ const $ = (id) => document.getElementById(id);
 
 function setVisible(id, visible) {
   $(id).classList.toggle("hidden", !visible);
+}
+
+function loginFields() {
+  return [$("login-username"), $("login-password")].filter(Boolean);
+}
+
+function lockAndClearLoginFields() {
+  loginFields().forEach((input) => {
+    input.value = "";
+    input.setAttribute("readonly", "readonly");
+    input.setAttribute("autocomplete", "new-password");
+  });
+}
+
+function unlockLoginFields() {
+  loginFields().forEach((input) => {
+    input.removeAttribute("readonly");
+  });
+}
+
+function showLoginView(message = "") {
+  state.authenticated = false;
+  state.overview = null;
+  lockAndClearLoginFields();
+  $("login-error").textContent = message;
+  setVisible("login-view", true);
+  setVisible("app-view", false);
+  window.setTimeout(lockAndClearLoginFields, 80);
+  window.setTimeout(lockAndClearLoginFields, 360);
 }
 
 function escapeHtml(value) {
@@ -78,6 +110,34 @@ function friendlyError(value) {
     return "Komari API 未配置或不可达，暂时没有可展示的数据。";
   }
   return text;
+}
+
+function normalizeThemeMode(value) {
+  return THEME_MODES.includes(value) ? value : "auto";
+}
+
+function loadThemePreference() {
+  try {
+    state.themeMode = normalizeThemeMode(window.localStorage.getItem(THEME_STORAGE_KEY));
+  } catch (_error) {
+    state.themeMode = "auto";
+  }
+}
+
+function saveThemePreference() {
+  try {
+    window.localStorage.setItem(THEME_STORAGE_KEY, state.themeMode);
+  } catch (_error) {
+    // Ignore storage failures in private browsing or restricted WebViews.
+  }
+}
+
+function applyThemeMode() {
+  document.documentElement.dataset.theme = state.themeMode;
+  document.documentElement.style.colorScheme = state.themeMode === "dark" ? "dark" : (state.themeMode === "light" ? "light" : "light dark");
+  document.querySelectorAll("#theme-switch [data-theme]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.theme === state.themeMode);
+  });
 }
 
 async function api(path, options = {}) {
@@ -213,12 +273,13 @@ function hoursLabel(hours) {
 }
 
 function miniCard(label, value, note = "", status = "") {
+  const statusText = status === "good" ? "正常" : (status === "bad" ? "需处理" : "注意");
   return `
     <article class="mini-card">
       <span>${escapeHtml(label)}</span>
       <strong>${escapeHtml(value || "--")}</strong>
       ${note ? `<small class="tiny">${escapeHtml(note)}</small>` : ""}
-      ${status ? `<span class="pill ${escapeHtml(status)}">${escapeHtml(status === "good" ? "正常" : "注意")}</span>` : ""}
+      ${status ? `<span class="pill ${escapeHtml(status)}">${escapeHtml(statusText)}</span>` : ""}
     </article>`;
 }
 
@@ -253,6 +314,27 @@ function runStatusText(status) {
   return status || "未知";
 }
 
+function statusLevelClass(level, ok = false) {
+  if (level === "bad") return "bad";
+  if (level === "warn" || level === "muted") return "warn";
+  return ok ? "good" : "";
+}
+
+function statusLevelText(level, ok = false) {
+  if (level === "bad") return "需处理";
+  if (level === "warn") return "提醒";
+  if (level === "muted") return "已关闭";
+  return ok || level === "ok" ? "正常" : "待确认";
+}
+
+function taskRunNote(run) {
+  if (run.error) return run.error;
+  if (run.summary) return run.summary;
+  if (run.status === "success") return "任务已完成。";
+  if (run.status === "failed") return "任务执行失败，请查看错误。";
+  return "任务状态未记录完整。";
+}
+
 function renderTaskRuns(targetId, runs) {
   const target = $(targetId);
   const items = runs || [];
@@ -260,14 +342,13 @@ function renderTaskRuns(targetId, runs) {
     ? items.map((run) => `
       <div class="task-run-row ${run.status === "failed" ? "failed" : ""}">
         <span>
-          <strong>${escapeHtml(runTypeLabel(run.type))} · ${escapeHtml(run.source || "unknown")}</strong><br>
-          <span class="tiny">${escapeHtml(run.started_at_text || "未记录时间")} · ${escapeHtml(run.duration_text || "--")}</span>
-          ${run.summary ? `<br><span class="tiny">${escapeHtml(run.summary)}</span>` : ""}
-          ${run.error ? `<br><span class="tiny bad-text">${escapeHtml(run.error)}</span>` : ""}
+          <strong>${escapeHtml(runTypeLabel(run.type))}</strong><br>
+          <span class="tiny">${escapeHtml(taskRunNote(run))}</span><br>
+          <span class="tiny">${escapeHtml(run.started_at_text || "未记录时间")} · 耗时 ${escapeHtml(run.duration_text || "--")}</span>
         </span>
         <span class="pill ${runStatusClass(run.status)}">${escapeHtml(runStatusText(run.status))}</span>
       </div>`).join("")
-    : `<div class="empty-state">暂无运行记录。</div>`;
+    : `<div class="empty-state">最近没有需要展示的任务记录。</div>`;
 }
 
 async function loadTaskRuns(targetId, type = "", limit = 50) {
@@ -631,9 +712,15 @@ function renderAlerts(data) {
 
 async function loadAlerts() {
   try {
-    renderAlerts(await api("/api/alerts"));
+    const [alerts, config] = await Promise.all([
+      api("/api/alerts"),
+      api("/api/system/config"),
+    ]);
+    renderAlerts(alerts);
+    renderAlertConfig(config);
   } catch (error) {
     $("alerts-body").textContent = friendlyError(error.message);
+    $("alert-config-form").innerHTML = `<div class="empty-state">${escapeHtml(friendlyError(error.message))}</div>`;
   }
 }
 
@@ -948,126 +1035,203 @@ function renderSystemStatus(data) {
   state.system = data;
   const summary = data.summary || {};
   const issues = summary.issues || [];
+  const warnings = summary.warnings || [];
   const build = data.build || {};
-  $("system-status-pill").textContent = issues.length ? `${issues.length} 项待确认` : "健康";
-  $("system-status-pill").classList.toggle("good", !issues.length);
-  $("system-status-pill").classList.toggle("bad", Boolean(issues.length));
+  const dbOk = data.data?.sqlite?.ok !== false;
+  const schedules = data.runtime?.schedules || {};
+  const overall = issues.length ? "需处理" : (warnings.length ? "有提醒" : "正常");
+  const overallClass = issues.length ? "bad" : (warnings.length ? "warn" : "good");
+  $("system-status-pill").textContent = overall;
+  $("system-status-pill").classList.toggle("good", overallClass === "good");
+  $("system-status-pill").classList.toggle("bad", overallClass === "bad");
+  $("system-status-pill").classList.toggle("warn", overallClass === "warn");
   $("system-summary").innerHTML = [
-    miniCard("实例", data.instance || "default", `时区 ${data.stat_tz || "--"}`),
-    miniCard("版本", build.version || "dev", build.commit_short ? `commit ${build.commit_short}` : (build.build_date || "本地运行")),
-    miniCard("健康项", `${summary.healthy || 0}/${summary.total || 0}`, issues.length ? issues.join("、") : "核心配置正常", issues.length ? "bad" : "good"),
-    miniCard("最近失败", String(summary.recent_failures || 0), "最近 20 条任务记录", summary.recent_failures ? "bad" : "good"),
-    miniCard("SQLite", data.data?.sqlite?.ok ? "可用" : "异常", `${data.data?.sqlite?.daily_rows || 0} daily / ${data.data?.sqlite?.task_runs || 0} runs`, data.data?.sqlite?.ok ? "good" : "bad"),
+    miniCard("整体状态", overall, issues.length ? `需要处理：${issues.join("、")}` : (warnings.length ? `提醒：${warnings.join("、")}` : "核心功能正常"), overallClass),
+    miniCard("最近失败", String(summary.recent_failures || 0), "只展示最近几条，失败会出现在下方", summary.recent_failures ? "bad" : "good"),
+    miniCard("长期统计", dbOk ? "正常" : "异常", dbOk ? "流量汇总可以继续累积" : "统计数据可能无法保存", dbOk ? "good" : "bad"),
+    miniCard("推送计划", `${schedules.enabled || 0}/${schedules.total || 0}`, "已启用 / 全部计划"),
+    miniCard("版本", build.version || "dev", build.commit_short ? `提交 ${build.commit_short}` : (build.build_date || "本地运行")),
   ].join("");
 
-  const services = data.services || [];
-  const runtime = data.runtime || {};
-  $("system-services").innerHTML = [
-    ...services.map((item) => `
-      <div class="status-row">
-        <span><strong>${escapeHtml(item.label)}</strong><br><span class="tiny">${escapeHtml(item.detail || "--")}</span></span>
-        <span class="pill ${item.ok ? "good" : "bad"}">${item.ok ? "正常" : "待配置"}</span>
-      </div>`),
-    `<div class="status-row muted-row">
-      <span><strong>运行进程</strong><br><span class="tiny">${escapeHtml(runtime.scheduler_note || "")}</span></span>
-      <span class="pill">${escapeHtml(runtime.process || "web")}</span>
-    </div>`,
-    `<div class="status-row">
-      <span><strong>应用内计划</strong><br><span class="tiny">${escapeHtml(runtime.schedules?.path || "")}</span></span>
-      <span class="pill">${escapeHtml(`${runtime.schedules?.enabled || 0}/${runtime.schedules?.total || 0}`)}</span>
-    </div>`,
-  ].join("");
+  const services = data.health_items || data.services || [];
+  $("system-services").innerHTML = services.length
+    ? services.map((item) => {
+      const cls = statusLevelClass(item.level, item.ok);
+      const detail = [item.message, item.detail].filter(Boolean).join(" ");
+      return `
+        <div class="status-row ${cls}">
+          <span>
+            <strong>${escapeHtml(item.label)}</strong><br>
+            <span class="tiny">${escapeHtml(detail || "状态正常。")}</span>
+            ${item.fix ? `<br><span class="tiny fix-text">${escapeHtml(item.fix)}</span>` : ""}
+          </span>
+          <span class="pill ${cls}">${escapeHtml(statusLevelText(item.level, item.ok))}</span>
+        </div>`;
+    }).join("")
+    : `<div class="empty-state">还没有系统状态。</div>`;
 
-  const files = data.data?.files || [];
-  const db = data.data?.sqlite || {};
-  const counts = db.table_counts || {};
-  $("system-data").innerHTML = [
-    `<div class="status-row">
-      <span><strong>traffic.db</strong><br><span class="tiny">${escapeHtml(db.path || "")}</span></span>
-      <span class="pill ${db.ok ? "good" : "bad"}">${escapeHtml(db.size_human || "0 B")}</span>
-    </div>`,
-    `<div class="status-row">
-      <span><strong>SQLite 表行数</strong><br><span class="tiny">daily ${counts.node_daily_usage || 0} / snapshots ${counts.traffic_snapshots || 0} / runs ${counts.task_runs || 0}</span></span>
-      <span class="pill">${escapeHtml(String(counts.period_rollups || 0))} rollups</span>
-    </div>`,
-    ...files.map((file) => `
-      <div class="status-row ${file.exists ? "" : "muted-row"}">
-        <span><strong>${escapeHtml(file.label)}</strong><br><span class="tiny">${escapeHtml(file.path || "")}</span></span>
-        <span class="pill ${file.exists ? "good" : ""}">${escapeHtml(file.exists ? file.size_human : "未创建")}</span>
-      </div>`),
-  ].join("");
+  const dataStatus = data.data_status || [];
+  $("system-data").innerHTML = dataStatus.length
+    ? dataStatus.map((item) => {
+      const cls = statusLevelClass(item.level, item.level === "ok");
+      return `
+        <div class="status-row ${cls}">
+          <span>
+            <strong>${escapeHtml(item.label)}</strong><br>
+            <span class="tiny">${escapeHtml(item.message || item.detail || "状态正常。")}</span>
+            ${item.fix ? `<br><span class="tiny fix-text">${escapeHtml(item.fix)}</span>` : ""}
+          </span>
+          <span class="pill ${cls}">${escapeHtml(statusLevelText(item.level, item.level === "ok"))}</span>
+        </div>`;
+    }).join("")
+    : `<div class="empty-state">数据状态正常。</div>`;
   renderMaintenanceStatus(data.data?.maintenance || {});
-  renderEditableConfig(data.editable_config || {});
 }
 
 function renderMaintenanceStatus(status) {
   const ok = status.ok !== false;
   const oldRuns = Number(status.old_task_runs || 0);
-  $("maintenance-status-pill").textContent = ok ? (oldRuns ? `${oldRuns} 条可清理` : "干净") : "异常";
-  $("maintenance-status-pill").classList.toggle("good", ok && !oldRuns);
+  const hasCleanup = ok && oldRuns > 0;
+  $("maintenance-status-pill").textContent = ok ? (hasCleanup ? "可清理" : "正常") : "异常";
+  $("maintenance-status-pill").classList.toggle("good", ok && !hasCleanup);
   $("maintenance-status-pill").classList.toggle("bad", !ok);
-  const counts = status.table_counts || {};
+  $("maintenance-status-pill").classList.toggle("warn", hasCleanup);
   $("maintenance-summary").innerHTML = [
-    miniCard("运行记录保留", status.retention_enabled ? `${status.retention_days || 0} 天` : "关闭", status.cutoff_text ? `早于 ${status.cutoff_text}` : "不会自动清理"),
-    miniCard("旧运行记录", String(oldRuns), `${status.task_runs || 0} 条总记录`, oldRuns ? "bad" : "good"),
-    miniCard("数据库体积", status.db_size_human || "0 B", "traffic.db"),
-    miniCard("关键表", `${counts.node_daily_usage || 0} daily`, `${counts.task_runs || 0} runs / ${counts.traffic_snapshots || 0} snapshots`),
+    miniCard("维护状态", ok ? (hasCleanup ? "建议清理" : "正常") : "异常", ok ? "不会影响长期流量统计" : (status.error || "请检查容器日志"), ok ? (hasCleanup ? "warn" : "good") : "bad"),
+    miniCard("运行记录", hasCleanup ? `${oldRuns} 条偏旧` : "无需处理", hasCleanup ? "可点击下方按钮清理" : "最近记录保持精简"),
+    miniCard("保留策略", status.retention_enabled ? `${status.retention_days || 0} 天` : "关闭", status.retention_enabled ? "超过保留天数的任务记录可清理" : "不会自动建议清理"),
+    miniCard("长期统计", "保留", "清理任务记录不会删除流量汇总", "good"),
   ].join("");
 }
 
-function renderEditableConfig(config) {
-  const target = $("editable-config-form");
-  const fields = config.editable || [];
-  if (!fields.length) {
-    target.innerHTML = `<div class="empty-state">暂无可编辑配置。</div>`;
-    return;
-  }
-  target.innerHTML = fields.map((field) => {
-    const type = field.type === "number" ? "number" : "text";
-    const attrs = [
-      `id="runtime-config-${escapeHtml(field.key)}"`,
-      `data-config-key="${escapeHtml(field.key)}"`,
-      `type="${type}"`,
-      field.min !== undefined ? `min="${escapeHtml(field.min)}"` : "",
-      field.max !== undefined ? `max="${escapeHtml(field.max)}"` : "",
-      `value="${escapeHtml(field.value ?? "")}"`,
-    ].filter(Boolean).join(" ");
-    return `
-      <label class="config-field">
-        <span>${escapeHtml(field.label || field.key)}</span>
-        <input ${attrs}>
-        <small>${escapeHtml(field.note || "")}</small>
-      </label>`;
-  }).join("");
-  $("config-result").textContent = config.path ? `配置文件：${config.path}` : "仅开放不含 token 的运行配置。";
+function configFieldsByGroup(fields) {
+  const groups = new Map();
+  fields.forEach((field) => {
+    const group = field.group || "基础";
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group).push(field);
+  });
+  return groups;
 }
 
-function runtimeConfigPayload() {
+function configFieldHtml(field, scope) {
+  const key = escapeHtml(field.key);
+  const id = `runtime-config-${escapeHtml(scope)}-${key}`;
+  if (field.type === "boolean") {
+    return `
+      <label class="config-field config-toggle" for="${id}">
+        <span>
+          <strong>${escapeHtml(field.label || field.key)}</strong>
+          <small>${escapeHtml(field.note || "")}</small>
+        </span>
+        <input id="${id}" data-config-key="${key}" type="checkbox" ${field.value ? "checked" : ""}>
+      </label>`;
+  }
+  const type = field.type === "number" ? "number" : "text";
+  const attrs = [
+    `id="${id}"`,
+    `data-config-key="${key}"`,
+    `type="${type}"`,
+    field.type === "bytes" ? `inputmode="text"` : "",
+    field.min !== undefined ? `min="${escapeHtml(field.min)}"` : "",
+    field.max !== undefined ? `max="${escapeHtml(field.max)}"` : "",
+    `value="${escapeHtml(field.value ?? "")}"`,
+  ].filter(Boolean).join(" ");
+  return `
+    <label class="config-field" for="${id}">
+      <span>${escapeHtml(field.label || field.key)}</span>
+      <input ${attrs}>
+      <small>${escapeHtml(field.note || "")}</small>
+    </label>`;
+}
+
+function renderConfigEditor(targetId, fields, emptyText) {
+  const target = $(targetId);
+  if (!fields.length) {
+    target.innerHTML = `<div class="empty-state">${escapeHtml(emptyText)}</div>`;
+    return;
+  }
+  const groups = configFieldsByGroup(fields);
+  target.innerHTML = Array.from(groups.entries()).map(([group, items]) => `
+    <section class="config-group">
+      <h4 class="config-group-title">${escapeHtml(group)}</h4>
+      <div class="config-group-grid">
+        ${items.map((field) => configFieldHtml(field, targetId)).join("")}
+      </div>
+    </section>`).join("");
+}
+
+function configPayloadFrom(rootId) {
   const payload = {};
-  document.querySelectorAll("[data-config-key]").forEach((input) => {
+  const root = $(rootId);
+  if (!root) return payload;
+  root.querySelectorAll("[data-config-key]").forEach((input) => {
     const key = input.dataset.configKey;
     if (!key) return;
-    payload[key] = input.type === "number" ? Number(input.value) : input.value;
+    if (input.type === "checkbox") payload[key] = input.checked;
+    else if (input.type === "number") payload[key] = Number(input.value);
+    else payload[key] = input.value;
   });
   return payload;
 }
 
-async function saveRuntimeConfig() {
-  $("config-result").textContent = "保存低敏配置中...";
-  $("save-config-btn").disabled = true;
+function systemConfigFields(config) {
+  return (config.editable || []).filter((field) => field.group !== "告警");
+}
+
+function alertConfigFields(config) {
+  return (config.editable || []).filter((field) => field.group === "告警");
+}
+
+function renderSystemConfig(config) {
+  renderConfigEditor("editable-config-form", systemConfigFields(config), "暂无可编辑配置。");
+  $("config-result").textContent = "这些配置不包含 token、密码或 API Key，保存后立即生效。";
+}
+
+function renderAlertConfig(config) {
+  renderConfigEditor("alert-config-form", alertConfigFields(config), "暂无可编辑的告警配置。");
+  $("alert-config-result").textContent = "阈值留空或填 0 表示关闭；静默时段格式如 23:00-07:00。";
+}
+
+async function saveConfigFromForm({ formId, resultId, buttonId, afterSave }) {
+  $(resultId).textContent = "保存配置中...";
+  $(buttonId).disabled = true;
   try {
     const data = await api("/api/system/config", {
       method: "POST",
-      body: JSON.stringify(runtimeConfigPayload()),
+      body: JSON.stringify(configPayloadFrom(formId)),
     });
-    renderEditableConfig(data.config || {});
-    $("config-result").textContent = "配置已保存并立即生效。";
-    await loadTaskRuns("system-task-runs", $("task-run-filter").value, 50);
+    if (afterSave) await afterSave(data);
+    $(resultId).textContent = "配置已保存并立即生效。";
   } catch (error) {
-    $("config-result").textContent = friendlyError(error.message);
+    $(resultId).textContent = friendlyError(error.message);
   } finally {
-    $("save-config-btn").disabled = false;
+    $(buttonId).disabled = false;
   }
+}
+
+async function saveSystemConfig() {
+  await saveConfigFromForm({
+    formId: "editable-config-form",
+    resultId: "config-result",
+    buttonId: "save-config-btn",
+    afterSave: async (data) => {
+      renderSystemConfig(data.config || {});
+      await loadTaskRuns("system-task-runs", $("task-run-filter").value, 8);
+    },
+  });
+}
+
+async function saveAlertConfig() {
+  await saveConfigFromForm({
+    formId: "alert-config-form",
+    resultId: "alert-config-result",
+    buttonId: "save-alert-config-btn",
+    afterSave: async (data) => {
+      renderAlertConfig(data.config || {});
+      await loadAlerts();
+    },
+  });
 }
 
 function setMaintenanceBusy(busy) {
@@ -1082,7 +1246,7 @@ async function pruneTaskRuns() {
     const data = await postJson("/api/system/maintenance/prune-task-runs", {});
     renderMaintenanceStatus(data.maintenance || {});
     $("maintenance-result").textContent = `已清理 ${data.result?.deleted || 0} 条旧运行记录，当前剩余 ${data.result?.remaining || 0} 条。`;
-    await loadTaskRuns("system-task-runs", $("task-run-filter").value, 50);
+    await loadTaskRuns("system-task-runs", $("task-run-filter").value, 8);
   } catch (error) {
     $("maintenance-result").textContent = friendlyError(error.message);
   } finally {
@@ -1096,8 +1260,8 @@ async function vacuumDb() {
   try {
     const data = await postJson("/api/system/maintenance/vacuum", {});
     renderMaintenanceStatus(data.maintenance || {});
-    $("maintenance-result").textContent = `SQLite 压缩完成：${data.result?.before_size_human || "0 B"} -> ${data.result?.after_size_human || "0 B"}，释放 ${data.result?.saved_human || "0 B"}。`;
-    await loadTaskRuns("system-task-runs", $("task-run-filter").value, 50);
+    $("maintenance-result").textContent = "数据维护完成，长期统计库状态正常。";
+    await loadTaskRuns("system-task-runs", $("task-run-filter").value, 8);
   } catch (error) {
     $("maintenance-result").textContent = friendlyError(error.message);
   } finally {
@@ -1234,9 +1398,13 @@ async function loadAnalyticsPage() {
 }
 
 async function loadSystemPage() {
-  const system = await api("/api/system/status");
+  const [system, config] = await Promise.all([
+    api("/api/system/status"),
+    api("/api/system/config"),
+  ]);
   renderSystemStatus(system);
-  await loadTaskRuns("system-task-runs", $("task-run-filter").value, 50);
+  renderSystemConfig(config);
+  await loadTaskRuns("system-task-runs", $("task-run-filter").value, 8);
 }
 
 async function loadCurrentRoute(forceOverview = false) {
@@ -1252,9 +1420,7 @@ async function loadCurrentRoute(forceOverview = false) {
     updateStatus("已同步", true);
   } catch (error) {
     if (error.status === 401) {
-      state.authenticated = false;
-      setVisible("login-view", true);
-      setVisible("app-view", false);
+      showLoginView();
       return;
     }
     updateStatus(friendlyError(error.message), false);
@@ -1264,13 +1430,18 @@ async function loadCurrentRoute(forceOverview = false) {
 async function checkSession() {
   const data = await api("/api/auth/session");
   state.authenticated = Boolean(data.authenticated);
-  setVisible("login-view", !state.authenticated);
-  setVisible("app-view", state.authenticated);
-  if (state.authenticated) await loadCurrentRoute(true);
+  if (state.authenticated) {
+    setVisible("login-view", false);
+    setVisible("app-view", true);
+    await loadCurrentRoute(true);
+  } else {
+    showLoginView();
+  }
 }
 
 async function doLogin(event) {
   event.preventDefault();
+  unlockLoginFields();
   $("login-error").textContent = "";
   try {
     await api("/api/auth/login", {
@@ -1281,6 +1452,7 @@ async function doLogin(event) {
       }),
     });
     state.authenticated = true;
+    lockAndClearLoginFields();
     setVisible("login-view", false);
     setVisible("app-view", true);
     await loadCurrentRoute(true);
@@ -1330,18 +1502,27 @@ function bindIconFallbacks() {
 
 function bindEvents() {
   $("login-form").addEventListener("submit", doLogin);
+  loginFields().forEach((input) => {
+    input.addEventListener("pointerdown", unlockLoginFields);
+    input.addEventListener("focus", unlockLoginFields);
+    input.addEventListener("keydown", unlockLoginFields);
+  });
   $("refresh-btn").addEventListener("click", () => loadCurrentRoute(true));
   $("logout-btn").addEventListener("click", async () => {
     await postJson("/api/auth/logout", {}).catch(() => null);
-    state.authenticated = false;
-    state.overview = null;
-    setVisible("login-view", true);
-    setVisible("app-view", false);
+    showLoginView();
   });
   $("sidebar-toggle").addEventListener("click", () => {
     state.sidebarCollapsed = !state.sidebarCollapsed;
     saveSidebarPreference();
     applySidebarState();
+  });
+  document.querySelectorAll("#theme-switch [data-theme]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.themeMode = normalizeThemeMode(button.dataset.theme);
+      saveThemePreference();
+      applyThemeMode();
+    });
   });
   window.addEventListener("resize", applySidebarState);
   window.addEventListener("popstate", () => navigateRoute(`${window.location.pathname}${window.location.search}`, { load: true, scroll: false }));
@@ -1398,8 +1579,9 @@ function bindEvents() {
   });
   $("load-traffic-range-btn").addEventListener("click", loadTrafficRange);
   $("traffic-range-group").addEventListener("change", loadTrafficRange);
-  $("task-run-filter").addEventListener("change", () => loadTaskRuns("system-task-runs", $("task-run-filter").value, 50));
-  $("save-config-btn").addEventListener("click", saveRuntimeConfig);
+  $("task-run-filter").addEventListener("change", () => loadTaskRuns("system-task-runs", $("task-run-filter").value, 8));
+  $("save-config-btn").addEventListener("click", saveSystemConfig);
+  $("save-alert-config-btn").addEventListener("click", saveAlertConfig);
   $("prune-task-runs-btn").addEventListener("click", pruneTaskRuns);
   $("vacuum-db-btn").addEventListener("click", vacuumDb);
   resetScheduleForm();
@@ -1415,14 +1597,13 @@ function initRoute() {
   showRoute(initialRoute);
 }
 
+loadThemePreference();
 loadSidebarPreference();
 bindIconFallbacks();
 bindEvents();
 initRoute();
+applyThemeMode();
 applySidebarState();
 checkSession().catch((error) => {
-  state.authenticated = false;
-  setVisible("login-view", true);
-  setVisible("app-view", false);
-  $("login-error").textContent = friendlyError(error.message);
+  showLoginView(friendlyError(error.message));
 });

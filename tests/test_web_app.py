@@ -443,9 +443,12 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(payload["build"]["version"], "test-version")
         self.assertEqual(payload["build"]["commit_short"], "abcdefabcdef")
         self.assertIn("maintenance", payload["data"])
+        self.assertIn("health_items", payload)
+        self.assertIn("data_status", payload)
+        self.assertIn("warnings", payload["summary"])
         self.assertTrue(payload["config"]["komari_api_token_configured"])
         self.assertEqual(payload["config"]["ai_model"], "deepseek-test-model")
-        self.assertEqual(payload["editable_config"]["values"]["top_n"], 3)
+        self.assertNotIn("editable_config", payload)
         self.assertNotIn("secret-telegram-token", text)
         self.assertNotIn("secret-komari-token", text)
         self.assertNotIn("secret-ai-key", text)
@@ -456,20 +459,44 @@ class WebAppTests(unittest.TestCase):
 
         response = self.client.post("/api/system/config", json={
             "bot_instance_name": "prod-panel",
+            "komari_base_url": "https://komari-new.example/",
+            "telegram_chat_id": "987654321",
+            "telegram_alert_chat_id": "123123123",
+            "ai_api_base": "https://ai-new.example/v1/",
+            "ai_model": "gpt-5.4-mini",
             "top_n": 8,
+            "komari_timeout_seconds": 20,
+            "sample_interval_seconds": 120,
             "ai_pack_cache_ttl_seconds": 7200,
             "task_run_retention_days": 30,
+            "alerts_enabled": False,
+            "alert_silence_windows": "23:00-07:00",
+            "alert_total_window_bytes": "2GiB",
         })
 
         self.assertEqual(response.status_code, 200, response.text)
         payload = response.json()["data"]
         self.assertEqual(payload["values"]["bot_instance_name"], "prod-panel")
+        self.assertEqual(payload["values"]["komari_base_url"], "https://komari-new.example")
+        self.assertEqual(payload["values"]["telegram_chat_id"], "987654321")
+        self.assertEqual(payload["values"]["ai_model"], "gpt-5.4-mini")
         self.assertEqual(payload["values"]["top_n"], 8)
+        self.assertFalse(payload["values"]["alerts_enabled"])
+        self.assertEqual(payload["values"]["alert_total_window_bytes"], 2 * 1024 ** 3)
         self.assertEqual(payload["config"]["values"]["ai_pack_cache_ttl_seconds"], 7200)
+        fields = {item["key"]: item for item in payload["config"]["editable"]}
+        self.assertEqual(fields["alert_total_window_bytes"]["type"], "bytes")
+        self.assertEqual(fields["alert_total_window_bytes"]["value"], "2.00 GiB")
         self.assertEqual(k.BOT_INSTANCE_NAME, "prod-panel")
+        self.assertEqual(k.KOMARI_BASE_URL, "https://komari-new.example")
+        self.assertEqual(k.TELEGRAM_CHAT_ID, "987654321")
+        self.assertEqual(k.AI_MODEL, "gpt-5.4-mini")
         self.assertEqual(k.TOP_N, 8)
+        self.assertEqual(k.SAMPLE_INTERVAL_SECONDS, 120)
+        self.assertFalse(k.ALERTS_ENABLED)
         saved = k.load_json(str(self.tmp_path / "runtime_config.json"), {})
         self.assertEqual(saved["config"]["task_run_retention_days"], 30)
+        self.assertEqual(saved["config"]["alert_total_window_bytes"], 2 * 1024 ** 3)
         runs = k.list_task_runs(limit=10, task_type="maintenance")
         self.assertEqual(runs[0]["source"], "web:config")
 
@@ -478,6 +505,14 @@ class WebAppTests(unittest.TestCase):
 
         response = self.client.post("/api/system/config", json={"top_n": 0})
 
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_runtime_config")
+
+        response = self.client.post("/api/system/config", json={"alert_silence_windows": "bad"})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_runtime_config")
+
+        response = self.client.post("/api/system/config", json={"telegram_chat_id": "bad id"})
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"]["code"], "invalid_runtime_config")
 
