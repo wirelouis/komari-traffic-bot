@@ -1,8 +1,9 @@
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("WEB_USERNAME", "admin")
 os.environ.setdefault("WEB_PASSWORD", "test-password")
@@ -65,7 +66,11 @@ class WebAppTests(unittest.TestCase):
         self.patch_attr(k, "TELEGRAM_CHAT_ID", "123456789")
         self.patch_attr(k, "TELEGRAM_BOT_TOKEN", "secret-telegram-token")
         self.patch_attr(k, "KOMARI_API_TOKEN", "secret-komari-token")
+        self.patch_attr(k, "AI_API_BASE", "https://ai.example/v1")
         self.patch_attr(k, "AI_API_KEY", "secret-ai-key")
+        self.patch_attr(k, "KOMARI_BASE_URL", "https://komari.example")
+        self.patch_attr(k, "AI_MODEL", "deepseek-test-model")
+        self.patch_attr(k, "AI_PACK_CACHE_TTL_SECONDS", 3600)
 
     def login(self):
         response = self.client.post("/api/auth/login", json={"username": "admin", "password": "test-password"})
@@ -161,6 +166,157 @@ class WebAppTests(unittest.TestCase):
         self.assertNotIn("test-password", merged)
         self.assertNotIn("secret-session-value", merged)
         self.assertNotIn("123456789", alerts)
+
+    def test_komari_machines_are_normalized_with_web_url(self):
+        self.login()
+        self.patch_attr(k, "get_json", lambda _url: {
+            "status": "success",
+            "data": [
+                {"uuid": "uuid-b", "name": "Beta", "region": "HK", "tags": ["edge"]},
+                {"uuid": "uuid-a", "name": "Alpha", "group": "prod"},
+            ],
+        })
+
+        response = self.client.get("/api/komari/machines")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()["data"]
+        self.assertTrue(payload["configured"])
+        self.assertEqual([m["uuid"] for m in payload["machines"]], ["uuid-a", "uuid-b"])
+        self.assertEqual(payload["machines"][0]["web_url"], "https://komari.example/server/uuid-a")
+        self.assertEqual(payload["machines"][1]["tags"], ["edge"])
+
+    def test_node_binding_save_and_clear(self):
+        self.login()
+        self.patch_attr(k, "get_json", lambda _url: {
+            "status": "success",
+            "data": [{"uuid": "machine-1", "name": "Probe One"}],
+        })
+
+        save_response = self.client.post(
+            "/api/node-bindings",
+            json={"source_id": "traffic-node", "komari_uuid": "machine-1"},
+        )
+
+        self.assertEqual(save_response.status_code, 200, save_response.text)
+        saved = k.load_json(str(self.tmp_path / "node_bindings.json"), {})
+        self.assertEqual(saved["bindings"]["traffic-node"]["komari_uuid"], "machine-1")
+        self.assertEqual(save_response.json()["data"]["binding"]["mode"], "manual")
+
+        clear_response = self.client.post(
+            "/api/node-bindings",
+            json={"source_id": "traffic-node", "komari_uuid": ""},
+        )
+
+        self.assertEqual(clear_response.status_code, 200, clear_response.text)
+        cleared = k.load_json(str(self.tmp_path / "node_bindings.json"), {})
+        self.assertNotIn("traffic-node", cleared["bindings"])
+
+    def test_node_bindings_report_stale_manual_binding(self):
+        self.login()
+        k.save_json_atomic(str(self.tmp_path / "node_bindings.json"), {
+            "version": 1,
+            "bindings": {"traffic-node": {"komari_uuid": "missing-machine", "updated_at": 111}},
+        })
+        self.patch_attr(k, "get_json", lambda _url: {
+            "status": "success",
+            "data": [{"uuid": "other-machine", "name": "Other"}],
+        })
+
+        response = self.client.get("/api/node-bindings")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        resolved = response.json()["data"]["resolved"]["traffic-node"]
+        self.assertEqual(resolved["mode"], "manual")
+        self.assertTrue(resolved["stale"])
+        self.assertEqual(resolved["komari_uuid"], "missing-machine")
+
+    def test_nodes_api_enriches_komari_binding_and_machine(self):
+        self.login()
+        self.patch_attr(k, "build_records_summary", lambda _hours: {
+            "date": "2026-06-06",
+            "from": "from",
+            "to": "to",
+            "nodes": [
+                {"uuid": "traffic-node", "name": "Traffic Node", "up": 1, "down": 2, "total": 3, "total_human": "3 B"},
+                {"uuid": "auto-node", "name": "Auto Node", "up": 4, "down": 5, "total": 9, "total_human": "9 B"},
+            ],
+            "top_nodes": [{"uuid": "traffic-node", "name": "Traffic Node", "up": 1, "down": 2, "total": 3, "total_human": "3 B"}],
+        })
+        k.save_json_atomic(str(self.tmp_path / "node_bindings.json"), {
+            "version": 1,
+            "bindings": {"traffic-node": {"komari_uuid": "machine-1", "updated_at": 123}},
+        })
+        self.patch_attr(k, "get_json", lambda _url: {
+            "status": "success",
+            "data": [
+                {"uuid": "machine-1", "name": "Probe One", "region": "SG"},
+                {"uuid": "auto-node", "name": "Auto Probe"},
+            ],
+        })
+
+        response = self.client.get("/api/nodes?hours=24")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        nodes = response.json()["data"]["nodes"]
+        by_uuid = {node["uuid"]: node for node in nodes}
+        self.assertEqual(by_uuid["traffic-node"]["binding"]["mode"], "manual")
+        self.assertEqual(by_uuid["traffic-node"]["komari"]["machine"]["name"], "Probe One")
+        self.assertEqual(by_uuid["traffic-node"]["komari"]["web_url"], "https://komari.example/server/machine-1")
+        self.assertEqual(by_uuid["auto-node"]["binding"]["mode"], "auto")
+        self.assertEqual(by_uuid["auto-node"]["komari"]["web_url"], "https://komari.example/server/auto-node")
+        self.assertEqual(response.json()["data"]["top_nodes"][0]["komari"]["web_url"], "https://komari.example/server/machine-1")
+
+    def test_telegram_preview_does_not_send(self):
+        self.login()
+        self.patch_attr(k, "build_period_report_message", lambda _start, _now, tag, top_only=False: f"preview:{tag}:{top_only}")
+        send_mock = Mock()
+        self.patch_attr(k, "telegram_send", send_mock)
+
+        response = self.client.post("/api/telegram/preview", json={"scope": "today", "mode": "top"})
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()["data"]
+        self.assertEqual(payload["scope"], "today")
+        self.assertEqual(payload["mode"], "top")
+        self.assertIn("preview:", payload["message"])
+        send_mock.assert_not_called()
+
+    def test_ai_status_reads_cache_without_secret_leak(self):
+        self.login()
+        now_ts = int(time.time())
+        k.save_json_atomic(str(self.tmp_path / "ai_pack_cache.json"), {
+            "created_at": now_ts,
+            "pack": {
+                "last_24h": {"nodes": [{"uuid": "n1"}, {"uuid": "n2"}]},
+                "last_7d": {"top_nodes": [{"uuid": "n1"}]},
+                "history": {"days": [{"date": "2026-06-06"}]},
+            },
+        })
+
+        response = self.client.get("/api/ai/status")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()["data"]
+        self.assertTrue(payload["configured"])
+        self.assertTrue(payload["cache_valid"])
+        self.assertNotIn("secret-ai-key", response.text)
+        self.assertEqual({item["key"]: item["count"] for item in payload["data_sources"]}, {
+            "last_24h": 2,
+            "last_7d": 1,
+            "history": 1,
+        })
+
+    def test_ai_refresh_rebuilds_and_saves_cache(self):
+        self.login()
+        self.patch_attr(k, "build_ai_data_pack", lambda: {"last_24h": {"nodes": [{"uuid": "fresh"}]}})
+
+        response = self.client.post("/api/ai/refresh")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        cache = k.load_json(str(self.tmp_path / "ai_pack_cache.json"), {})
+        self.assertEqual(cache["pack"]["last_24h"]["nodes"][0]["uuid"], "fresh")
+        self.assertTrue(response.json()["data"]["cache_valid"])
 
 
 if __name__ == "__main__":

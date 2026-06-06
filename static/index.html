@@ -4,15 +4,15 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Komari Traffic Console</title>
-  <link rel="icon" type="image/svg+xml" href="/static/komari-traffic-icon.svg?v=20260606-ui2">
-  <link rel="stylesheet" href="/static/styles.css?v=20260606-ui2">
+  <link rel="icon" type="image/svg+xml" href="/static/komari-traffic-icon.svg?v=20260606-ui3">
+  <link rel="stylesheet" href="/static/styles.css?v=20260606-ui3">
 </head>
 <body>
   <main id="login-view" class="login-shell hidden">
     <section class="login-panel">
       <div class="login-brand">
         <span class="brand-mark">
-          <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260606-ui2" alt="">
+          <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260606-ui3" alt="">
           <span class="brand-fallback" hidden>K</span>
         </span>
         <div>
@@ -41,7 +41,7 @@
       <div class="sidebar-head">
         <a class="brand" href="/" data-route="/" aria-label="Komari Traffic 总览">
           <span class="brand-mark">
-            <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260606-ui2" alt="">
+            <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260606-ui3" alt="">
             <span class="brand-fallback" hidden>K</span>
           </span>
           <span class="brand-copy">
@@ -55,23 +55,42 @@
       </div>
       <nav aria-label="主导航">
         <a href="/" class="nav-link active" data-route="/" title="总览">
-          <span class="nav-icon" aria-hidden="true">总</span>
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 13.5a8 8 0 1 1 16 0"></path>
+            <path d="M12 13.5 16.2 8"></path>
+            <path d="M6.5 17h11"></path>
+          </svg>
           <span class="nav-text">总览</span>
         </a>
         <a href="/nodes" class="nav-link" data-route="/nodes" title="节点">
-          <span class="nav-icon" aria-hidden="true">节</span>
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="5" y="4" width="14" height="5" rx="1.4"></rect>
+            <rect x="5" y="10.5" width="14" height="5" rx="1.4"></rect>
+            <rect x="5" y="17" width="14" height="3" rx="1.4"></rect>
+            <path d="M8 6.5h.1M8 13h.1"></path>
+          </svg>
           <span class="nav-text">节点</span>
         </a>
         <a href="/alerts" class="nav-link" data-route="/alerts" title="告警">
-          <span class="nav-icon" aria-hidden="true">警</span>
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M6.8 10.5a5.2 5.2 0 0 1 10.4 0c0 5 2.1 5.8 2.1 5.8H4.7s2.1-.8 2.1-5.8Z"></path>
+            <path d="M10 19a2.2 2.2 0 0 0 4 0"></path>
+            <path d="M12 3v1.5"></path>
+          </svg>
           <span class="nav-text">告警</span>
         </a>
         <a href="/telegram" class="nav-link" data-route="/telegram" title="推送">
-          <span class="nav-icon" aria-hidden="true">推</span>
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M20 5 4 11.6l6.1 2.2L16 8.2l-4.2 6.5 5 3.8L20 5Z"></path>
+            <path d="m10.1 13.8 1.1 4.2 1.7-2.6"></path>
+          </svg>
           <span class="nav-text">推送</span>
         </a>
         <a href="/ai" class="nav-link" data-route="/ai" title="AI">
-          <span class="nav-icon" aria-hidden="true">AI</span>
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 3.5 13.7 9l5.3 1.8-5.3 1.8L12 18l-1.7-5.4L5 10.8 10.3 9 12 3.5Z"></path>
+            <path d="M18.5 15.5 19 17l1.5.5-1.5.5-.5 1.5-.5-1.5-1.5-.5 1.5-.5.5-1.5Z"></path>
+          </svg>
           <span class="nav-text">AI</span>
         </a>
       </nav>
@@ -154,23 +173,38 @@
               <button data-hours="720">30d</button>
             </div>
           </div>
+          <div id="node-bind-panel" class="binding-panel hidden">
+            <div>
+              <p class="eyebrow">Binding</p>
+              <h3 id="bind-node-name">绑定 Komari 机器</h3>
+              <p id="bind-node-note" class="muted">默认会按 uuid 自动绑定，可在这里覆盖。</p>
+            </div>
+            <div class="binding-controls">
+              <select id="bind-machine-select" aria-label="选择 Komari 机器"></select>
+              <button id="save-binding-btn" class="primary-btn">保存绑定</button>
+              <button id="clear-binding-btn" class="ghost-btn">清除覆盖</button>
+              <button id="close-binding-btn" class="ghost-btn">收起</button>
+            </div>
+          </div>
           <div class="table-wrap">
             <table>
               <thead>
                 <tr>
                   <th>节点</th>
+                  <th>Komari 机器</th>
                   <th>下行</th>
                   <th>上行</th>
                   <th>合计</th>
                   <th>CPU</th>
                   <th>RAM</th>
                   <th>Disk</th>
+                  <th>操作</th>
                 </tr>
               </thead>
               <tbody id="nodes-table"></tbody>
             </table>
           </div>
-          <div id="node-detail" class="detail-strip">点击节点查看详情。</div>
+          <div id="node-detail" class="detail-strip">点击 Top 排行可跳到节点；点击表格行可打开 Komari 探针机器。</div>
         </section>
       </section>
 
@@ -183,12 +217,39 @@
             </div>
             <span id="alert-count" class="soft-label">--</span>
           </div>
-          <div id="alerts-body" class="stacked"></div>
-          <div class="inline-form">
-            <input id="mute-hours" type="number" min="1" value="2" aria-label="静默小时数">
-            <button id="mute-btn" class="ghost-btn">静默</button>
-            <button id="unmute-btn" class="ghost-btn">解除</button>
-            <button id="check-alerts-btn" class="primary-btn">检查</button>
+          <div id="alerts-summary" class="mini-grid"></div>
+          <div class="content-grid compact-grid">
+            <article class="sub-panel">
+              <div class="panel-head">
+                <div>
+                  <p class="eyebrow">Active</p>
+                  <h3>当前告警</h3>
+                </div>
+              </div>
+              <div id="alerts-body" class="stacked"></div>
+            </article>
+            <article class="sub-panel">
+              <div class="panel-head">
+                <div>
+                  <p class="eyebrow">Thresholds</p>
+                  <h3>阈值与静默</h3>
+                </div>
+              </div>
+              <div id="alert-thresholds" class="stacked"></div>
+            </article>
+          </div>
+          <div class="action-band">
+            <div class="inline-form">
+              <button id="check-alerts-btn" class="ghost-btn">检查一次</button>
+              <button id="notify-alerts-btn" class="primary-btn">检查并推送</button>
+              <input id="mute-hours" type="number" min="1" value="2" aria-label="静默小时数">
+              <button id="mute-btn" class="ghost-btn">静默</button>
+              <button class="ghost-btn quick-mute" data-hours="1">1h</button>
+              <button class="ghost-btn quick-mute" data-hours="6">6h</button>
+              <button class="ghost-btn quick-mute" data-hours="24">24h</button>
+              <button id="unmute-btn" class="ghost-btn">解除静默</button>
+            </div>
+            <div id="alert-result" class="result-box muted">等待操作。</div>
           </div>
         </section>
       </section>
@@ -200,21 +261,46 @@
               <p class="eyebrow">Telegram</p>
               <h2>推送控制</h2>
             </div>
+            <span id="telegram-status-pill" class="soft-label">--</span>
           </div>
-          <div class="inline-form">
-            <button id="tg-test-btn" class="ghost-btn">测试发送</button>
-            <select id="report-scope">
-              <option value="today">今日</option>
-              <option value="week">本周</option>
-              <option value="month">本月</option>
-            </select>
-            <select id="report-mode">
-              <option value="full">完整</option>
-              <option value="top">Top</option>
-            </select>
-            <button id="send-report-btn" class="primary-btn">发送报表</button>
+          <div id="telegram-summary" class="mini-grid"></div>
+          <div class="content-grid compact-grid">
+            <article class="sub-panel">
+              <div class="panel-head">
+                <div>
+                  <p class="eyebrow">Composer</p>
+                  <h3>报表预览</h3>
+                </div>
+              </div>
+              <div class="inline-form">
+                <select id="report-scope">
+                  <option value="today">今日</option>
+                  <option value="week">本周</option>
+                  <option value="month">本月</option>
+                </select>
+                <select id="report-mode">
+                  <option value="full">完整</option>
+                  <option value="top">Top</option>
+                </select>
+                <button id="preview-report-btn" class="ghost-btn">生成预览</button>
+                <button id="send-report-btn" class="primary-btn">发送报表</button>
+              </div>
+              <pre id="telegram-preview" class="preview-box">等待生成预览。</pre>
+            </article>
+            <article class="sub-panel">
+              <div class="panel-head">
+                <div>
+                  <p class="eyebrow">Delivery</p>
+                  <h3>推送状态</h3>
+                </div>
+              </div>
+              <div id="telegram-schedules" class="stacked"></div>
+              <div class="inline-form">
+                <button id="tg-test-btn" class="ghost-btn">测试发送</button>
+              </div>
+              <p id="telegram-result" class="result-box muted">等待操作。</p>
+            </article>
           </div>
-          <p id="telegram-result" class="muted"></p>
         </section>
       </section>
 
@@ -227,16 +313,43 @@
             </div>
             <span id="ai-status" class="soft-label">--</span>
           </div>
-          <div class="ai-box">
-            <textarea id="ai-question" rows="3" placeholder="例如：今天哪个节点流量异常？"></textarea>
-            <button id="ai-ask-btn" class="primary-btn">提问</button>
+          <div id="ai-summary" class="mini-grid"></div>
+          <div class="content-grid compact-grid">
+            <article class="sub-panel">
+              <div class="panel-head">
+                <div>
+                  <p class="eyebrow">Ask</p>
+                  <h3>快捷分析</h3>
+                </div>
+                <button id="ai-refresh-btn" class="ghost-btn">刷新数据包</button>
+              </div>
+              <div id="ai-prompts" class="prompt-grid">
+                <button class="ghost-btn ai-prompt" data-question="今天哪个节点流量异常？">今日异常</button>
+                <button class="ghost-btn ai-prompt" data-question="最近 1 小时哪个节点流量增长最快？">1h 突增</button>
+                <button class="ghost-btn ai-prompt" data-question="最近 7 天流量最高的节点有哪些？">7d Top</button>
+                <button class="ghost-btn ai-prompt" data-question="当前告警风险需要关注什么？">告警风险</button>
+              </div>
+              <div class="ai-box">
+                <textarea id="ai-question" rows="4" placeholder="例如：今天哪个节点流量异常？"></textarea>
+                <button id="ai-ask-btn" class="primary-btn">提问</button>
+              </div>
+              <div id="ai-answer" class="answer-box">等待提问。</div>
+            </article>
+            <article class="sub-panel">
+              <div class="panel-head">
+                <div>
+                  <p class="eyebrow">Data Pack</p>
+                  <h3>数据来源</h3>
+                </div>
+              </div>
+              <div id="ai-sources" class="stacked"></div>
+            </article>
           </div>
-          <div id="ai-answer" class="answer-box">等待提问。</div>
         </section>
       </section>
     </section>
   </main>
 
-  <script src="/static/app.js?v=20260606-ui2"></script>
+  <script src="/static/app.js?v=20260606-ui3"></script>
 </body>
 </html>

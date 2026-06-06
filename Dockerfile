@@ -8,6 +8,7 @@ RUN chmod +x /usr/local/bin/supercronic
 
 COPY komari_traffic_report.py /app/komari_traffic_report.py
 COPY web_app.py /app/web_app.py
+COPY crontab /app/crontab
 COPY static /app/static
 RUN chmod +x /app/komari_traffic_report.py
 
