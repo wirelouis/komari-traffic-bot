@@ -282,7 +282,7 @@ def safe_call(func, *args, **kwargs) -> dict:
     try:
         return {"ok": True, "data": func(*args, **kwargs)}
     except Exception as exc:
-        return {"ok": False, "error": {"code": type(exc).__name__, "message": str(exc)}}
+        return {"ok": False, "error": {"code": type(exc).__name__, "message": redact_web_sensitive_text(str(exc))}}
 
 
 def node_bindings_path() -> Path:

@@ -368,6 +368,31 @@ class WebAppTests(unittest.TestCase):
         self.assertNotIn("test-password", text)
         self.assertNotIn("secret-session-value", text)
 
+    def test_nested_safe_call_errors_redact_secrets(self):
+        self.patch_attr(w, "WEB_SESSION_SECRET", "secret-session-value")
+        self.login()
+
+        def failing_period_summary(_scope):
+            raise RuntimeError(
+                "bad values: test-password secret-session-value "
+                "secret-telegram-token secret-komari-token secret-ai-key"
+            )
+
+        self.patch_attr(w, "build_period_summary", failing_period_summary)
+        self.patch_attr(w, "safe_records_summary", lambda _hours, _enrich=False: {"nodes": [], "top_nodes": []})
+
+        response = self.client.get("/api/overview")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()["data"]
+        self.assertFalse(payload["periods"]["today"]["ok"])
+        text = response.text
+        self.assertNotIn("test-password", text)
+        self.assertNotIn("secret-session-value", text)
+        self.assertNotIn("secret-telegram-token", text)
+        self.assertNotIn("secret-komari-token", text)
+        self.assertNotIn("secret-ai-key", text)
+
     def test_komari_machines_are_normalized_with_web_url(self):
         self.login()
         self.patch_attr(k, "get_json", lambda _url: {
