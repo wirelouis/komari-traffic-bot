@@ -388,7 +388,8 @@ function noteText(period) {
   if (!period?.ok) return friendlyError(period?.error?.message || "不可用");
   const data = period.data;
   if (data.note === "baseline_missing") return "基线缺失";
-  return `${data.nodes?.length || 0} 个节点`;
+  const count = data.node_count ?? data.nodes?.length ?? 0;
+  return data.hidden_node_count ? `${count} 个节点 · 展示摘要` : `${count} 个节点`;
 }
 
 function totalText(period) {
@@ -684,8 +685,9 @@ function renderChart(data) {
     (nodes || []).forEach((node) => {
       const uuid = String(node.uuid || node.name || "");
       if (!uuid) return;
-      const row = byId.get(uuid) || { uuid, name: node.name || uuid, last24: 0, last7d: 0 };
+      const row = byId.get(uuid) || { uuid, name: node.name || uuid, last24: 0, last7d: 0, compact_other: Boolean(node.compact_other) };
       row.name = node.name || row.name;
+      row.compact_other = row.compact_other || Boolean(node.compact_other);
       row[key] = Number(node.total || 0);
       row[`${key}_human`] = node.total_human || formatBytes(node.total);
       byId.set(uuid, row);
@@ -700,8 +702,18 @@ function renderChart(data) {
     chart.innerHTML = `<div class="empty-state">${escapeHtml(friendlyError(msg))}</div>`;
     return;
   }
-  const compact = compactCompareRows(allNodes, DISPLAY_LIMITS.overviewNodes);
+  const hiddenFromApi = Math.max(
+    Number(data.records?.last_24h?.data?.hidden_node_count || 0),
+    Number(data.records?.last_7d?.data?.hidden_node_count || 0),
+  );
+  const alreadyCompact = allNodes.some((node) => node.compact_other);
+  const compact = alreadyCompact ? { rows: allNodes, hidden: hiddenFromApi } : compactCompareRows(allNodes, DISPLAY_LIMITS.overviewNodes);
   const nodes = compact.rows;
+  const totalNodeCount = Math.max(
+    Number(data.records?.last_24h?.data?.node_count || 0),
+    Number(data.records?.last_7d?.data?.node_count || 0),
+    allNodes.length,
+  );
   const max = Math.max(...nodes.flatMap((n) => [n.last24, n.last7d]), 1);
   const ticks = [0, 0.25, 0.5, 0.75, 1].map((ratio) => ({ ratio, label: formatBytes(max * ratio) }));
   chart.innerHTML = `
@@ -709,7 +721,7 @@ function renderChart(data) {
       <div class="traffic-chart-legend">
         <span><i class="legend-dot day"></i>最近 24h</span>
         <span><i class="legend-dot week"></i>最近 7d</span>
-        <span>展示 ${Math.min(allNodes.length, DISPLAY_LIMITS.overviewNodes)} / ${allNodes.length} 个节点</span>
+        <span>展示 ${Math.min(totalNodeCount, DISPLAY_LIMITS.overviewNodes)} / ${totalNodeCount} 个节点</span>
         ${compact.hidden ? `<span>${compact.hidden} 个节点已汇总</span>` : ""}
       </div>
       <div class="traffic-axis">
@@ -1508,7 +1520,9 @@ function renderTrafficRange(data) {
   const nodes = data.nodes || [];
   const groups = data.groups || [];
   const visibleGroups = groups.length > DISPLAY_LIMITS.analyticsGroups ? groups.slice(-DISPLAY_LIMITS.analyticsGroups) : groups;
-  const compactNodes = compactTrafficRows(nodes, DISPLAY_LIMITS.analyticsNodes);
+  const compactNodes = data.compact || nodes.some((node) => node.compact_other)
+    ? { rows: nodes, hidden: Number(data.hidden_node_count || 0), hiddenTotal: 0 }
+    : compactTrafficRows(nodes, DISPLAY_LIMITS.analyticsNodes);
   const topNodes = compactNodes.rows;
   const maxNode = Math.max(...topNodes.map((node) => Number(node.total || 0)), 1);
   const maxGroup = Math.max(...visibleGroups.map((group) => Number(group.total?.total || 0)), 1);
@@ -1519,7 +1533,7 @@ function renderTrafficRange(data) {
     <div class="range-summary">
       ${miniCard("区间合计", data.total?.total_human || "--", `${escapeHtml(data.from)} -> ${escapeHtml(data.to)}`)}
       ${miniCard("下行 / 上行", `${data.total?.down_human || "--"} / ${data.total?.up_human || "--"}`, "区间累计")}
-      ${miniCard("节点展示", `${Math.min(nodes.length, DISPLAY_LIMITS.analyticsNodes)}/${nodes.length}`, compactNodes.hidden ? `其余 ${compactNodes.hidden} 个已汇总` : "全部展示")}
+      ${miniCard("节点展示", `${Math.min(data.node_count ?? nodes.length, DISPLAY_LIMITS.analyticsNodes)}/${data.node_count ?? nodes.length}`, compactNodes.hidden ? `其余 ${compactNodes.hidden} 个已汇总` : "全部展示")}
       ${miniCard("趋势分组", `${visibleGroups.length}/${groups.length}`, `${data.day_count || 0} 天 · ${data.group || "daily"}`)}
     </div>
     <div class="analytics-grid">

@@ -30,6 +30,8 @@ SESSION_REMEMBER_SECONDS = 30 * 24 * 3600
 LOGIN_RATE_LIMIT_ATTEMPTS = 5
 LOGIN_RATE_LIMIT_WINDOW_SECONDS = 5 * 60
 LOGIN_RATE_LIMIT_LOCK_SECONDS = 10 * 60
+OVERVIEW_NODE_LIMIT = 8
+ANALYTICS_NODE_LIMIT = 10
 WEB_SESSION_SECRET = os.environ.get("WEB_SESSION_SECRET", "").strip() or secrets.token_urlsafe(32)
 WEB_SESSION_SECRET_TEMPORARY = not bool(os.environ.get("WEB_SESSION_SECRET", "").strip())
 LOGIN_FAILURES: dict[str, dict[str, float | int]] = {}
@@ -413,6 +415,71 @@ def enrich_period_result(result: dict) -> dict:
     result = dict(result)
     result["data"] = enrich_records_summary(data)
     return result
+
+
+def compact_other_node(rows: list[dict]) -> dict:
+    up = sum(int(item.get("up", 0) or 0) for item in rows)
+    down = sum(int(item.get("down", 0) or 0) for item in rows)
+    total = up + down
+    return {
+        "uuid": "__other__",
+        "name": f"{len(rows)} 个其他节点",
+        "up": up,
+        "down": down,
+        "total": total,
+        "up_human": k.human_bytes(up),
+        "down_human": k.human_bytes(down),
+        "total_human": k.human_bytes(total),
+        "compact_other": True,
+    }
+
+
+def compact_node_rows(nodes: list[dict], limit: int) -> tuple[list[dict], int]:
+    rows = list(nodes or [])
+    max_rows = max(1, int(limit or 1))
+    if len(rows) <= max_rows:
+        return rows, 0
+    visible = rows[:max_rows]
+    hidden = rows[max_rows:]
+    return [*visible, compact_other_node(hidden)], len(hidden)
+
+
+def compact_summary_nodes(summary: dict, limit: int) -> dict:
+    payload = dict(summary or {})
+    nodes = payload.get("nodes", [])
+    if not isinstance(nodes, list):
+        return payload
+    compacted, hidden_count = compact_node_rows(nodes, limit)
+    payload["nodes"] = compacted
+    payload["node_count"] = len(nodes)
+    payload["hidden_node_count"] = hidden_count
+    payload["compact"] = bool(hidden_count)
+    return payload
+
+
+def compact_result_nodes(result: dict, limit: int) -> dict:
+    if not isinstance(result, dict) or not result.get("ok") or not isinstance(result.get("data"), dict):
+        return result
+    compacted = dict(result)
+    compacted["data"] = compact_summary_nodes(result["data"], limit)
+    return compacted
+
+
+def compact_traffic_range_payload(data: dict, node_limit: int = ANALYTICS_NODE_LIMIT) -> dict:
+    payload = compact_summary_nodes(data, node_limit)
+    groups = []
+    for group in payload.get("groups", []) or []:
+        if not isinstance(group, dict):
+            continue
+        groups.append({
+            "key": group.get("key", ""),
+            "label": group.get("label", group.get("key", "")),
+            "total": group.get("total", {}),
+        })
+    payload["groups"] = groups
+    payload["group_count"] = len(groups)
+    payload["compact"] = True
+    return payload
 
 
 def seconds_text(seconds: int) -> str:
@@ -966,10 +1033,11 @@ def build_alert_status_struct() -> dict:
     }
 
 
-def safe_records_summary(hours: int) -> dict:
+def safe_records_summary(hours: int, enrich: bool = True) -> dict:
     if hours not in (1, 6, 24, 168, 720):
         raise RuntimeError("hours must be one of 1, 6, 24, 168, 720")
-    return enrich_records_summary(k.build_records_summary(hours))
+    summary = k.build_records_summary(hours)
+    return enrich_records_summary(summary) if enrich else summary
 
 
 @app.get("/")
@@ -1037,11 +1105,11 @@ async def session(request: Request):
 
 @app.get("/api/overview")
 async def overview(_user: str = Depends(current_user)):
-    today = enrich_period_result(safe_call(build_period_summary, "today"))
-    week = enrich_period_result(safe_call(build_period_summary, "week"))
-    month = enrich_period_result(safe_call(build_period_summary, "month"))
-    last_24h = safe_call(safe_records_summary, 24)
-    last_7d = safe_call(safe_records_summary, 168)
+    today = compact_result_nodes(safe_call(build_period_summary, "today"), OVERVIEW_NODE_LIMIT)
+    week = compact_result_nodes(safe_call(build_period_summary, "week"), OVERVIEW_NODE_LIMIT)
+    month = compact_result_nodes(safe_call(build_period_summary, "month"), OVERVIEW_NODE_LIMIT)
+    last_24h = compact_result_nodes(safe_call(safe_records_summary, 24, False), OVERVIEW_NODE_LIMIT)
+    last_7d = compact_result_nodes(safe_call(safe_records_summary, 168, False), OVERVIEW_NODE_LIMIT)
     return api_ok({
         "now": k.now_dt().strftime("%Y-%m-%d %H:%M:%S %Z"),
         "stat_tz": k.STAT_TZ,
@@ -1148,12 +1216,15 @@ async def traffic_range(
     from_day: str = Query(..., alias="from"),
     to_day: str = Query(..., alias="to"),
     group: str = "daily",
+    compact: bool = True,
     _user: str = Depends(current_user),
 ):
     try:
         start = k.parse_date_yyyy_mm_dd(from_day)
         end = k.parse_date_yyyy_mm_dd(to_day)
         data = k.traffic_range_summary(start, end, group=group)
+        if compact:
+            data = compact_traffic_range_payload(data)
     except Exception as exc:
         return api_error(str(exc), status_code=400, code="invalid_range")
     return api_ok(data)

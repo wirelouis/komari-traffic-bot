@@ -264,6 +264,54 @@ class WebAppTests(unittest.TestCase):
         self.assertFalse(last_24h["ok"])
         self.assertIn("error", last_24h)
 
+    def test_overview_compacts_large_node_payloads(self):
+        self.login()
+
+        def many_nodes(count=12):
+            return [
+                {
+                    "uuid": f"n{index}",
+                    "name": f"Node {index}",
+                    "up": index,
+                    "down": index * 2,
+                    "total": index * 3,
+                    "up_human": f"{index} B",
+                    "down_human": f"{index * 2} B",
+                    "total_human": f"{index * 3} B",
+                }
+                for index in range(count, 0, -1)
+            ]
+
+        def period_summary(scope):
+            nodes = many_nodes()
+            return {
+                "scope": scope,
+                "nodes": nodes,
+                "top_nodes": nodes[:3],
+                "total": {"total": 234, "total_human": "234 B"},
+            }
+
+        self.patch_attr(w, "build_period_summary", period_summary)
+        self.patch_attr(k, "build_records_summary", lambda _hours: {
+            "hours": _hours,
+            "nodes": many_nodes(),
+            "top_nodes": many_nodes()[:3],
+            "skipped": [],
+        })
+
+        response = self.client.get("/api/overview")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()["data"]
+        today = payload["periods"]["today"]["data"]
+        last_24h = payload["records"]["last_24h"]["data"]
+        self.assertEqual(today["node_count"], 12)
+        self.assertEqual(today["hidden_node_count"], 4)
+        self.assertEqual(len(today["nodes"]), 9)
+        self.assertTrue(today["nodes"][-1]["compact_other"])
+        self.assertEqual(last_24h["node_count"], 12)
+        self.assertNotIn("machines", last_24h)
+
     def test_alert_check_dry_run_does_not_persist_state(self):
         self.login()
         self.patch_attr(k, "ALERT_TOTAL_WINDOW_BYTES", 100)
@@ -550,7 +598,15 @@ class WebAppTests(unittest.TestCase):
         payload = response.json()["data"]
         self.assertEqual(payload["total"]["total"], 49)
         self.assertEqual(payload["groups"][0]["key"], "2026-06-01")
+        self.assertNotIn("nodes", payload["groups"][0])
         self.assertEqual(payload["top_nodes"][0]["uuid"], "n1")
+        self.assertTrue(payload["compact"])
+
+        full_response = self.client.get("/api/traffic/range?from=2026-06-01&to=2026-06-02&group=weekly&compact=false")
+        self.assertEqual(full_response.status_code, 200, full_response.text)
+        full_payload = full_response.json()["data"]
+        self.assertIn("nodes", full_payload["groups"][0])
+        self.assertNotIn("compact", full_payload)
 
     def test_task_runs_api_filters_and_formats(self):
         self.login()
