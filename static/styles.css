@@ -873,6 +873,19 @@ nav {
   background: var(--panel-card-bg);
 }
 
+.traffic-chart-row.compact-other,
+.analytics-node-row.compact-other {
+  cursor: default;
+  color: var(--muted);
+  border-style: dashed;
+  background: var(--panel-faint-bg);
+}
+
+.traffic-chart-row.compact-other:hover,
+.analytics-node-row.compact-other:hover {
+  transform: none;
+}
+
 .traffic-y-label {
   display: -webkit-box;
   overflow: hidden;
@@ -1033,7 +1046,7 @@ nav {
 
 table {
   width: 100%;
-  min-width: 980px;
+  min-width: 760px;
   border-collapse: collapse;
 }
 
@@ -1077,6 +1090,25 @@ tbody tr:last-child td {
 .machine-cell {
   display: grid;
   gap: 2px;
+}
+
+.traffic-cell,
+.health-cell {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.traffic-cell strong,
+.health-cell span:first-child {
+  color: var(--ink);
+  font-weight: 400;
+}
+
+.node-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .detail-strip,
@@ -1463,21 +1495,13 @@ tbody tr:last-child td {
   white-space: nowrap;
 }
 
-.analytics-table-wrap {
-  overflow-x: auto;
-  border: 1px solid var(--line);
+.compact-note {
+  padding: 8px 10px;
+  color: var(--muted);
+  border: 1px dashed var(--line);
   border-radius: 8px;
-}
-
-.analytics-table {
-  min-width: 720px;
-}
-
-.inline-node-link {
-  max-width: 360px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  text-align: left;
+  background: var(--panel-faint-bg);
+  font-size: 12px;
 }
 
 .config-editor {
@@ -1941,8 +1965,7 @@ tbody tr:last-child td {
     .analytics-node-bars > .analytics-node-row,
     .detail-grid > .detail-item,
     .config-editor > .config-group,
-    #nodes-table tr,
-    .analytics-table tbody tr
+    #nodes-table tr
   ) {
   animation: kt-fade-in-up 360ms var(--ease-out) both;
 }
@@ -1957,8 +1980,7 @@ tbody tr:last-child td {
     .analytics-node-bars > .analytics-node-row,
     .detail-grid > .detail-item,
     .config-editor > .config-group,
-    #nodes-table tr,
-    .analytics-table tbody tr
+    #nodes-table tr
   ):nth-child(2) {
   animation-delay: 45ms;
 }
@@ -1972,8 +1994,7 @@ tbody tr:last-child td {
     .analytics-node-bars > .analytics-node-row,
     .detail-grid > .detail-item,
     .config-editor > .config-group,
-    #nodes-table tr,
-    .analytics-table tbody tr
+    #nodes-table tr
   ):nth-child(3) {
   animation-delay: 90ms;
 }
@@ -1987,8 +2008,7 @@ tbody tr:last-child td {
     .analytics-node-bars > .analytics-node-row,
     .detail-grid > .detail-item,
     .config-editor > .config-group,
-    #nodes-table tr,
-    .analytics-table tbody tr
+    #nodes-table tr
   ):nth-child(4) {
   animation-delay: 135ms;
 }
@@ -2002,8 +2022,7 @@ tbody tr:last-child td {
     .analytics-node-bars > .analytics-node-row,
     .detail-grid > .detail-item,
     .config-editor > .config-group,
-    #nodes-table tr,
-    .analytics-table tbody tr
+    #nodes-table tr
   ):nth-child(5) {
   animation-delay: 180ms;
 }
@@ -2015,8 +2034,7 @@ tbody tr:last-child td {
     .analytics-group-list > .analytics-group-row,
     .analytics-node-bars > .analytics-node-row,
     .detail-grid > .detail-item,
-    #nodes-table tr,
-    .analytics-table tbody tr
+    #nodes-table tr
   ):nth-child(6) {
   animation-delay: 225ms;
 }
@@ -2028,8 +2046,7 @@ tbody tr:last-child td {
     .analytics-group-list > .analytics-group-row,
     .analytics-node-bars > .analytics-node-row,
     .detail-grid > .detail-item,
-    #nodes-table tr,
-    .analytics-table tbody tr
+    #nodes-table tr
   ):nth-child(7) {
   animation-delay: 270ms;
 }
@@ -2039,8 +2056,7 @@ tbody tr:last-child td {
     .traffic-chart-rows > .traffic-chart-row,
     .analytics-group-list > .analytics-group-row,
     .analytics-node-bars > .analytics-node-row,
-    #nodes-table tr,
-    .analytics-table tbody tr
+    #nodes-table tr
   ):nth-child(n + 8) {
   animation-delay: 310ms;
 }

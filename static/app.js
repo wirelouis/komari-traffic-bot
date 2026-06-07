@@ -1,6 +1,12 @@
 const SIDEBAR_STORAGE_KEY = "komari.sidebarCollapsed";
 const THEME_STORAGE_KEY = "komari.themeMode";
 const THEME_MODES = ["auto", "light", "dark"];
+const DISPLAY_LIMITS = {
+  overviewNodes: 8,
+  analyticsNodes: 10,
+  analyticsGroups: 18,
+  taskRuns: 6,
+};
 
 const routeConfig = {
   "/": {
@@ -250,7 +256,7 @@ function showRouteSkeleton(route) {
       setSkel("trend-chart", `<div class="kt-skeleton kt-skel-chart"></div>`);
       break;
     case "/nodes":
-      setSkel("nodes-table", skelTableRows(6, 9));
+      setSkel("nodes-table", skelTableRows(6, 5));
       break;
     case "/alerts":
       setSkel("alerts-summary", skelCards(4));
@@ -408,6 +414,68 @@ function percentOf(value, max) {
   return Math.max(0, Math.min(100, (n / m) * 100));
 }
 
+function sumBy(rows, key) {
+  return (rows || []).reduce((total, row) => total + Number(row?.[key] || 0), 0);
+}
+
+function compactTrafficRows(rows, limit, label = "其他节点") {
+  const items = Array.isArray(rows) ? rows : [];
+  const maxItems = Math.max(1, Number(limit || items.length || 1));
+  if (items.length <= maxItems) {
+    return { rows: items, hidden: 0, hiddenTotal: 0 };
+  }
+  const visible = items.slice(0, maxItems);
+  const rest = items.slice(maxItems);
+  const up = sumBy(rest, "up");
+  const down = sumBy(rest, "down");
+  const total = up + down;
+  return {
+    rows: [
+      ...visible,
+      {
+        uuid: "__other__",
+        name: `${rest.length} 个${label}`,
+        up,
+        down,
+        total,
+        up_human: formatBytes(up),
+        down_human: formatBytes(down),
+        total_human: formatBytes(total),
+        compact_other: true,
+      },
+    ],
+    hidden: rest.length,
+    hiddenTotal: total,
+  };
+}
+
+function compactCompareRows(rows, limit) {
+  const items = Array.isArray(rows) ? rows : [];
+  const maxItems = Math.max(1, Number(limit || items.length || 1));
+  if (items.length <= maxItems) {
+    return { rows: items, hidden: 0 };
+  }
+  const visible = items.slice(0, maxItems);
+  const rest = items.slice(maxItems);
+  const last24 = sumBy(rest, "last24");
+  const last7d = sumBy(rest, "last7d");
+  return {
+    rows: [
+      ...visible,
+      {
+        uuid: "__other__",
+        name: `${rest.length} 个其他节点`,
+        last24,
+        last7d,
+        last24_human: formatBytes(last24),
+        last7d_human: formatBytes(last7d),
+        compact_other: true,
+      },
+    ],
+    hidden: rest.length,
+  };
+}
+
 function metric(stat, key) {
   const value = stat?.[key];
   return value === null || value === undefined || Number.isNaN(Number(value)) ? "--" : `${value}%`;
@@ -453,6 +521,18 @@ function runTypeLabel(type) {
   return map[type] || type || "任务";
 }
 
+function aiSourceLabel(key) {
+  const map = {
+    today: "今日节点",
+    last_1h: "最近 1 小时",
+    last_24h: "最近 24 小时",
+    last_7d: "最近 7 天",
+    history: "历史趋势",
+    alerts: "告警状态",
+  };
+  return map[key] || key || "数据源";
+}
+
 function runStatusClass(status) {
   if (status === "success") return "good";
   if (status === "failed") return "bad";
@@ -488,9 +568,11 @@ function taskRunNote(run) {
 
 function renderTaskRuns(targetId, runs) {
   const target = $(targetId);
-  const items = runs || [];
+  const rawItems = runs || [];
+  const items = rawItems.slice(0, DISPLAY_LIMITS.taskRuns);
+  const hidden = Math.max(0, rawItems.length - items.length);
   target.innerHTML = items.length
-    ? items.map((run) => `
+    ? `${items.map((run) => `
       <div class="task-run-row ${run.status === "failed" ? "failed" : ""}">
         <span>
           <strong>${escapeHtml(runTypeLabel(run.type))}</strong><br>
@@ -498,11 +580,11 @@ function renderTaskRuns(targetId, runs) {
           <span class="tiny">${escapeHtml(run.started_at_text || "未记录时间")} · 耗时 ${escapeHtml(run.duration_text || "--")}</span>
         </span>
         <span class="pill ${runStatusClass(run.status)}">${escapeHtml(runStatusText(run.status))}</span>
-      </div>`).join("")
+      </div>`).join("")}${hidden ? `<div class="compact-note">还有 ${hidden} 条较早记录未展开。</div>` : ""}`
     : `<div class="empty-state">最近没有需要展示的任务记录。</div>`;
 }
 
-async function loadTaskRuns(targetId, type = "", limit = 50) {
+async function loadTaskRuns(targetId, type = "", limit = DISPLAY_LIMITS.taskRuns) {
   const query = new URLSearchParams({ limit: String(limit) });
   if (type) query.set("type", type);
   const data = await api(`/api/tasks/runs?${query.toString()}`);
@@ -611,13 +693,15 @@ function renderChart(data) {
   };
   mergeNodes(data.records?.last_24h?.data?.nodes || [], "last24");
   mergeNodes(data.records?.last_7d?.data?.nodes || [], "last7d");
-  const nodes = [...byId.values()].sort((a, b) => (b.last7d + b.last24) - (a.last7d + a.last24));
+  const allNodes = [...byId.values()].sort((a, b) => (b.last7d + b.last24) - (a.last7d + a.last24));
   const chart = $("trend-chart");
-  if (!nodes.length) {
+  if (!allNodes.length) {
     const msg = data.records?.last_24h?.error?.message || data.records?.last_7d?.error?.message || "暂无 records 数据";
     chart.innerHTML = `<div class="empty-state">${escapeHtml(friendlyError(msg))}</div>`;
     return;
   }
+  const compact = compactCompareRows(allNodes, DISPLAY_LIMITS.overviewNodes);
+  const nodes = compact.rows;
   const max = Math.max(...nodes.flatMap((n) => [n.last24, n.last7d]), 1);
   const ticks = [0, 0.25, 0.5, 0.75, 1].map((ratio) => ({ ratio, label: formatBytes(max * ratio) }));
   chart.innerHTML = `
@@ -625,7 +709,8 @@ function renderChart(data) {
       <div class="traffic-chart-legend">
         <span><i class="legend-dot day"></i>最近 24h</span>
         <span><i class="legend-dot week"></i>最近 7d</span>
-        <span>${nodes.length} 个实例</span>
+        <span>展示 ${Math.min(allNodes.length, DISPLAY_LIMITS.overviewNodes)} / ${allNodes.length} 个节点</span>
+        ${compact.hidden ? `<span>${compact.hidden} 个节点已汇总</span>` : ""}
       </div>
       <div class="traffic-axis">
         <span></span>
@@ -633,7 +718,7 @@ function renderChart(data) {
       </div>
       <div class="traffic-chart-rows">
         ${nodes.map((n) => `
-          <button class="traffic-chart-row" data-jump-node="${escapeHtml(n.uuid)}" title="${escapeHtml(n.name)}">
+          <${n.compact_other ? "div" : "button"} class="traffic-chart-row ${n.compact_other ? "compact-other" : ""}" ${n.compact_other ? "" : `data-jump-node="${escapeHtml(n.uuid)}" title="${escapeHtml(n.name)}"`}>
             <span class="traffic-y-label">${escapeHtml(n.name)}</span>
             <span class="traffic-bars">
               <span class="traffic-bar-line">
@@ -645,7 +730,7 @@ function renderChart(data) {
                 <span class="traffic-value">${escapeHtml(n.last7d_human || formatBytes(n.last7d))}</span>
               </span>
             </span>
-          </button>`).join("")}
+          </${n.compact_other ? "div" : "button"}>`).join("")}
       </div>
     </div>`;
   bindNodeJumpButtons();
@@ -673,17 +758,23 @@ function renderNodesTable() {
         <tr data-uuid="${escapeHtml(n.uuid)}">
           <td><span class="node-name">${escapeHtml(n.name)}</span><div class="tiny">${escapeHtml(n.uuid)}</div></td>
           <td>
+            <div class="traffic-cell">
+              <strong>${escapeHtml(n.total_human)}</strong>
+              <span class="tiny">下行 ${escapeHtml(n.down_human)} · 上行 ${escapeHtml(n.up_human)}</span>
+            </div>
+          </td>
+          <td>
+            <div class="health-cell">
+              <span>CPU ${metric(n.cpu, "avg")}</span>
+              <span class="tiny">RAM ${metric(n.ram, "avg")} · Disk ${metric(n.disk, "avg")}</span>
+            </div>
+          </td>
+          <td>
             <div class="machine-cell">
               <span>${escapeHtml(machine?.name || (stale ? "绑定异常" : "未绑定"))}</span>
               <span class="tiny">${escapeHtml(bindingLabel(binding))}${machine?.region ? ` · ${escapeHtml(machine.region)}` : ""}</span>
             </div>
           </td>
-          <td>${escapeHtml(n.down_human)}</td>
-          <td>${escapeHtml(n.up_human)}</td>
-          <td><strong>${escapeHtml(n.total_human)}</strong></td>
-          <td>${metric(n.cpu, "avg")}</td>
-          <td>${metric(n.ram, "avg")}</td>
-          <td>${metric(n.disk, "avg")}</td>
           <td>
             <span class="node-actions">
               <button class="text-btn" data-node-action="detail" data-uuid="${escapeHtml(n.uuid)}">详情</button>
@@ -692,7 +783,7 @@ function renderNodesTable() {
           </td>
         </tr>`;
     }).join("")
-    : `<tr><td colspan="9">暂无节点数据</td></tr>`;
+    : `<tr><td colspan="5">暂无节点数据</td></tr>`;
 
   document.querySelectorAll("#nodes-table tr[data-uuid]").forEach((row) => {
     row.addEventListener("click", async (event) => {
@@ -725,7 +816,7 @@ async function loadNodes(hours = state.nodesHours) {
       $("node-detail").textContent = "选择节点查看详情；点击打开按钮进入 Komari 机器。";
     }
   } catch (error) {
-    $("nodes-table").innerHTML = `<tr><td colspan="9">${escapeHtml(friendlyError(error.message))}</td></tr>`;
+    $("nodes-table").innerHTML = `<tr><td colspan="5">${escapeHtml(friendlyError(error.message))}</td></tr>`;
   }
 }
 
@@ -905,11 +996,7 @@ function renderAlertCheckResult(data) {
         <span class="pill">${summary.notified ? "已推送" : "未推送"}</span>
       </div>
       ${items.length ? `<ul>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : ""}
-    </div>
-    <details class="debug-box">
-      <summary>调试详情</summary>
-      <pre>${escapeHtml(JSON.stringify(data, null, 2))}</pre>
-    </details>`;
+    </div>`;
 }
 
 async function muteAlerts(hours) {
@@ -1064,7 +1151,7 @@ async function loadTelegramStatus() {
       schedules: schedules.schedules || [],
       schedule_path: schedules.path,
     });
-    await loadTaskRuns("telegram-task-runs", "report", 12);
+    await loadTaskRuns("telegram-task-runs", "report", DISPLAY_LIMITS.taskRuns);
   } catch (error) {
     $("telegram-summary").innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
   }
@@ -1113,7 +1200,7 @@ function renderAiStatus(data) {
   $("ai-sources").innerHTML = sources.length
     ? sources.map((item) => `
       <div class="source-row">
-        <span><strong>${escapeHtml(item.key)}</strong><br><span class="tiny">${item.count || 0} 条记录</span></span>
+        <span><strong>${escapeHtml(aiSourceLabel(item.key))}</strong><br><span class="tiny">${item.count || 0} 条记录</span></span>
         <span class="pill ${item.status === "ok" ? "good" : "bad"}">${escapeHtml(item.status)}</span>
       </div>`).join("")
     : `<div class="empty-state">暂无 AI 数据包缓存。</div>`;
@@ -1186,7 +1273,6 @@ function renderSystemStatus(data) {
   const summary = data.summary || {};
   const issues = summary.issues || [];
   const warnings = summary.warnings || [];
-  const build = data.build || {};
   const dbOk = data.data?.sqlite?.ok !== false;
   const schedules = data.runtime?.schedules || {};
   const overall = issues.length ? "需处理" : (warnings.length ? "有提醒" : "正常");
@@ -1200,7 +1286,6 @@ function renderSystemStatus(data) {
     miniCard("最近失败", String(summary.recent_failures || 0), "只展示最近几条，失败会出现在下方", summary.recent_failures ? "bad" : "good"),
     miniCard("长期统计", dbOk ? "正常" : "异常", dbOk ? "流量汇总可以继续累积" : "统计数据可能无法保存", dbOk ? "good" : "bad"),
     miniCard("推送计划", `${schedules.enabled || 0}/${schedules.total || 0}`, "已启用 / 全部计划"),
-    miniCard("版本", build.version || "dev", build.commit_short ? `提交 ${build.commit_short}` : (build.build_date || "本地运行")),
   ].join("");
 
   const services = data.health_items || data.services || [];
@@ -1367,7 +1452,7 @@ async function saveSystemConfig() {
     buttonId: "save-config-btn",
     afterSave: async (data) => {
       renderSystemConfig(data.config || {});
-      await loadTaskRuns("system-task-runs", $("task-run-filter").value, 8);
+      await loadTaskRuns("system-task-runs", $("task-run-filter").value, DISPLAY_LIMITS.taskRuns);
     },
   });
 }
@@ -1396,7 +1481,7 @@ async function pruneTaskRuns() {
     const data = await postJson("/api/system/maintenance/prune-task-runs", {});
     renderMaintenanceStatus(data.maintenance || {});
     $("maintenance-result").textContent = `已清理 ${data.result?.deleted || 0} 条旧运行记录，当前剩余 ${data.result?.remaining || 0} 条。`;
-    await loadTaskRuns("system-task-runs", $("task-run-filter").value, 8);
+    await loadTaskRuns("system-task-runs", $("task-run-filter").value, DISPLAY_LIMITS.taskRuns);
   } catch (error) {
     $("maintenance-result").textContent = friendlyError(error.message);
   } finally {
@@ -1411,7 +1496,7 @@ async function vacuumDb() {
     const data = await postJson("/api/system/maintenance/vacuum", {});
     renderMaintenanceStatus(data.maintenance || {});
     $("maintenance-result").textContent = "数据维护完成，长期统计库状态正常。";
-    await loadTaskRuns("system-task-runs", $("task-run-filter").value, 8);
+    await loadTaskRuns("system-task-runs", $("task-run-filter").value, DISPLAY_LIMITS.taskRuns);
   } catch (error) {
     $("maintenance-result").textContent = friendlyError(error.message);
   } finally {
@@ -1420,11 +1505,13 @@ async function vacuumDb() {
 }
 
 function renderTrafficRange(data) {
-  const topNodes = data.top_nodes || [];
   const nodes = data.nodes || [];
   const groups = data.groups || [];
-  const maxNode = Math.max(...nodes.map((node) => Number(node.total || 0)), 1);
-  const maxGroup = Math.max(...groups.map((group) => Number(group.total?.total || 0)), 1);
+  const visibleGroups = groups.length > DISPLAY_LIMITS.analyticsGroups ? groups.slice(-DISPLAY_LIMITS.analyticsGroups) : groups;
+  const compactNodes = compactTrafficRows(nodes, DISPLAY_LIMITS.analyticsNodes);
+  const topNodes = compactNodes.rows;
+  const maxNode = Math.max(...topNodes.map((node) => Number(node.total || 0)), 1);
+  const maxGroup = Math.max(...visibleGroups.map((group) => Number(group.total?.total || 0)), 1);
   const source = data.source ? String(data.source) : "sqlite";
   $("analytics-status-pill").textContent = source;
   $("analytics-status-pill").classList.toggle("good", true);
@@ -1432,8 +1519,8 @@ function renderTrafficRange(data) {
     <div class="range-summary">
       ${miniCard("区间合计", data.total?.total_human || "--", `${escapeHtml(data.from)} -> ${escapeHtml(data.to)}`)}
       ${miniCard("下行 / 上行", `${data.total?.down_human || "--"} / ${data.total?.up_human || "--"}`, "区间累计")}
-      ${miniCard("覆盖节点", String(nodes.length), `${data.day_count || 0} 天 / ${groups.length} 组`)}
-      ${miniCard("数据来源", source, data.group || "daily")}
+      ${miniCard("节点展示", `${Math.min(nodes.length, DISPLAY_LIMITS.analyticsNodes)}/${nodes.length}`, compactNodes.hidden ? `其余 ${compactNodes.hidden} 个已汇总` : "全部展示")}
+      ${miniCard("趋势分组", `${visibleGroups.length}/${groups.length}`, `${data.day_count || 0} 天 · ${data.group || "daily"}`)}
     </div>
     <div class="analytics-grid">
       <article class="analytics-panel analytics-wide">
@@ -1441,7 +1528,7 @@ function renderTrafficRange(data) {
           <div>
             <h3>分组趋势</h3>
           </div>
-          <span class="soft-label">${escapeHtml(data.group || "daily")}</span>
+          <span class="soft-label">${escapeHtml(visibleGroups.length === groups.length ? (data.group || "daily") : `最近 ${visibleGroups.length} 组`)}</span>
         </div>
         <div class="analytics-axis">
           <span>0</span>
@@ -1449,7 +1536,7 @@ function renderTrafficRange(data) {
           <span>${escapeHtml(formatBytes(maxGroup))}</span>
         </div>
         <div class="analytics-group-list">
-          ${groups.length ? groups.map((group) => `
+          ${visibleGroups.length ? visibleGroups.map((group) => `
             <div class="analytics-group-row">
               <span class="analytics-label" title="${escapeHtml(group.label)}">${escapeHtml(group.label)}</span>
               <span class="analytics-track">
@@ -1457,6 +1544,7 @@ function renderTrafficRange(data) {
               </span>
               <span class="analytics-value">${escapeHtml(group.total?.total_human || "--")}</span>
             </div>`).join("") : `<div class="empty-state">暂无分组数据。</div>`}
+          ${groups.length > visibleGroups.length ? `<div class="compact-note">较早的 ${groups.length - visibleGroups.length} 组已隐藏，调整日期范围可查看。</div>` : ""}
         </div>
       </article>
       <article class="analytics-panel">
@@ -1464,12 +1552,12 @@ function renderTrafficRange(data) {
           <div>
             <h3>节点贡献</h3>
           </div>
-          <span class="soft-label">Top ${escapeHtml(String(topNodes.length || 0))}</span>
+          <span class="soft-label">${compactNodes.hidden ? "Top + 其余" : `Top ${escapeHtml(String(topNodes.length || 0))}`}</span>
         </div>
         <div class="analytics-node-bars">
           ${topNodes.length ? topNodes.map((node, index) => `
-            <button class="analytics-node-row" data-jump-node="${escapeHtml(node.uuid)}" title="跳到 ${escapeHtml(node.name)}">
-              <span class="analytics-rank">${index + 1}</span>
+            <${node.compact_other ? "div" : "button"} class="analytics-node-row ${node.compact_other ? "compact-other" : ""}" ${node.compact_other ? "" : `data-jump-node="${escapeHtml(node.uuid)}" title="跳到 ${escapeHtml(node.name)}"`}>
+              <span class="analytics-rank">${node.compact_other ? "..." : index + 1}</span>
               <span class="analytics-node-main">
                 <span class="analytics-node-title">${escapeHtml(node.name)}</span>
                 <span class="analytics-track">
@@ -1479,44 +1567,10 @@ function renderTrafficRange(data) {
                 <span class="tiny">下行 ${escapeHtml(node.down_human)} / 上行 ${escapeHtml(node.up_human)}</span>
               </span>
               <span class="analytics-value">${escapeHtml(node.total_human)}</span>
-            </button>`).join("") : `<div class="empty-state">这个区间暂无节点汇总。</div>`}
+            </${node.compact_other ? "div" : "button"}>`).join("") : `<div class="empty-state">这个区间暂无节点汇总。</div>`}
         </div>
       </article>
     </div>`;
-  if (nodes.length) {
-    $("traffic-range-result").innerHTML += `
-      <article class="analytics-panel">
-        <div class="panel-head compact-head">
-          <div>
-            <h3>节点明细</h3>
-          </div>
-          <span class="soft-label">${nodes.length} 个节点</span>
-        </div>
-        <div class="analytics-table-wrap">
-          <table class="analytics-table">
-            <thead>
-              <tr>
-                <th>节点</th>
-                <th>下行</th>
-                <th>上行</th>
-                <th>合计</th>
-                <th>占比</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${nodes.map((node) => `
-                <tr>
-                  <td><button class="text-btn inline-node-link" data-jump-node="${escapeHtml(node.uuid)}">${escapeHtml(node.name)}</button></td>
-                  <td>${escapeHtml(node.down_human)}</td>
-                  <td>${escapeHtml(node.up_human)}</td>
-                  <td><strong>${escapeHtml(node.total_human)}</strong></td>
-                  <td>${percentOf(node.total, data.total?.total).toFixed(1)}%</td>
-                </tr>`).join("")}
-            </tbody>
-          </table>
-        </div>
-      </article>`;
-  }
   bindNodeJumpButtons();
 }
 
@@ -1551,7 +1605,7 @@ async function loadSystemPage() {
   ]);
   renderSystemStatus(system);
   renderSystemConfig(config);
-  await loadTaskRuns("system-task-runs", $("task-run-filter").value, 8);
+  await loadTaskRuns("system-task-runs", $("task-run-filter").value, DISPLAY_LIMITS.taskRuns);
 }
 
 async function loadCurrentRoute(forceOverview = false) {
@@ -1733,7 +1787,7 @@ function bindEvents() {
   });
   $("load-traffic-range-btn").addEventListener("click", loadTrafficRange);
   $("traffic-range-group").addEventListener("change", loadTrafficRange);
-  $("task-run-filter").addEventListener("change", () => loadTaskRuns("system-task-runs", $("task-run-filter").value, 8));
+  $("task-run-filter").addEventListener("change", () => loadTaskRuns("system-task-runs", $("task-run-filter").value, DISPLAY_LIMITS.taskRuns));
   $("save-config-btn").addEventListener("click", saveSystemConfig);
   $("save-alert-config-btn").addEventListener("click", saveAlertConfig);
   $("prune-task-runs-btn").addEventListener("click", pruneTaskRuns);

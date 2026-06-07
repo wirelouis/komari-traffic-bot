@@ -219,6 +219,24 @@ class WebAppTests(unittest.TestCase):
         local_storage_lines = [line for line in app_js.splitlines() if "localStorage" in line]
         self.assertFalse(any("password" in line.lower() for line in local_storage_lines))
 
+    def test_frontend_compacts_data_heavy_views_by_default(self):
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        html = response.text
+        self.assertIn("<th>流量</th>", html)
+        self.assertIn("<th>健康</th>", html)
+        self.assertIn("<th>绑定</th>", html)
+        for old_heading in ("<th>CPU</th>", "<th>RAM</th>", "<th>Disk</th>"):
+            self.assertNotIn(old_heading, html)
+
+        app_js = (w.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+        self.assertIn("overviewNodes: 8", app_js)
+        self.assertIn("analyticsNodes: 10", app_js)
+        self.assertIn("compactTrafficRows", app_js)
+        self.assertNotIn("<h3>节点明细</h3>", app_js)
+        self.assertNotIn("调试详情", app_js)
+
     def test_brand_icon_static_asset(self):
         response = self.client.get("/static/komari-traffic-icon.svg")
 
