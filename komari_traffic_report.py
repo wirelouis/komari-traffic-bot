@@ -328,6 +328,10 @@ def human_bytes(n: int) -> str:
         x /= 1024
 
 
+def telegram_html_escape(value) -> str:
+    return html.escape(str(value or ""), quote=False)
+
+
 def now_dt() -> datetime:
     return datetime.now(TZ)
 
@@ -1940,7 +1944,7 @@ def top_lines(deltas: dict, n: int) -> list[str]:
     rows = []
     for i, (total, down, up, name) in enumerate(top, start=1):
         rows.append(
-            f"{i}️⃣ <b>{name}</b>：{human_bytes(total)}"
+            f"{i}️⃣ <b>{telegram_html_escape(name)}</b>：{human_bytes(total)}"
             f"（⬇️ {human_bytes(down)} / ⬆️ {human_bytes(up)}）"
         )
     return rows
@@ -2565,7 +2569,7 @@ def build_ai_data_pack() -> dict:
 def format_report(title: str, period_label: str, deltas: dict, reset_warnings: list[str], skipped: list[str] | None = None, include_top: bool = True) -> str:
     skipped = skipped or []
 
-    lines = [f"📊 <b>{title}</b>（{period_label}）", ""]
+    lines = [f"📊 <b>{telegram_html_escape(title)}</b>（{telegram_html_escape(period_label)}）", ""]
     total_up = 0
     total_down = 0
 
@@ -2574,7 +2578,7 @@ def format_report(title: str, period_label: str, deltas: dict, reset_warnings: l
         total_up += int(it["up"])
         total_down += int(it["down"])
         lines.append(
-            f"🖥 <b>{it['name']}</b>\n"
+            f"🖥 <b>{telegram_html_escape(it['name'])}</b>\n"
             f"⬇️ 下行：{human_bytes(it['down'])}\n"
             f"⬆️ 上行：{human_bytes(it['up'])}\n"
         )
@@ -2592,30 +2596,30 @@ def format_report(title: str, period_label: str, deltas: dict, reset_warnings: l
     if skipped:
         lines.append("")
         lines.append("⚠️ <b>以下节点因异常被跳过</b>：")
-        lines.append("、".join(skipped[:30]) + ("……" if len(skipped) > 30 else ""))
+        lines.append("、".join(telegram_html_escape(item) for item in skipped[:30]) + ("……" if len(skipped) > 30 else ""))
 
     if reset_warnings:
         lines.append("")
         lines.append("⚠️ <b>检测到计数器可能重置</b>（已兜底）：")
-        lines.append("、".join(reset_warnings))
+        lines.append("、".join(telegram_html_escape(item) for item in reset_warnings))
 
     return "\n".join(lines)
 
 
 def format_top_only_message(period_label: str, deltas: dict, reset_warnings: list[str], skipped: list[str] | None = None) -> str:
     skipped = skipped or []
-    lines = [f"🔥 <b>Top {TOP_N} 消耗榜</b>（上下行合计）", f"⏱ {period_label}", ""]
+    lines = [f"🔥 <b>Top {TOP_N} 消耗榜</b>（上下行合计）", f"⏱ {telegram_html_escape(period_label)}", ""]
     lines.extend(top_lines(deltas, n=TOP_N))
 
     if skipped:
         lines.append("")
         lines.append("⚠️ <b>以下节点因异常被跳过</b>：")
-        lines.append("、".join(skipped[:30]) + ("……" if len(skipped) > 30 else ""))
+        lines.append("、".join(telegram_html_escape(item) for item in skipped[:30]) + ("……" if len(skipped) > 30 else ""))
 
     if reset_warnings:
         lines.append("")
         lines.append("⚠️ <b>检测到计数器可能重置</b>（已兜底）：")
-        lines.append("、".join(reset_warnings))
+        lines.append("、".join(telegram_html_escape(item) for item in reset_warnings))
 
     return "\n".join(lines)
 
@@ -3015,7 +3019,7 @@ def parse_mute_hours_arg(value: str) -> int:
 
 
 def _alert_escape(value) -> str:
-    return html.escape(str(value), quote=False)
+    return telegram_html_escape(value)
 
 
 def _alert_event(key: str, alert_type: str, title: str, body: str) -> dict:

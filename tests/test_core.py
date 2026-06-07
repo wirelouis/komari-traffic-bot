@@ -181,6 +181,35 @@ class CoreTests(unittest.TestCase):
         self.assertIn("middle", lines[1])
         self.assertEqual(len(lines), 2)
 
+    def test_telegram_reports_escape_dynamic_html(self):
+        deltas = {
+            "u1": {"name": "node <bad> & edge", "up": 1, "down": 2},
+        }
+
+        full = k.format_report(
+            "Title <T>",
+            "range <1>",
+            deltas,
+            reset_warnings=["reset <node>"],
+            skipped=["skip <node>(timeout)"],
+            include_top=True,
+        )
+        top_only = k.format_top_only_message(
+            "range <1>",
+            deltas,
+            reset_warnings=["reset <node>"],
+            skipped=["skip <node>(timeout)"],
+        )
+
+        for message in (full, top_only):
+            self.assertIn("<b>node &lt;bad&gt; &amp; edge</b>", message)
+            self.assertIn("range &lt;1&gt;", message)
+            self.assertIn("skip &lt;node&gt;(timeout)", message)
+            self.assertIn("reset &lt;node&gt;", message)
+            self.assertNotIn("<bad>", message)
+            self.assertNotIn("<node>", message)
+        self.assertIn("Title &lt;T&gt;", full)
+
     def test_node_missing_alert_triggers_and_recovers(self):
         k.save_samples({
             "samples": [
