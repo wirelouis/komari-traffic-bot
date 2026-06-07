@@ -227,6 +227,7 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("<th>流量</th>", html)
         self.assertIn("<th>健康</th>", html)
         self.assertIn("<th>绑定</th>", html)
+        self.assertIn('id="export-traffic-range-btn"', html)
         for old_heading in ("<th>CPU</th>", "<th>RAM</th>", "<th>Disk</th>"):
             self.assertNotIn(old_heading, html)
 
@@ -234,6 +235,7 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("overviewNodes: 8", app_js)
         self.assertIn("analyticsNodes: 10", app_js)
         self.assertIn("compactTrafficRows", app_js)
+        self.assertIn("/api/traffic/range/export.csv", app_js)
         self.assertNotIn("<h3>节点明细</h3>", app_js)
         self.assertNotIn("调试详情", app_js)
 
@@ -607,6 +609,15 @@ class WebAppTests(unittest.TestCase):
         full_payload = full_response.json()["data"]
         self.assertIn("nodes", full_payload["groups"][0])
         self.assertNotIn("compact", full_payload)
+
+        csv_response = self.client.get("/api/traffic/range/export.csv?from=2026-06-01&to=2026-06-02&group=weekly")
+        self.assertEqual(csv_response.status_code, 200, csv_response.text)
+        self.assertEqual(csv_response.headers["content-type"].split(";")[0], "text/csv")
+        self.assertIn("attachment;", csv_response.headers["content-disposition"])
+        csv_text = csv_response.content.decode("utf-8-sig")
+        self.assertIn("uuid,name,down_bytes,up_bytes,total_bytes", csv_text)
+        self.assertIn("n1,Node One,24,13,37", csv_text)
+        self.assertIn("n2,Node Two,7,5,12", csv_text)
 
     def test_task_runs_api_filters_and_formats(self):
         self.login()

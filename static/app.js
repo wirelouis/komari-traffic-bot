@@ -321,6 +321,37 @@ async function postJson(path, body = {}) {
   return api(path, { method: "POST", body: JSON.stringify(body) });
 }
 
+function trafficRangeQuery(extra = {}) {
+  const query = new URLSearchParams({
+    from: $("traffic-range-from").value,
+    to: $("traffic-range-to").value,
+    group: $("traffic-range-group").value,
+  });
+  Object.entries(extra).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== "") query.set(key, String(value));
+  });
+  return query;
+}
+
+function filenameFromDisposition(header, fallback) {
+  const text = String(header || "");
+  const utf8 = text.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8) return decodeURIComponent(utf8[1]);
+  const plain = text.match(/filename="?([^";]+)"?/i);
+  return plain ? plain[1] : fallback;
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 function normalizeRoute(value) {
   let path = "/";
   try {
@@ -1594,16 +1625,44 @@ async function loadTrafficRange() {
   $("analytics-status-pill").textContent = "查询中";
   $("analytics-status-pill").classList.remove("good", "bad");
   try {
-    const query = new URLSearchParams({
-      from: $("traffic-range-from").value,
-      to: $("traffic-range-to").value,
-      group: $("traffic-range-group").value,
-    });
+    const query = trafficRangeQuery();
     renderTrafficRange(await api(`/api/traffic/range?${query.toString()}`));
   } catch (error) {
     $("analytics-status-pill").textContent = "异常";
     $("analytics-status-pill").classList.add("bad");
     $("traffic-range-result").innerHTML = `<div class="empty-state">${escapeHtml(friendlyError(error.message))}</div>`;
+  }
+}
+
+async function exportTrafficRangeCsv() {
+  setDefaultRangeDates();
+  const button = $("export-traffic-range-btn");
+  button.disabled = true;
+  $("analytics-status-pill").textContent = "导出中";
+  $("analytics-status-pill").classList.remove("good", "bad");
+  try {
+    const query = trafficRangeQuery();
+    const response = await fetch(`/api/traffic/range/export.csv?${query.toString()}`, {
+      credentials: "same-origin",
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null);
+      throw new Error(friendlyError(payload?.error?.message || "导出失败"));
+    }
+    const blob = await response.blob();
+    const filename = filenameFromDisposition(
+      response.headers.get("content-disposition"),
+      `komari-traffic-${$("traffic-range-from").value}-${$("traffic-range-to").value}.csv`,
+    );
+    downloadBlob(blob, filename);
+    $("analytics-status-pill").textContent = "已导出";
+    $("analytics-status-pill").classList.add("good");
+  } catch (error) {
+    $("analytics-status-pill").textContent = "导出失败";
+    $("analytics-status-pill").classList.add("bad");
+    $("traffic-range-result").innerHTML = `<div class="empty-state">${escapeHtml(friendlyError(error.message))}</div>`;
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -1800,6 +1859,7 @@ function bindEvents() {
     button.addEventListener("click", () => fillAiPrompt(button));
   });
   $("load-traffic-range-btn").addEventListener("click", loadTrafficRange);
+  $("export-traffic-range-btn").addEventListener("click", exportTrafficRangeCsv);
   $("traffic-range-group").addEventListener("change", loadTrafficRange);
   $("task-run-filter").addEventListener("change", () => loadTaskRuns("system-task-runs", $("task-run-filter").value, DISPLAY_LIMITS.taskRuns));
   $("save-config-btn").addEventListener("click", saveSystemConfig);

@@ -2,8 +2,10 @@
 # -*- coding: utf-8 -*-
 
 import base64
+import csv
 import hashlib
 import hmac
+import io
 import os
 import re
 import secrets
@@ -14,7 +16,7 @@ from typing import Any
 from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -480,6 +482,44 @@ def compact_traffic_range_payload(data: dict, node_limit: int = ANALYTICS_NODE_L
     payload["group_count"] = len(groups)
     payload["compact"] = True
     return payload
+
+
+def traffic_range_csv_response(data: dict) -> Response:
+    output = io.StringIO()
+    output.write("\ufeff")
+    writer = csv.writer(output)
+    writer.writerow([
+        "uuid",
+        "name",
+        "down_bytes",
+        "up_bytes",
+        "total_bytes",
+        "down",
+        "up",
+        "total",
+        "share_percent",
+    ])
+    total = max(1, int((data.get("total") or {}).get("total") or 0))
+    for node in data.get("nodes", []) or []:
+        node_total = int(node.get("total", 0) or 0)
+        writer.writerow([
+            node.get("uuid", ""),
+            node.get("name", ""),
+            int(node.get("down", 0) or 0),
+            int(node.get("up", 0) or 0),
+            node_total,
+            node.get("down_human", ""),
+            node.get("up_human", ""),
+            node.get("total_human", ""),
+            f"{(node_total / total) * 100:.2f}",
+        ])
+    filename = f"komari-traffic-{data.get('from', 'from')}-{data.get('to', 'to')}.csv"
+    quoted = quote(filename)
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f"attachment; filename=\"{filename}\"; filename*=UTF-8''{quoted}"},
+    )
 
 
 def seconds_text(seconds: int) -> str:
@@ -1228,6 +1268,22 @@ async def traffic_range(
     except Exception as exc:
         return api_error(str(exc), status_code=400, code="invalid_range")
     return api_ok(data)
+
+
+@app.get("/api/traffic/range/export.csv")
+async def traffic_range_export_csv(
+    from_day: str = Query(..., alias="from"),
+    to_day: str = Query(..., alias="to"),
+    group: str = "daily",
+    _user: str = Depends(current_user),
+):
+    try:
+        start = k.parse_date_yyyy_mm_dd(from_day)
+        end = k.parse_date_yyyy_mm_dd(to_day)
+        data = k.traffic_range_summary(start, end, group=group)
+    except Exception as exc:
+        return api_error(str(exc), status_code=400, code="invalid_range")
+    return traffic_range_csv_response(data)
 
 
 @app.get("/api/tasks/runs")

@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Komari Traffic Console</title>
-  <link rel="icon" type="image/svg+xml" href="/static/komari-traffic-icon.svg?v=20260607-focus1">
-  <link rel="stylesheet" href="/static/styles.css?v=20260607-focus1">
+  <link rel="icon" type="image/svg+xml" href="/static/komari-traffic-icon.svg?v=20260607-export1">
+  <link rel="stylesheet" href="/static/styles.css?v=20260607-export1">
 </head>
 <body>
   <div id="route-progress" class="route-progress" aria-hidden="true"></div>
@@ -13,7 +13,7 @@
     <section class="login-panel">
       <div class="login-brand">
         <span class="brand-mark">
-          <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260607-focus1" alt="">
+          <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260607-export1" alt="">
           <span class="brand-fallback" hidden>K</span>
         </span>
         <div>
@@ -46,7 +46,7 @@
       <div class="sidebar-head">
         <a class="brand" href="/" data-route="/" aria-label="Komari Traffic 总览">
           <span class="brand-mark">
-            <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260607-focus1" alt="">
+            <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260607-export1" alt="">
             <span class="brand-fallback" hidden>K</span>
           </span>
           <span class="brand-copy">
@@ -428,6 +428,7 @@
               <option value="monthly">按月</option>
             </select>
             <button id="load-traffic-range-btn" class="ghost-btn">查询</button>
+            <button id="export-traffic-range-btn" class="ghost-btn">导出 CSV</button>
           </div>
           <div id="traffic-range-result" class="stacked range-result"></div>
         </section>
@@ -506,6 +507,6 @@
     </section>
   </main>
 
-  <script src="/static/app.js?v=20260607-focus1"></script>
+  <script src="/static/app.js?v=20260607-export1"></script>
 </body>
 </html>
