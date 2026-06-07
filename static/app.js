@@ -167,6 +167,131 @@ function applyThemeMode() {
   });
 }
 
+// --- Motion helpers --------------------------------------------------------
+const prefersReducedMotion = () =>
+  Boolean(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+
+let progressHideTimer = null;
+function startRouteProgress() {
+  const bar = $("route-progress");
+  if (!bar) return;
+  window.clearTimeout(progressHideTimer);
+  bar.classList.remove("done");
+  void bar.offsetWidth; // restart the slide cleanly on rapid navigation
+  bar.classList.add("loading");
+}
+function stopRouteProgress() {
+  const bar = $("route-progress");
+  if (!bar) return;
+  bar.classList.remove("loading");
+  bar.classList.add("done");
+  progressHideTimer = window.setTimeout(() => bar.classList.remove("done"), 360);
+}
+
+function retriggerPop(el) {
+  if (!el) return;
+  el.classList.remove("kt-pop");
+  void el.offsetWidth;
+  el.classList.add("kt-pop");
+}
+
+// Animate a metric value: count up the numeric part (keeping its unit suffix),
+// otherwise just set the text with a subtle pop. Honors reduced-motion.
+function setMetricValue(el, finalText) {
+  if (!el) return;
+  const text = String(finalText ?? "--");
+  const match = text.match(/^(-?\d[\d,]*(?:\.\d+)?)(\s*\D[\s\S]*)?$/);
+  if (!match || prefersReducedMotion()) {
+    el.textContent = text;
+    if (!match && !prefersReducedMotion()) retriggerPop(el);
+    return;
+  }
+  const target = parseFloat(match[1].replace(/,/g, ""));
+  const suffix = match[2] || "";
+  const decimals = (match[1].split(".")[1] || "").length;
+  if (!Number.isFinite(target)) {
+    el.textContent = text;
+    return;
+  }
+  const duration = 650;
+  const startTime = performance.now();
+  function step(now) {
+    const t = Math.min(1, (now - startTime) / duration);
+    const eased = 1 - Math.pow(1 - t, 3);
+    el.textContent = `${(target * eased).toFixed(decimals)}${suffix}`;
+    if (t < 1) requestAnimationFrame(step);
+    else el.textContent = `${target.toFixed(decimals)}${suffix}`;
+  }
+  requestAnimationFrame(step);
+}
+
+// --- Skeleton placeholders -------------------------------------------------
+function skelCards(n) {
+  return Array.from({ length: n }, () => `<div class="kt-skeleton kt-skel-card"></div>`).join("");
+}
+function skelRows(n) {
+  return `<div class="kt-skel-stack">${Array.from({ length: n }, () => `<div class="kt-skeleton kt-skel-row"></div>`).join("")}</div>`;
+}
+function skelTableRows(rows, cols) {
+  const cells = Array.from({ length: cols }, () => `<td><div class="kt-skeleton kt-skel-line lg"></div></td>`).join("");
+  return Array.from({ length: rows }, () => `<tr>${cells}</tr>`).join("");
+}
+function setSkel(id, html) {
+  const el = $(id);
+  // Only show a skeleton when the container has no real content yet (first paint).
+  // Avoids flashing skeletons over existing data on refresh / navigating back.
+  if (el && el.children.length === 0) el.innerHTML = html;
+}
+function showRouteSkeleton(route) {
+  switch (route) {
+    case "/":
+      setSkel("overview-health", skelCards(4));
+      setSkel("top-list", skelRows(4));
+      setSkel("trend-chart", `<div class="kt-skeleton kt-skel-chart"></div>`);
+      break;
+    case "/nodes":
+      setSkel("nodes-table", skelTableRows(6, 9));
+      break;
+    case "/alerts":
+      setSkel("alerts-summary", skelCards(4));
+      setSkel("alerts-body", skelRows(2));
+      setSkel("alert-thresholds", skelRows(5));
+      break;
+    case "/telegram":
+      setSkel("telegram-summary", skelCards(4));
+      setSkel("telegram-schedules", skelRows(2));
+      setSkel("telegram-task-runs", skelRows(3));
+      break;
+    case "/ai":
+      setSkel("ai-summary", skelCards(4));
+      setSkel("ai-sources", skelRows(3));
+      break;
+    case "/system":
+      setSkel("system-summary", skelCards(4));
+      setSkel("system-services", skelRows(3));
+      setSkel("system-data", skelRows(2));
+      setSkel("system-task-runs", skelRows(3));
+      break;
+    default:
+      break;
+  }
+}
+
+// On a failed load, replace any skeleton placeholders still showing in the
+// active view with a friendly empty state so nothing shimmers forever.
+function clearRouteSkeleton() {
+  const view = document.querySelector(".route-view:not(.hidden)");
+  if (!view) return;
+  const containers = new Set();
+  view.querySelectorAll(".kt-skeleton").forEach((el) => {
+    const holder = el.closest("[id]");
+    if (holder && holder !== view) containers.add(holder);
+  });
+  containers.forEach((c) => {
+    c.innerHTML = `<div class="empty-state">暂时无法加载，请稍后重试。</div>`;
+  });
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     credentials: "same-origin",
@@ -438,9 +563,9 @@ function renderOverviewHealth(system) {
 function renderOverview(data) {
   state.overview = data;
   const periods = data.periods || {};
-  $("metric-today").textContent = totalText(periods.today);
-  $("metric-week").textContent = totalText(periods.week);
-  $("metric-month").textContent = totalText(periods.month);
+  setMetricValue($("metric-today"), totalText(periods.today));
+  setMetricValue($("metric-week"), totalText(periods.week));
+  setMetricValue($("metric-month"), totalText(periods.month));
   $("metric-today-note").textContent = noteText(periods.today);
   $("metric-week-note").textContent = noteText(periods.week);
   $("metric-month-note").textContent = noteText(periods.month);
@@ -1397,7 +1522,7 @@ function renderTrafficRange(data) {
 
 async function loadTrafficRange() {
   setDefaultRangeDates();
-  $("traffic-range-result").innerHTML = `<div class="empty-state">查询 SQLite 区间统计中...</div>`;
+  $("traffic-range-result").innerHTML = `<div class="range-summary">${skelCards(4)}</div><div class="kt-skeleton kt-skel-chart"></div>`;
   $("analytics-status-pill").textContent = "查询中";
   $("analytics-status-pill").classList.remove("good", "bad");
   try {
@@ -1431,6 +1556,8 @@ async function loadSystemPage() {
 
 async function loadCurrentRoute(forceOverview = false) {
   updateStatus("加载中", true);
+  startRouteProgress();
+  showRouteSkeleton(state.route);
   try {
     if (forceOverview || state.route === "/") await loadOverview();
     if (state.route === "/nodes") await loadNodes(state.nodesHours);
@@ -1446,6 +1573,9 @@ async function loadCurrentRoute(forceOverview = false) {
       return;
     }
     updateStatus(friendlyError(error.message), false);
+  } finally {
+    clearRouteSkeleton();
+    stopRouteProgress();
   }
 }
 
