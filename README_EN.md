@@ -3,9 +3,9 @@
   <a href="./README_EN.md">English</a>
 </p>
 
-# komari-traffic-bot (Docker Edition)
+# komari-traffic-hub (Docker Edition)
 
-A **Dockerized traffic statistics extension** for **Komari Probe**, providing:
+A **Dockerized traffic statistics management hub** for **Komari Probe**, providing:
 
 - 📊 Daily / Weekly / Monthly traffic reports via Telegram
 - 🔥 Top N traffic consumers (supports `/top 6h`, `/top week`, etc.)
@@ -178,7 +178,7 @@ version: "3.9"
 
 services:
   bot:
-    image: ghcr.io/wirelouis/komari-traffic-bot:latest
+    image: ghcr.io/wirelouis/komari-traffic-hub:latest
     env_file: .env
     environment:
       - TZ=Asia/Shanghai
@@ -194,7 +194,7 @@ services:
     command: ["python", "/app/komari_traffic_report.py", "listen"]
 
   web:
-    image: ghcr.io/wirelouis/komari-traffic-bot:latest
+    image: ghcr.io/wirelouis/komari-traffic-hub:latest
     env_file: .env
     environment:
       - TZ=Asia/Shanghai
@@ -325,13 +325,13 @@ This version does not add new required environment variables. If you are using a
 
 ### Confirm `latest` Is Fresh
 
-After a push to `main`, GitHub Actions builds and publishes `ghcr.io/wirelouis/komari-traffic-bot:latest`. On your VPS, update and verify with:
+After a push to `main`, GitHub Actions builds and publishes `ghcr.io/wirelouis/komari-traffic-hub:latest`. On your VPS, update and verify with:
 
 ```
 docker compose pull
 docker compose up -d
 docker compose ps
-docker image inspect ghcr.io/wirelouis/komari-traffic-bot:latest --format '{{.Id}}'
+docker image inspect ghcr.io/wirelouis/komari-traffic-hub:latest --format '{{.Id}}'
 ```
 
 To confirm the image is the one just built by GitHub Actions, check that the repository Actions page shows `build-and-publish` succeeded, then compare the digest printed by `docker compose pull` on the VPS. After upgrading, open the Web console System page and check version/commit, SQLite, configuration health, and recent task runs. App-managed schedules are executed by the `bot` service; the Web console reads recent results from `traffic.db`.

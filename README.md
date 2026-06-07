@@ -3,9 +3,9 @@
   <a href="./README_EN.md">English</a>
 </p>
 
-# komari-traffic-bot（Docker 版）
+# komari-traffic-hub（Docker 版）
 
-基于 **Komari 探针** 的流量统计增强工具，提供：
+基于 **Komari 探针** 的流量统计管理中心，提供：
 
 - 📊 Telegram **流量日报 / 周报 / 月报**
 - 🔥 **Top N 流量消耗榜**（支持 `/top 6h`、`/top week` 等任意时间窗口）
@@ -173,7 +173,7 @@ version: "3.9"
 
 services:
   bot:
-    image: ghcr.io/wirelouis/komari-traffic-bot:latest
+    image: ghcr.io/wirelouis/komari-traffic-hub:latest
     env_file: .env
     environment:
       - TZ=Asia/Shanghai
@@ -189,7 +189,7 @@ services:
     command: ["python", "/app/komari_traffic_report.py", "listen"]
 
   web:
-    image: ghcr.io/wirelouis/komari-traffic-bot:latest
+    image: ghcr.io/wirelouis/komari-traffic-hub:latest
     env_file: .env
     environment:
       - TZ=Asia/Shanghai
@@ -364,13 +364,13 @@ docker compose ps
 
 ### 确认 latest 已更新
 
-推送到 `main` 后，GitHub Actions 会自动构建并发布 `ghcr.io/wirelouis/komari-traffic-bot:latest`。在 VPS 上可以按下面顺序确认：
+推送到 `main` 后，GitHub Actions 会自动构建并发布 `ghcr.io/wirelouis/komari-traffic-hub:latest`。在 VPS 上可以按下面顺序确认：
 
 ```
 docker compose pull
 docker compose up -d
 docker compose ps
-docker image inspect ghcr.io/wirelouis/komari-traffic-bot:latest --format '{{.Id}}'
+docker image inspect ghcr.io/wirelouis/komari-traffic-hub:latest --format '{{.Id}}'
 ```
 
 如果你想确认拉到的是 GitHub Actions 刚构建的版本，可以在 GitHub 仓库的 Actions 页面查看 `build-and-publish` 是否成功，再对比 VPS 上 `docker compose pull` 输出的 digest。升级后打开 Web 面板的「系统」页，检查版本/commit、SQLite、配置健康、最近任务运行记录是否正常；应用内计划任务由 `bot` 服务执行，Web 页会通过 `traffic.db` 展示最近运行结果。
