@@ -116,6 +116,42 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("samesite=lax", cookie)
         self.assertIn("secure", cookie)
 
+    def test_forwarded_same_origin_unsafe_request_is_allowed(self):
+        response = self.client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "test-password"},
+            headers={
+                "origin": "https://panel.example",
+                "x-forwarded-proto": "https",
+                "x-forwarded-host": "panel.example",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["ok"])
+        self.assertIn("secure", response.headers["set-cookie"].lower())
+
+    def test_cross_site_unsafe_requests_are_rejected(self):
+        response = self.client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "test-password"},
+            headers={"origin": "https://evil.example"},
+        )
+
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(response.json()["error"]["code"], "csrf_blocked")
+        self.assertEqual(response.headers["x-frame-options"], "DENY")
+
+        self.login()
+        response = self.client.post(
+            "/api/alerts/mute",
+            json={"hours": 1},
+            headers={"origin": "https://evil.example"},
+        )
+
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(response.json()["error"]["code"], "csrf_blocked")
+
     def test_login_uses_session_cookie_by_default(self):
         response = self.client.post(
             "/api/auth/login",

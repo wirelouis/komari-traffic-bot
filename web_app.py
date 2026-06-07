@@ -13,7 +13,7 @@ import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -33,6 +33,7 @@ LOGIN_RATE_LIMIT_ATTEMPTS = 5
 LOGIN_RATE_LIMIT_WINDOW_SECONDS = 5 * 60
 LOGIN_RATE_LIMIT_LOCK_SECONDS = 10 * 60
 LOGIN_RATE_LIMIT_MAX_KEYS = 1000
+UNSAFE_HTTP_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 OVERVIEW_NODE_LIMIT = 8
 ANALYTICS_NODE_LIMIT = 10
 WEB_SESSION_SECRET = os.environ.get("WEB_SESSION_SECRET", "").strip() or secrets.token_urlsafe(32)
@@ -147,11 +148,10 @@ def api_error(message: str, status_code: int = 400, code: str = "error", **extra
 
 @app.middleware("http")
 async def security_headers_middleware(request: Request, call_next):
+    if not unsafe_request_has_same_origin(request):
+        return add_security_headers(api_error("cross-site requests are not allowed", status_code=403, code="csrf_blocked"))
     response = await call_next(request)
-    response.headers.setdefault("X-Frame-Options", "DENY")
-    response.headers.setdefault("X-Content-Type-Options", "nosniff")
-    response.headers.setdefault("Referrer-Policy", "no-referrer")
-    return response
+    return add_security_headers(response)
 
 
 @app.exception_handler(HTTPException)
@@ -164,6 +164,45 @@ async def http_error_handler(_request: Request, exc: HTTPException):
 @app.exception_handler(Exception)
 async def error_handler(_request: Request, exc: Exception):
     return api_error(str(exc), status_code=500, code=type(exc).__name__)
+
+
+def add_security_headers(response: Response) -> Response:
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    return response
+
+
+def forwarded_header_value(request: Request, name: str) -> str:
+    return request.headers.get(name, "").split(",")[0].strip()
+
+
+def request_public_origin(request: Request) -> str:
+    scheme = forwarded_header_value(request, "x-forwarded-proto").lower() or request.url.scheme
+    host = forwarded_header_value(request, "x-forwarded-host") or request.headers.get("host", "") or request.url.netloc
+    return f"{scheme}://{host}".lower()
+
+
+def same_origin(request: Request, value: str) -> bool:
+    try:
+        parsed = urlsplit(value)
+    except Exception:
+        return False
+    if not parsed.scheme or not parsed.netloc:
+        return False
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}" == request_public_origin(request)
+
+
+def unsafe_request_has_same_origin(request: Request) -> bool:
+    if request.method.upper() not in UNSAFE_HTTP_METHODS:
+        return True
+    origin = request.headers.get("origin", "").strip()
+    if origin:
+        return same_origin(request, origin)
+    referer = request.headers.get("referer", "").strip()
+    if referer:
+        return same_origin(request, referer)
+    return True
 
 
 def web_username() -> str:
@@ -179,12 +218,12 @@ def web_password_configured() -> bool:
 
 
 def request_is_https(request: Request) -> bool:
-    forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+    forwarded_proto = forwarded_header_value(request, "x-forwarded-proto").lower()
     return request.url.scheme == "https" or forwarded_proto == "https"
 
 
 def login_rate_key(request: Request) -> str:
-    forwarded_for = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+    forwarded_for = forwarded_header_value(request, "x-forwarded-for")
     host = request.client.host if request.client else ""
     return forwarded_for or host or "unknown"
 
