@@ -610,8 +610,11 @@ def build_telegram_status_struct() -> dict:
 
 def schedule_response(schedule: dict) -> dict:
     item = k.normalize_report_schedule(schedule)
+    raw_chat = str(item.get("chat") or "").strip()
     item["label"] = k.schedule_label(item)
-    item["chat_masked"] = mask_value(item.get("chat") or k.TELEGRAM_CHAT_ID)
+    item["chat"] = ""
+    item["uses_default_chat"] = not bool(raw_chat)
+    item["chat_masked"] = mask_value(raw_chat or k.TELEGRAM_CHAT_ID)
     next_run = k.schedule_next_run_at(item)
     item["next_run"] = next_run or 0
     item["next_run_text"] = timestamp_text(next_run)
@@ -1499,6 +1502,8 @@ async def run_schedule_now(schedule_id: str, _user: str = Depends(current_user))
         result = k.run_report_schedule(item, source="web:run-now")
     except Exception as exc:
         return api_error(str(exc), status_code=502, code=type(exc).__name__)
+    if isinstance(result.get("schedule"), dict):
+        result["schedule"] = schedule_response(result["schedule"])
     result["chat"] = mask_value(result.get("chat", ""))
     return api_ok(result)
 

@@ -612,6 +612,56 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"]["code"], "invalid_schedule")
 
+    def test_schedule_api_masks_custom_chat_values(self):
+        self.login()
+        create_response = self.client.post("/api/schedules", json={
+            "enabled": True,
+            "scope": "daily",
+            "mode": "full",
+            "time": "08:15",
+            "weekday": 0,
+            "month_day": 1,
+            "chat": "987654321",
+        })
+
+        self.assertEqual(create_response.status_code, 200, create_response.text)
+        created = create_response.json()["data"]["schedule"]
+        self.assertEqual(created["chat"], "")
+        self.assertFalse(created["uses_default_chat"])
+        self.assertEqual(created["chat_masked"], "987***321")
+        self.assertNotIn("987654321", create_response.text)
+
+        list_response = self.client.get("/api/schedules")
+        self.assertEqual(list_response.status_code, 200, list_response.text)
+        self.assertNotIn("987654321", list_response.text)
+
+        schedule_id = created["id"]
+        run_mock = Mock(return_value={
+            "sent": True,
+            "chat": "987654321",
+            "schedule": {
+                "id": schedule_id,
+                "enabled": True,
+                "scope": "daily",
+                "mode": "full",
+                "time": "08:15",
+                "weekday": 0,
+                "month_day": 1,
+                "chat": "987654321",
+            },
+            "label": "每日 08:15 发送完整日报",
+        })
+        self.patch_attr(k, "run_report_schedule", run_mock)
+
+        run_response = self.client.post(f"/api/schedules/{schedule_id}/run-now")
+
+        self.assertEqual(run_response.status_code, 200, run_response.text)
+        payload = run_response.json()["data"]
+        self.assertEqual(payload["chat"], "987***321")
+        self.assertEqual(payload["schedule"]["chat"], "")
+        self.assertEqual(payload["schedule"]["chat_masked"], "987***321")
+        self.assertNotIn("987654321", run_response.text)
+
     def test_traffic_range_api_returns_sqlite_rollup(self):
         self.login()
         k.upsert_daily_usage("2026-06-01", {
