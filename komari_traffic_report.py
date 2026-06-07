@@ -376,17 +376,25 @@ def parse_date_yyyy_mm_dd(value: str) -> date:
 
 
 def save_json_atomic(path: str, data):
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    path = str(path)
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.{secrets.token_urlsafe(6)}.tmp"
     try:
-        os.replace(tmp, path)
-    except OSError as e:
-        if e.errno != errno.EXDEV:
-            raise
-        with open(path, "w", encoding="utf-8") as dst, open(tmp, "r", encoding="utf-8") as src:
-            dst.write(src.read())
-        os.unlink(tmp)
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        try:
+            os.replace(tmp, path)
+        except OSError as e:
+            if e.errno != errno.EXDEV:
+                raise
+            with open(path, "w", encoding="utf-8") as dst, open(tmp, "r", encoding="utf-8") as src:
+                dst.write(src.read())
+            os.unlink(tmp)
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except OSError:
+            pass
 
 
 def runtime_config_path() -> str:

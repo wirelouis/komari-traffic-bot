@@ -147,6 +147,22 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             k.parse_bytes_value("10XB", "TEST_BYTES")
 
+    def test_save_json_atomic_uses_unique_temp_file(self):
+        target = self.tmp_path / "state.json"
+        fixed_tmp = self.tmp_path / "state.json.tmp"
+        fixed_tmp.write_text("sentinel", encoding="utf-8")
+
+        k.save_json_atomic(str(target), {"ok": True})
+
+        self.assertEqual(k.load_json_strict(str(target)), {"ok": True})
+        self.assertEqual(fixed_tmp.read_text(encoding="utf-8"), "sentinel")
+        leftovers = [
+            path.name
+            for path in self.tmp_path.glob("state.json.*.tmp")
+            if path.name != "state.json.tmp"
+        ]
+        self.assertEqual(leftovers, [])
+
     def test_silence_window_supports_cross_midnight(self):
         late = datetime(2026, 6, 6, 23, 30, tzinfo=k.TZ)
         early = datetime(2026, 6, 6, 6, 30, tzinfo=k.TZ)
