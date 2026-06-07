@@ -163,6 +163,21 @@ class CoreTests(unittest.TestCase):
         ]
         self.assertEqual(leftovers, [])
 
+    def test_save_archive_month_uses_unique_temp_file(self):
+        fixed_tmp = self.tmp_path / "history-2026-06.json.gz.tmp"
+        fixed_tmp.write_text("sentinel", encoding="utf-8")
+
+        k.save_archive_month("2026-06", {"days": {"2026-06-01": {"n1": {"down": 2}}}})
+
+        self.assertEqual(k.load_archive_month("2026-06")["days"]["2026-06-01"]["n1"]["down"], 2)
+        self.assertEqual(fixed_tmp.read_text(encoding="utf-8"), "sentinel")
+        leftovers = [
+            path.name
+            for path in self.tmp_path.glob("history-2026-06.json.gz.*.tmp")
+            if path.name != "history-2026-06.json.gz.tmp"
+        ]
+        self.assertEqual(leftovers, [])
+
     def test_silence_window_supports_cross_midnight(self):
         late = datetime(2026, 6, 6, 23, 30, tzinfo=k.TZ)
         early = datetime(2026, 6, 6, 6, 30, tzinfo=k.TZ)

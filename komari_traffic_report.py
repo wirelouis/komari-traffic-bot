@@ -375,9 +375,14 @@ def parse_date_yyyy_mm_dd(value: str) -> date:
     return datetime.strptime(value, "%Y-%m-%d").date()
 
 
+def unique_temp_path(path: str) -> str:
+    path = str(path)
+    return f"{path}.{os.getpid()}.{threading.get_ident()}.{secrets.token_urlsafe(6)}.tmp"
+
+
 def save_json_atomic(path: str, data):
     path = str(path)
-    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.{secrets.token_urlsafe(6)}.tmp"
+    tmp = unique_temp_path(path)
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -2654,10 +2659,17 @@ def load_archive_month(ym: str) -> dict:
 
 def save_archive_month(ym: str, data: dict):
     path = archive_path_for_month(ym)
-    tmp = path + ".tmp"
-    with gzip.open(tmp, "wt", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False)
-    os.replace(tmp, path)
+    tmp = unique_temp_path(path)
+    try:
+        with gzip.open(tmp, "wt", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp, path)
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except OSError:
+            pass
 
 
 def history_append(day_str: str, deltas: dict):
