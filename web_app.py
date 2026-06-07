@@ -32,6 +32,7 @@ SESSION_REMEMBER_SECONDS = 30 * 24 * 3600
 LOGIN_RATE_LIMIT_ATTEMPTS = 5
 LOGIN_RATE_LIMIT_WINDOW_SECONDS = 5 * 60
 LOGIN_RATE_LIMIT_LOCK_SECONDS = 10 * 60
+LOGIN_RATE_LIMIT_MAX_KEYS = 1000
 OVERVIEW_NODE_LIMIT = 8
 ANALYTICS_NODE_LIMIT = 10
 WEB_SESSION_SECRET = os.environ.get("WEB_SESSION_SECRET", "").strip() or secrets.token_urlsafe(32)
@@ -188,8 +189,28 @@ def login_rate_key(request: Request) -> str:
     return forwarded_for or host or "unknown"
 
 
+def prune_login_failures(now_ts: float | None = None):
+    now_ts = time.time() if now_ts is None else now_ts
+    for key, state in list(LOGIN_FAILURES.items()):
+        first = float(state.get("first", now_ts))
+        locked_until = float(state.get("locked_until", 0))
+        if locked_until and locked_until <= now_ts:
+            LOGIN_FAILURES.pop(key, None)
+        elif not locked_until and now_ts - first > LOGIN_RATE_LIMIT_WINDOW_SECONDS:
+            LOGIN_FAILURES.pop(key, None)
+    overflow = len(LOGIN_FAILURES) - LOGIN_RATE_LIMIT_MAX_KEYS
+    if overflow > 0:
+        oldest = sorted(
+            LOGIN_FAILURES,
+            key=lambda item: float(LOGIN_FAILURES[item].get("first", now_ts)),
+        )[:overflow]
+        for key in oldest:
+            LOGIN_FAILURES.pop(key, None)
+
+
 def login_limited(key: str, now_ts: float | None = None) -> bool:
     now_ts = time.time() if now_ts is None else now_ts
+    prune_login_failures(now_ts)
     state = LOGIN_FAILURES.get(key)
     if not state:
         return False
@@ -203,6 +224,7 @@ def login_limited(key: str, now_ts: float | None = None) -> bool:
 
 def record_login_failure(key: str, now_ts: float | None = None):
     now_ts = time.time() if now_ts is None else now_ts
+    prune_login_failures(now_ts)
     state = LOGIN_FAILURES.get(key) or {"count": 0, "first": now_ts, "locked_until": 0}
     if now_ts - float(state.get("first", now_ts)) > LOGIN_RATE_LIMIT_WINDOW_SECONDS:
         state = {"count": 0, "first": now_ts, "locked_until": 0}
@@ -210,6 +232,7 @@ def record_login_failure(key: str, now_ts: float | None = None):
     if int(state["count"]) >= LOGIN_RATE_LIMIT_ATTEMPTS:
         state["locked_until"] = now_ts + LOGIN_RATE_LIMIT_LOCK_SECONDS
     LOGIN_FAILURES[key] = state
+    prune_login_failures(now_ts)
 
 
 def clear_login_failures(key: str):

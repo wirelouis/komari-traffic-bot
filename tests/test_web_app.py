@@ -179,6 +179,30 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertNotIn("198.51.100.7", w.LOGIN_FAILURES)
 
+    def test_login_failure_state_prunes_stale_and_excess_entries(self):
+        self.patch_attr(w, "LOGIN_RATE_LIMIT_MAX_KEYS", 3)
+        w.LOGIN_FAILURES.update({
+            "stale": {"count": 1, "first": 0, "locked_until": 0},
+            "expired-lock": {"count": 5, "first": 10, "locked_until": 20},
+            "fresh": {"count": 1, "first": 995, "locked_until": 0},
+        })
+
+        w.prune_login_failures(now_ts=1000)
+
+        self.assertNotIn("stale", w.LOGIN_FAILURES)
+        self.assertNotIn("expired-lock", w.LOGIN_FAILURES)
+        self.assertIn("fresh", w.LOGIN_FAILURES)
+
+        w.LOGIN_FAILURES.clear()
+        for index in range(5):
+            w.LOGIN_FAILURES[f"key-{index}"] = {"count": 1, "first": index, "locked_until": 0}
+
+        w.prune_login_failures(now_ts=10)
+
+        self.assertLessEqual(len(w.LOGIN_FAILURES), 3)
+        self.assertNotIn("key-0", w.LOGIN_FAILURES)
+        self.assertNotIn("key-1", w.LOGIN_FAILURES)
+
     def test_frontend_routes_return_index(self):
         for path in ("/", "/nodes", "/alerts", "/telegram", "/ai", "/analytics", "/system"):
             with self.subTest(path=path):
