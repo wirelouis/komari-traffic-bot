@@ -235,6 +235,20 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn("secret-komari-token", message)
         self.assertNotIn("secret-ai-key", message)
 
+    def test_ai_chat_redacts_error_details(self):
+        self.patch_attr("AI_API_BASE", "https://ai.example/v1")
+        self.patch_attr("AI_API_KEY", "secret-ai-key")
+        self.patch_attr("AI_MODEL", "gpt-test")
+
+        with patch.object(k.requests, "post", side_effect=RuntimeError("boom secret-ai-key <tag>")):
+            text = k.ai_chat([{"role": "user", "content": "hello"}])
+
+        self.assertIn("RuntimeError", text)
+        self.assertNotIn("secret-ai-key", text)
+        normalized = k.normalize_ai_answer_for_telegram(text)
+        self.assertIn("&lt;tag&gt;", normalized)
+        self.assertNotIn("<tag>", normalized)
+
     def test_node_missing_alert_triggers_and_recovers(self):
         k.save_samples({
             "samples": [

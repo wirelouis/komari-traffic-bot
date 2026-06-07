@@ -1403,7 +1403,7 @@ def ai_chat(messages: list[dict]) -> str:
         return content.strip() or "⚠️ AI 返回了空结果，请稍后重试。"
     except Exception as e:
         logging.exception("ai_chat error")
-        return f"⚠️ 调用 AI 失败：{type(e).__name__}: {e}"
+        return f"⚠️ 调用 AI 失败：{type(e).__name__}: {redact_sensitive_text(e)}"
 
 def ask_ai_with_data(question: str, data_pack: dict) -> str:
     """
