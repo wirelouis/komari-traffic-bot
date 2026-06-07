@@ -1,6 +1,6 @@
 services:
   bot:
-    image: ghcr.io/wirelouis/komari-traffic-bot:latest
+    image: ghcr.io/wirelouis/komari-traffic-hub:latest
     env_file: .env
     environment:
       - TZ=Asia/Shanghai
@@ -16,7 +16,7 @@ services:
     command: ["python", "/app/komari_traffic_report.py", "listen"]
 
   web:
-    image: ghcr.io/wirelouis/komari-traffic-bot:latest
+    image: ghcr.io/wirelouis/komari-traffic-hub:latest
     env_file: .env
     environment:
       - TZ=Asia/Shanghai

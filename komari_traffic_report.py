@@ -163,7 +163,7 @@ TIMEOUT = int(os.environ.get("KOMARI_TIMEOUT_SECONDS", "15"))  # Komari API time
 APP_VERSION = os.environ.get("APP_VERSION", "dev").strip() or "dev"
 GIT_COMMIT = os.environ.get("GIT_COMMIT", "").strip()
 BUILD_DATE = os.environ.get("BUILD_DATE", "").strip()
-IMAGE_SOURCE = os.environ.get("IMAGE_SOURCE", "ghcr.io/wirelouis/komari-traffic-bot").strip()
+IMAGE_SOURCE = os.environ.get("IMAGE_SOURCE", "ghcr.io/wirelouis/komari-traffic-hub").strip()
 TASK_RUN_RETENTION_DAYS = max(0, int(os.environ.get("TASK_RUN_RETENTION_DAYS", "90")))
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
