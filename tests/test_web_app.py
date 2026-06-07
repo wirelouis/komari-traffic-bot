@@ -235,7 +235,10 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("overviewNodes: 8", app_js)
         self.assertIn("analyticsNodes: 10", app_js)
         self.assertIn("compactTrafficRows", app_js)
+        self.assertIn("a.compact_other ? 1 : -1", app_js)
         self.assertIn("/api/traffic/range/export.csv", app_js)
+        self.assertIn("$('analytics-status-pill').title = message", app_js.replace('"', "'"))
+        self.assertIn("console.warn(message);", app_js)
         self.assertNotIn("<h3>节点明细</h3>", app_js)
         self.assertNotIn("调试详情", app_js)
 

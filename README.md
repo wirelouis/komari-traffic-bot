@@ -217,7 +217,7 @@ docker compose exec bot \
 ```
 ## 🧭 Web 面板
 
-Web 面板提供轻量控制台，用于查看总览、节点流量、长期分析、告警状态、Telegram 推送、AI 问答和系统健康。
+Web 面板提供轻量控制台，用于查看总览、节点流量、长期分析、区间 CSV 导出、告警状态、Telegram 推送、AI 问答和系统健康。
 
 - 登录账号：`WEB_USERNAME`（默认 `admin`）
 - 登录密码：`WEB_PASSWORD`（必须设置）

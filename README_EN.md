@@ -221,7 +221,7 @@ docker compose exec bot \
 ```
 ## 🧭 Web Console
 
-The Web console is a lightweight dashboard for traffic overview, node analysis, long-term analytics, alert controls, Telegram delivery, AI Q&A, and system health.
+The Web console is a lightweight dashboard for traffic overview, node analysis, long-term analytics with range CSV export, alert controls, Telegram delivery, AI Q&A, and system health.
 
 - Username: `WEB_USERNAME` (default `admin`)
 - Password: `WEB_PASSWORD` (required)

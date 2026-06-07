@@ -726,7 +726,10 @@ function renderChart(data) {
   };
   mergeNodes(data.records?.last_24h?.data?.nodes || [], "last24");
   mergeNodes(data.records?.last_7d?.data?.nodes || [], "last7d");
-  const allNodes = [...byId.values()].sort((a, b) => (b.last7d + b.last24) - (a.last7d + a.last24));
+  const allNodes = [...byId.values()].sort((a, b) => {
+    if (a.compact_other !== b.compact_other) return a.compact_other ? 1 : -1;
+    return (b.last7d + b.last24) - (a.last7d + a.last24);
+  });
   const chart = $("trend-chart");
   if (!allNodes.length) {
     const msg = data.records?.last_24h?.error?.message || data.records?.last_7d?.error?.message || "暂无 records 数据";
@@ -1639,6 +1642,7 @@ async function exportTrafficRangeCsv() {
   const button = $("export-traffic-range-btn");
   button.disabled = true;
   $("analytics-status-pill").textContent = "导出中";
+  $("analytics-status-pill").title = "";
   $("analytics-status-pill").classList.remove("good", "bad");
   try {
     const query = trafficRangeQuery();
@@ -1656,11 +1660,14 @@ async function exportTrafficRangeCsv() {
     );
     downloadBlob(blob, filename);
     $("analytics-status-pill").textContent = "已导出";
+    $("analytics-status-pill").title = "";
     $("analytics-status-pill").classList.add("good");
   } catch (error) {
+    const message = friendlyError(error.message);
     $("analytics-status-pill").textContent = "导出失败";
+    $("analytics-status-pill").title = message;
     $("analytics-status-pill").classList.add("bad");
-    $("traffic-range-result").innerHTML = `<div class="empty-state">${escapeHtml(friendlyError(error.message))}</div>`;
+    console.warn(message);
   } finally {
     button.disabled = false;
   }
