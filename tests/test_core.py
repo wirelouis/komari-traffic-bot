@@ -178,6 +178,21 @@ class CoreTests(unittest.TestCase):
         ]
         self.assertEqual(leftovers, [])
 
+    def test_save_offset_uses_atomic_unique_temp_file(self):
+        fixed_tmp = self.tmp_path / "tg_offset.txt.tmp"
+        fixed_tmp.write_text("sentinel", encoding="utf-8")
+
+        k.save_offset(12345)
+
+        self.assertEqual(k.load_offset(), 12345)
+        self.assertEqual(fixed_tmp.read_text(encoding="utf-8"), "sentinel")
+        leftovers = [
+            path.name
+            for path in self.tmp_path.glob("tg_offset.txt.*.tmp")
+            if path.name != "tg_offset.txt.tmp"
+        ]
+        self.assertEqual(leftovers, [])
+
     def test_silence_window_supports_cross_midnight(self):
         late = datetime(2026, 6, 6, 23, 30, tzinfo=k.TZ)
         early = datetime(2026, 6, 6, 6, 30, tzinfo=k.TZ)

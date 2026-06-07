@@ -402,6 +402,28 @@ def save_json_atomic(path: str, data):
             pass
 
 
+def save_text_atomic(path: str, text: str):
+    path = str(path)
+    tmp = unique_temp_path(path)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(str(text))
+        try:
+            os.replace(tmp, path)
+        except OSError as e:
+            if e.errno != errno.EXDEV:
+                raise
+            with open(path, "w", encoding="utf-8") as dst, open(tmp, "r", encoding="utf-8") as src:
+                dst.write(src.read())
+            os.unlink(tmp)
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except OSError:
+            pass
+
+
 def runtime_config_path() -> str:
     return os.path.join(DATA_DIR, "runtime_config.json")
 
@@ -3750,8 +3772,7 @@ def load_offset() -> int | None:
 
 
 def save_offset(val: int):
-    with open(TG_OFFSET_PATH, "w", encoding="utf-8") as f:
-        f.write(str(val))
+    save_text_atomic(TG_OFFSET_PATH, str(val))
 
 
 def parse_top_scope(text: str):
