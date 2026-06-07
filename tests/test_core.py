@@ -210,6 +210,31 @@ class CoreTests(unittest.TestCase):
             self.assertNotIn("<node>", message)
         self.assertIn("Title &lt;T&gt;", full)
 
+    def test_alert_exception_redacts_and_escapes_failure_details(self):
+        sent = []
+        self.patch_attr("TELEGRAM_BOT_TOKEN", "secret-telegram-token")
+        self.patch_attr("TELEGRAM_CHAT_ID", "123456789")
+        self.patch_attr("KOMARI_API_TOKEN", "secret-komari-token")
+        self.patch_attr("AI_API_KEY", "secret-ai-key")
+        self.patch_attr("telegram_send", lambda text: sent.append(text))
+
+        try:
+            raise RuntimeError("bad <tag> secret-telegram-token secret-komari-token secret-ai-key")
+        except RuntimeError as exc:
+            k.alert_exception("where <x>", "cmd <run> secret-ai-key", exc)
+
+        self.assertEqual(len(sent), 1)
+        message = sent[0]
+        self.assertIn("where &lt;x&gt;", message)
+        self.assertIn("cmd &lt;run&gt;", message)
+        self.assertIn("bad &lt;tag&gt;", message)
+        self.assertNotIn("<tag>", message)
+        self.assertNotIn("<x>", message)
+        self.assertNotIn("<run>", message)
+        self.assertNotIn("secret-telegram-token", message)
+        self.assertNotIn("secret-komari-token", message)
+        self.assertNotIn("secret-ai-key", message)
+
     def test_node_missing_alert_triggers_and_recovers(self):
         k.save_samples({
             "samples": [

@@ -1542,17 +1542,19 @@ def should_alert(throttle_key: str, min_interval_seconds: int = 300) -> bool:
 
 
 def alert_exception(where: str, cmd: str, exc: Exception):
-    host = socket.gethostname()
+    host = telegram_html_escape(redact_sensitive_text(socket.gethostname()))
     ts = now_dt().strftime("%Y-%m-%d %H:%M:%S %Z")
-    err = f"{type(exc).__name__}: {exc}"
-    tb = traceback.format_exc()
-    tb_tail = (tb[-1500:]).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    where_text = telegram_html_escape(redact_sensitive_text(where))
+    cmd_text = telegram_html_escape(redact_sensitive_text(cmd))
+    err = telegram_html_escape(redact_sensitive_text(f"{type(exc).__name__}: {exc}"))
+    tb = redact_sensitive_text(traceback.format_exc())
+    tb_tail = telegram_html_escape(tb[-1500:])
     msg = (
         f"❌ <b>Komari 流量任务失败</b>\n"
         f"🕒 {ts}\n"
         f"🖥 {host}\n"
-        f"📍 {where}\n"
-        f"🧩 cmd: <code>{cmd}</code>\n"
+        f"📍 {where_text}\n"
+        f"🧩 cmd: <code>{cmd_text}</code>\n"
         f"🧨 error: <code>{err}</code>\n\n"
         f"<b>traceback (tail)</b>\n<pre>{tb_tail}</pre>"
     )
