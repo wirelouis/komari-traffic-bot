@@ -780,7 +780,7 @@ def build_system_status_struct(include_recent: bool = True) -> dict:
         {
             "key": "ai",
             "label": "AI 问答",
-            "level": "ok" if ai_status.get("configured") else "warn",
+            "level": "ok" if ai_status.get("configured") else "muted",
             "ok": bool(ai_status.get("configured")),
             "detail": ai_status.get("model") or "未配置模型",
             "message": "AI 问答可用。" if ai_status.get("configured") else "AI 未启用，不影响流量统计和推送。",
@@ -789,7 +789,7 @@ def build_system_status_struct(include_recent: bool = True) -> dict:
         {
             "key": "alerts",
             "label": "告警",
-            "level": "ok" if alert_status.get("enabled") else "warn",
+            "level": "ok" if alert_status.get("enabled") else "muted",
             "ok": bool(alert_status.get("enabled")),
             "detail": f"当前 {alert_status.get('active_count', 0)} 个未恢复事件",
             "message": "告警正在工作。" if alert_status.get("enabled") else "告警已关闭，不会产生新的提醒。",

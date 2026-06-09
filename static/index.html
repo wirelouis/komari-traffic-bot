@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Komari Traffic Console</title>
-  <link rel="icon" type="image/svg+xml" href="/static/komari-traffic-icon.svg?v=20260607-export1">
-  <link rel="stylesheet" href="/static/styles.css?v=20260607-export1">
+  <link rel="icon" type="image/svg+xml" href="/static/komari-traffic-icon.svg?v=20260609-ui2">
+  <link rel="stylesheet" href="/static/styles.css?v=20260609-ui2">
 </head>
 <body>
   <div id="route-progress" class="route-progress" aria-hidden="true"></div>
@@ -13,7 +13,7 @@
     <section class="login-panel">
       <div class="login-brand">
         <span class="brand-mark">
-          <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260607-export1" alt="">
+          <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260609-ui2" alt="">
           <span class="brand-fallback" hidden>K</span>
         </span>
         <div>
@@ -46,7 +46,7 @@
       <div class="sidebar-head">
         <a class="brand" href="/" data-route="/" aria-label="Komari Traffic 总览">
           <span class="brand-mark">
-            <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260607-export1" alt="">
+            <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260609-ui2" alt="">
             <span class="brand-fallback" hidden>K</span>
           </span>
           <span class="brand-copy">
@@ -128,9 +128,27 @@
         </div>
         <div class="top-actions">
           <div class="segmented theme-switch" id="theme-switch" aria-label="主题">
-            <button type="button" data-theme="auto" class="active">自动</button>
-            <button type="button" data-theme="light">白天</button>
-            <button type="button" data-theme="dark">夜晚</button>
+            <button type="button" data-theme="auto" class="active" aria-label="跟随系统" title="跟随系统">
+              <svg class="theme-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M5 5h14v10H5z"></path>
+                <path d="M9 19h6"></path>
+                <path d="M12 15v4"></path>
+              </svg>
+              <span class="sr-only">自动</span>
+            </button>
+            <button type="button" data-theme="light" aria-label="浅色主题" title="浅色主题">
+              <svg class="theme-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="12" cy="12" r="4"></circle>
+                <path d="M12 2.8v2M12 19.2v2M4.5 4.5l1.4 1.4M18.1 18.1l1.4 1.4M2.8 12h2M19.2 12h2M4.5 19.5l1.4-1.4M18.1 5.9l1.4-1.4"></path>
+              </svg>
+              <span class="sr-only">白天</span>
+            </button>
+            <button type="button" data-theme="dark" aria-label="深色主题" title="深色主题">
+              <svg class="theme-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M18.6 15.6A7.2 7.2 0 0 1 8.4 5.4 7.6 7.6 0 1 0 18.6 15.6Z"></path>
+              </svg>
+              <span class="sr-only">夜晚</span>
+            </button>
           </div>
           <span id="status-pill" class="status-pill">加载中</span>
           <button id="refresh-btn" class="ghost-btn">刷新</button>
@@ -231,7 +249,7 @@
           <div class="panel-head route-toolbar">
             <span id="alert-count" class="soft-label">--</span>
           </div>
-          <div id="alerts-summary" class="mini-grid"></div>
+          <div id="alerts-summary" class="notice-list"></div>
           <div class="content-grid compact-grid">
             <article class="sub-panel">
               <div class="panel-head">
@@ -244,24 +262,17 @@
             <article class="sub-panel">
               <div class="panel-head">
                 <div>
-                  <h3>阈值与静默</h3>
+                  <h3>告警规则</h3>
                 </div>
               </div>
-              <div id="alert-thresholds" class="stacked"></div>
+              <div id="alert-thresholds" class="rule-summary"></div>
+              <div id="alert-config-form" class="config-editor compact-config"></div>
+              <div class="inline-form">
+                <button id="save-alert-config-btn" class="primary-btn">保存告警配置</button>
+              </div>
+              <div id="alert-config-result" class="result-box muted">可直接调整阈值、静默窗口和冷却时间。</div>
             </article>
           </div>
-          <article class="sub-panel">
-            <div class="panel-head">
-              <div>
-                <h3>告警配置</h3>
-              </div>
-            </div>
-            <div id="alert-config-form" class="config-editor compact-config"></div>
-            <div class="inline-form">
-              <button id="save-alert-config-btn" class="primary-btn">保存告警配置</button>
-            </div>
-            <div id="alert-config-result" class="result-box muted">可直接调整阈值、静默窗口和冷却时间。</div>
-          </article>
           <div class="action-band">
             <div class="inline-form">
               <button id="check-alerts-btn" class="ghost-btn">检查一次</button>
@@ -507,6 +518,6 @@
     </section>
   </main>
 
-  <script src="/static/app.js?v=20260607-export1"></script>
+  <script src="/static/app.js?v=20260609-ui2"></script>
 </body>
 </html>

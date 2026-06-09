@@ -246,7 +246,10 @@ function setSkel(id, html) {
   const el = $(id);
   // Only show a skeleton when the container has no real content yet (first paint).
   // Avoids flashing skeletons over existing data on refresh / navigating back.
-  if (el && el.children.length === 0) el.innerHTML = html;
+  if (el && el.children.length === 0) {
+    el.classList.remove("hidden");
+    el.innerHTML = html;
+  }
 }
 function showRouteSkeleton(route) {
   switch (route) {
@@ -415,6 +418,74 @@ function updateStatus(message, good = true) {
   pill.classList.toggle("bad", !good);
 }
 
+function setInlineBadge(id, text = "", level = "") {
+  const el = $(id);
+  if (!el) return;
+  const value = String(text || "").trim();
+  el.classList.toggle("hidden", !value);
+  el.classList.remove("good", "bad", "warn");
+  if (!value) {
+    el.textContent = "";
+    el.removeAttribute("title");
+    const toolbar = el.closest(".route-toolbar");
+    if (toolbar) {
+      const hasVisibleChild = Array.from(toolbar.children).some((child) => !child.classList.contains("hidden"));
+      toolbar.classList.toggle("hidden", !hasVisibleChild);
+    }
+    return;
+  }
+  el.textContent = value;
+  if (level) el.classList.add(level);
+  const toolbar = el.closest(".route-toolbar");
+  if (toolbar) {
+    const hasVisibleChild = Array.from(toolbar.children).some((child) => !child.classList.contains("hidden"));
+    toolbar.classList.toggle("hidden", !hasVisibleChild);
+  }
+}
+
+function actionableLevel(level) {
+  return level === "bad" || level === "warn";
+}
+
+function renderNoticeRows(items, emptyText = "没有需要处理的项目。") {
+  const rows = (items || []).filter((item) => actionableLevel(item.level));
+  if (!rows.length) {
+    return `<div class="quiet-state">${escapeHtml(emptyText)}</div>`;
+  }
+  return rows.map((item) => {
+    const cls = item.level === "bad" ? "bad" : "warn";
+    const label = item.level === "bad" ? "需处理" : "提醒";
+    const detail = [item.message, item.detail].filter(Boolean).join(" ");
+    return `
+      <div class="notice-row ${cls}">
+        <span class="notice-dot" aria-hidden="true"></span>
+        <span>
+          <strong>${escapeHtml(item.label || item.title || "提醒")}</strong><br>
+          <span class="tiny">${escapeHtml(detail || "需要确认当前状态。")}</span>
+          ${item.fix ? `<br><span class="tiny fix-text">${escapeHtml(item.fix)}</span>` : ""}
+        </span>
+        <span class="notice-badge ${cls}">${escapeHtml(label)}</span>
+      </div>`;
+  }).join("");
+}
+
+function serviceMetricText(data) {
+  const services = data.services || {};
+  if (!services.komari?.configured) {
+    return { value: "需配置", note: "还没有可读取的 Komari 探针地址" };
+  }
+  const notes = ["探针可读"];
+  if (services.telegram?.configured) notes.push("推送可用");
+  else notes.push("推送未配置");
+  if (services.alerts?.enabled) notes.push("告警启用");
+  else notes.push("告警关闭");
+  if (services.ai?.configured) notes.push("AI 可用");
+  return {
+    value: "运行中",
+    note: notes.join("，"),
+  };
+}
+
 function noteText(period) {
   if (!period?.ok) return friendlyError(period?.error?.message || "不可用");
   const data = period.data;
@@ -524,13 +595,14 @@ function hoursLabel(hours) {
 }
 
 function miniCard(label, value, note = "", status = "") {
-  const statusText = status === "good" ? "正常" : (status === "bad" ? "需处理" : "注意");
+  const severity = status === "bad" || status === "warn" ? status : "";
+  const statusText = severity === "bad" ? "需处理" : "提醒";
   return `
-    <article class="mini-card">
+    <article class="mini-card ${escapeHtml(severity)}">
       <span>${escapeHtml(label)}</span>
       <strong>${escapeHtml(value || "--")}</strong>
       ${note ? `<small class="tiny">${escapeHtml(note)}</small>` : ""}
-      ${status ? `<span class="pill ${escapeHtml(status)}">${escapeHtml(statusText)}</span>` : ""}
+      ${severity ? `<span class="notice-badge ${escapeHtml(severity)}">${escapeHtml(statusText)}</span>` : ""}
     </article>`;
 }
 
@@ -555,10 +627,15 @@ function runTypeLabel(type) {
 
 function aiSourceLabel(key) {
   const map = {
-    today: "今日节点",
+    today: "今日流量",
     last_1h: "最近 1 小时",
+    last_1h_by_node: "最近 1 小时节点明细",
     last_24h: "最近 24 小时",
+    last_24h_hourly: "最近 24 小时趋势",
+    today_hourly_by_node: "今日小时趋势",
+    yesterday_hourly_by_node: "昨日小时趋势",
     last_7d: "最近 7 天",
+    last_30d: "最近 30 天",
     history: "历史趋势",
     alerts: "告警状态",
   };
@@ -654,11 +731,9 @@ function renderOverviewHealth(system) {
   const target = $("overview-health");
   if (!target) return;
   if (!system) {
+    target.classList.remove("hidden");
     target.innerHTML = [
-      miniCard("系统健康", "同步中", "稍后显示状态"),
-      miniCard("最近任务", "--", "暂无记录"),
-      miniCard("长期统计", "--", "稍后显示状态"),
-      miniCard("计划任务", "--", "稍后显示状态"),
+      miniCard("状态同步", "暂不可用", "系统健康信息稍后重试", "warn"),
     ].join("");
     return;
   }
@@ -666,12 +741,24 @@ function renderOverviewHealth(system) {
   const latestReport = system.latest_runs?.report;
   const db = system.data?.sqlite || {};
   const schedules = system.runtime?.schedules || {};
-  target.innerHTML = [
-    miniCard("系统健康", `${summary.healthy || 0}/${summary.total || 0}`, (summary.issues || []).length ? `待确认：${(summary.issues || []).join("、")}` : "核心配置正常", (summary.issues || []).length ? "bad" : "good"),
-    miniCard("最近任务", latestReport?.status ? runStatusText(latestReport.status) : "暂无", latestReport?.started_at_text || "未记录", latestReport?.status === "failed" ? "bad" : ""),
-    miniCard("长期统计", db.ok ? "正常" : "异常", db.ok ? "历史流量会继续保存" : "历史流量可能无法保存", db.ok ? "good" : "bad"),
-    miniCard("计划任务", `${schedules.enabled || 0}/${schedules.total || 0}`, "启用 / 总数"),
-  ].join("");
+  const cards = [];
+  if ((summary.issues || []).length) {
+    cards.push(miniCard("需要处理", `${summary.issues.length} 项`, summary.issues.join("、"), "bad"));
+  }
+  if ((summary.warnings || []).length) {
+    cards.push(miniCard("需要确认", `${summary.warnings.length} 项`, summary.warnings.join("、"), "warn"));
+  }
+  if (latestReport?.status === "failed") {
+    cards.push(miniCard("最近任务失败", "报表", latestReport.started_at_text || "未记录时间", "bad"));
+  }
+  if (db.ok === false) {
+    cards.push(miniCard("长期统计异常", "无法保存", "检查 data 目录权限和容器日志", "bad"));
+  }
+  if (Number(schedules.total || 0) > 0 && Number(schedules.enabled || 0) === 0) {
+    cards.push(miniCard("推送计划停用", "0 启用", `${schedules.total} 条计划均未启用`, "warn"));
+  }
+  target.classList.toggle("hidden", cards.length === 0);
+  target.innerHTML = cards.join("");
 }
 
 function renderOverview(data) {
@@ -683,13 +770,9 @@ function renderOverview(data) {
   $("metric-today-note").textContent = noteText(periods.today);
   $("metric-week-note").textContent = noteText(periods.week);
   $("metric-month-note").textContent = noteText(periods.month);
-  $("metric-services").textContent = [
-    data.services?.komari?.configured ? "Komari" : "",
-    data.services?.telegram?.configured ? "TG" : "",
-    data.services?.ai?.configured ? "AI" : "",
-    data.services?.alerts?.enabled ? "告警" : "",
-  ].filter(Boolean).join(" / ") || "未配置";
-  $("metric-time").textContent = data.now || "--";
+  const serviceText = serviceMetricText(data);
+  $("metric-services").textContent = serviceText.value;
+  $("metric-time").textContent = serviceText.note || data.now || "--";
   $("range-label").textContent = "24h / 7d";
 
   const topNodes = periods.today?.data?.top_nodes || periods.today?.data?.nodes?.slice(0, 5) || [];
@@ -967,13 +1050,59 @@ async function saveBinding(clear = false) {
 }
 
 function renderAlerts(data) {
-  $("alert-count").textContent = `${data.active_count || 0} active`;
-  $("alerts-summary").innerHTML = [
-    miniCard("启用状态", data.enabled ? "已启用" : "未启用", data.in_silence_window ? "当前处于静默时段" : "", data.enabled ? "good" : "bad"),
-    miniCard("Active 告警", String(data.active_count || 0), "当前未恢复事件"),
-    miniCard("冷却时间", data.cooldown_text || "--", `${data.window_minutes || 0}m 窗口`),
-    miniCard("告警 Chat", data.alert_chat || "未配置", data.muted_until ? `静默至 ${data.muted_until}` : "未静默"),
-  ].join("");
+  const activeCount = Number(data.active_count || 0);
+  if (!data.enabled) {
+    setInlineBadge("alert-count", "告警关闭", "bad");
+  } else if (activeCount > 0) {
+    setInlineBadge("alert-count", `${activeCount} 个告警`, "warn");
+  } else if (data.muted_until || data.in_silence_window) {
+    setInlineBadge("alert-count", "静默中", "warn");
+  } else {
+    setInlineBadge("alert-count");
+  }
+  const notices = [];
+  if (!data.enabled) {
+    notices.push({
+      level: "bad",
+      label: "告警已关闭",
+      message: "当前不会产生新的告警事件。",
+      fix: "需要监控流量时，在右侧开启告警并保存。",
+    });
+  }
+  if (activeCount > 0) {
+    notices.push({
+      level: "warn",
+      label: "当前有未恢复告警",
+      message: `${activeCount} 个事件仍处于 active 状态。`,
+      fix: "先查看左侧事件，再决定是否静默或推送。",
+    });
+  }
+  if (data.muted_until) {
+    notices.push({
+      level: "warn",
+      label: "告警已静默",
+      message: `静默至 ${data.muted_until}。`,
+      fix: "需要恢复通知时点击下方解除静默。",
+    });
+  } else if (data.in_silence_window) {
+    notices.push({
+      level: "warn",
+      label: "处于静默时段",
+      message: "当前命中静默窗口，通知会被抑制。",
+    });
+  }
+  const chatMissing = !String(data.alert_chat || "").trim() || String(data.alert_chat || "").includes("未配置");
+  if (chatMissing) {
+    notices.push({
+      level: "warn",
+      label: "告警 Chat 未配置",
+      message: "告警通知会回落到默认 Telegram Chat，或无法推送。",
+      fix: "在右侧配置告警 Chat 后保存。",
+    });
+  }
+  const summaryTarget = $("alerts-summary");
+  summaryTarget.classList.toggle("hidden", notices.length === 0);
+  summaryTarget.innerHTML = renderNoticeRows(notices);
 
   const active = data.active || [];
   $("alerts-body").innerHTML = active.length
@@ -993,7 +1122,7 @@ function renderAlerts(data) {
     ["静默窗口", data.silence_windows || "未配置"],
   ];
   $("alert-thresholds").innerHTML = thresholdRows
-    .map(([label, value]) => `<div class="status-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || "未配置")}</strong></div>`)
+    .map(([label, value]) => `<div class="rule-chip"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || "未设置")}</strong></div>`)
     .join("");
 }
 
@@ -1156,13 +1285,11 @@ function bindScheduleActions() {
 }
 
 function renderTelegramStatus(data) {
-  $("telegram-status-pill").textContent = data.configured ? "已配置" : "未配置";
-  $("telegram-status-pill").classList.toggle("good", Boolean(data.configured));
-  $("telegram-status-pill").classList.toggle("bad", !data.configured);
+  setInlineBadge("telegram-status-pill", data.configured ? "" : "未配置", data.configured ? "" : "bad");
   const schedules = data.schedules || [];
   state.schedules = schedules;
   $("telegram-summary").innerHTML = [
-    miniCard("发送状态", data.configured ? "可发送" : "不可发送", data.bot_token_configured ? "Bot Token 已配置" : "缺少 Bot Token", data.configured ? "good" : "bad"),
+    miniCard("发送状态", data.configured ? "可发送" : "不可发送", data.bot_token_configured ? "Bot Token 已配置" : "缺少 Bot Token", data.configured ? "" : "bad"),
     miniCard("默认 Chat", data.chat || "未配置"),
     miniCard("告警 Chat", data.alert_chat || "未配置"),
     miniCard("应用内计划", `${schedules.length} 条`, "面板可编辑"),
@@ -1233,23 +1360,29 @@ async function sendReport() {
 }
 
 function renderAiStatus(data) {
-  $("ai-status").textContent = data.configured ? "已配置" : "未配置";
-  $("ai-status").classList.toggle("good", Boolean(data.configured));
-  $("ai-status").classList.toggle("bad", !data.configured);
-  $("ai-summary").innerHTML = [
-    miniCard("AI 状态", data.configured ? "可用" : "不可用", data.model ? `模型 ${data.model}` : "未配置模型", data.configured ? "good" : "bad"),
-    miniCard("缓存状态", data.cache_valid ? "有效" : "待刷新", data.cache_created_at_text || "尚未生成"),
-    miniCard("缓存 TTL", data.cache_ttl_seconds ? `${Math.round(data.cache_ttl_seconds / 60)} 分钟` : "实时生成"),
-    miniCard("数据源", `${(data.data_sources || []).length} 项`, "供 AI 分析使用"),
-  ].join("");
   const sources = data.data_sources || [];
-  $("ai-sources").innerHTML = sources.length
-    ? sources.map((item) => `
-      <div class="source-row">
-        <span><strong>${escapeHtml(aiSourceLabel(item.key))}</strong><br><span class="tiny">${item.count || 0} 条记录</span></span>
-        <span class="pill ${item.status === "ok" ? "good" : "bad"}">${escapeHtml(item.status)}</span>
+  const failedSources = sources.filter((item) => item.status !== "ok");
+  setInlineBadge(
+    "ai-status",
+    !data.configured ? "未配置" : (!data.cache_valid ? "待刷新" : (failedSources.length ? `${failedSources.length} 项异常` : "")),
+    !data.configured ? "bad" : "warn",
+  );
+  $("ai-summary").innerHTML = [
+    miniCard("AI 状态", data.configured ? "可用" : "不可用", data.model ? `模型 ${data.model}` : "未配置模型", data.configured ? "" : "bad"),
+    miniCard("数据包", data.cache_valid ? "可用" : "需要刷新", data.cache_created_at_text || "尚未生成", data.cache_valid ? "" : "warn"),
+    miniCard("数据覆盖", sources.length ? `${sources.length} 个窗口` : "未生成", failedSources.length ? `${failedSources.length} 个窗口失败` : "默认隐藏正常窗口", failedSources.length ? "warn" : ""),
+  ].join("");
+  if (!sources.length) {
+    $("ai-sources").innerHTML = `<div class="quiet-state">还没有生成数据包，点击左侧“刷新数据包”后再查看。</div>`;
+    return;
+  }
+  $("ai-sources").innerHTML = failedSources.length
+    ? failedSources.map((item) => `
+      <div class="source-row bad">
+        <span><strong>${escapeHtml(aiSourceLabel(item.key))}</strong><br><span class="tiny">这个分析窗口暂时不可用。</span></span>
+        <span class="notice-badge bad">异常</span>
       </div>`).join("")
-    : `<div class="empty-state">暂无 AI 数据包缓存。</div>`;
+    : `<div class="quiet-state">数据包已覆盖 ${sources.length} 个常用分析窗口；正常窗口默认不展开。</div>`;
 }
 
 async function loadAiStatus() {
@@ -1323,49 +1456,28 @@ function renderSystemStatus(data) {
   const schedules = data.runtime?.schedules || {};
   const overall = issues.length ? "需处理" : (warnings.length ? "有提醒" : "正常");
   const overallClass = issues.length ? "bad" : (warnings.length ? "warn" : "good");
-  $("system-status-pill").textContent = overall;
-  $("system-status-pill").classList.toggle("good", overallClass === "good");
-  $("system-status-pill").classList.toggle("bad", overallClass === "bad");
-  $("system-status-pill").classList.toggle("warn", overallClass === "warn");
-  $("system-summary").innerHTML = [
-    miniCard("整体状态", overall, issues.length ? `需要处理：${issues.join("、")}` : (warnings.length ? `提醒：${warnings.join("、")}` : "核心功能正常"), overallClass),
-    miniCard("最近失败", String(summary.recent_failures || 0), "只展示最近几条，失败会出现在下方", summary.recent_failures ? "bad" : "good"),
-    miniCard("长期统计", dbOk ? "正常" : "异常", dbOk ? "流量汇总可以继续累积" : "统计数据可能无法保存", dbOk ? "good" : "bad"),
-    miniCard("推送计划", `${schedules.enabled || 0}/${schedules.total || 0}`, "已启用 / 全部计划"),
-  ].join("");
+  setInlineBadge("system-status-pill", overallClass === "good" ? "" : overall, overallClass);
+  const summaryCards = [];
+  if (issues.length) summaryCards.push(miniCard("需要处理", `${issues.length} 项`, issues.join("、"), "bad"));
+  if (warnings.length) summaryCards.push(miniCard("需要确认", `${warnings.length} 项`, warnings.join("、"), "warn"));
+  if (summary.recent_failures) summaryCards.push(miniCard("最近失败", String(summary.recent_failures), "失败记录会出现在下方", "bad"));
+  if (!dbOk) summaryCards.push(miniCard("长期统计", "异常", "统计数据可能无法保存", "bad"));
+  if (Number(schedules.total || 0) > 0 && Number(schedules.enabled || 0) === 0) {
+    summaryCards.push(miniCard("推送计划", "全部停用", `${schedules.total} 条计划未启用`, "warn"));
+  }
+  $("system-summary").innerHTML = summaryCards.length
+    ? summaryCards.join("")
+    : `<div class="quiet-state wide-state">没有需要处理的系统问题。</div>`;
 
   const services = data.health_items || data.services || [];
   $("system-services").innerHTML = services.length
-    ? services.map((item) => {
-      const cls = statusLevelClass(item.level, item.ok);
-      const detail = [item.message, item.detail].filter(Boolean).join(" ");
-      return `
-        <div class="status-row ${cls}">
-          <span>
-            <strong>${escapeHtml(item.label)}</strong><br>
-            <span class="tiny">${escapeHtml(detail || "状态正常。")}</span>
-            ${item.fix ? `<br><span class="tiny fix-text">${escapeHtml(item.fix)}</span>` : ""}
-          </span>
-          <span class="pill ${cls}">${escapeHtml(statusLevelText(item.level, item.ok))}</span>
-        </div>`;
-    }).join("")
-    : `<div class="empty-state">还没有系统状态。</div>`;
+    ? renderNoticeRows(services, "配置健康，没有需要处理的项目。")
+    : `<div class="quiet-state">还没有系统状态。</div>`;
 
   const dataStatus = data.data_status || [];
   $("system-data").innerHTML = dataStatus.length
-    ? dataStatus.map((item) => {
-      const cls = statusLevelClass(item.level, item.level === "ok");
-      return `
-        <div class="status-row ${cls}">
-          <span>
-            <strong>${escapeHtml(item.label)}</strong><br>
-            <span class="tiny">${escapeHtml(item.message || item.detail || "状态正常。")}</span>
-            ${item.fix ? `<br><span class="tiny fix-text">${escapeHtml(item.fix)}</span>` : ""}
-          </span>
-          <span class="pill ${cls}">${escapeHtml(statusLevelText(item.level, item.level === "ok"))}</span>
-        </div>`;
-    }).join("")
-    : `<div class="empty-state">数据状态正常。</div>`;
+    ? renderNoticeRows(dataStatus, "数据状态稳定，没有需要处理的项目。")
+    : `<div class="quiet-state">还没有数据状态。</div>`;
   renderMaintenanceStatus(data.data?.maintenance || {});
 }
 
@@ -1373,16 +1485,21 @@ function renderMaintenanceStatus(status) {
   const ok = status.ok !== false;
   const oldRuns = Number(status.old_task_runs || 0);
   const hasCleanup = ok && oldRuns > 0;
-  $("maintenance-status-pill").textContent = ok ? (hasCleanup ? "可清理" : "正常") : "异常";
-  $("maintenance-status-pill").classList.toggle("good", ok && !hasCleanup);
-  $("maintenance-status-pill").classList.toggle("bad", !ok);
-  $("maintenance-status-pill").classList.toggle("warn", hasCleanup);
-  $("maintenance-summary").innerHTML = [
-    miniCard("维护状态", ok ? (hasCleanup ? "建议清理" : "正常") : "异常", ok ? "不会影响长期流量统计" : (status.error || "请检查容器日志"), ok ? (hasCleanup ? "warn" : "good") : "bad"),
-    miniCard("运行记录", hasCleanup ? `${oldRuns} 条偏旧` : "无需处理", hasCleanup ? "可点击下方按钮清理" : "最近记录保持精简"),
-    miniCard("保留策略", status.retention_enabled ? `${status.retention_days || 0} 天` : "关闭", status.retention_enabled ? "超过保留天数的任务记录可清理" : "不会自动建议清理"),
-    miniCard("长期统计", "保留", "清理任务记录不会删除流量汇总", "good"),
-  ].join("");
+  setInlineBadge("maintenance-status-pill", !ok ? "异常" : (hasCleanup ? "可清理" : ""), !ok ? "bad" : "warn");
+  if (!ok) {
+    $("maintenance-summary").innerHTML = [
+      miniCard("维护状态", "异常", status.error || "请检查容器日志", "bad"),
+    ].join("");
+    return;
+  }
+  if (hasCleanup) {
+    $("maintenance-summary").innerHTML = [
+      miniCard("运行记录", `${oldRuns} 条偏旧`, "可点击下方按钮清理", "warn"),
+      miniCard("保留策略", status.retention_enabled ? `${status.retention_days || 0} 天` : "关闭", "只清理任务运行记录"),
+    ].join("");
+    return;
+  }
+  $("maintenance-summary").innerHTML = `<div class="quiet-state wide-state">暂无需要维护的数据项。</div>`;
 }
 
 function configFieldsByGroup(fields) {
@@ -1560,9 +1677,7 @@ function renderTrafficRange(data) {
   const topNodes = compactNodes.rows;
   const maxNode = Math.max(...topNodes.map((node) => Number(node.total || 0)), 1);
   const maxGroup = Math.max(...visibleGroups.map((group) => Number(group.total?.total || 0)), 1);
-  const source = data.source ? String(data.source) : "sqlite";
-  $("analytics-status-pill").textContent = source;
-  $("analytics-status-pill").classList.toggle("good", true);
+  setInlineBadge("analytics-status-pill");
   $("traffic-range-result").innerHTML = `
     <div class="range-summary">
       ${miniCard("区间合计", data.total?.total_human || "--", `${escapeHtml(data.from)} -> ${escapeHtml(data.to)}`)}
@@ -1625,14 +1740,12 @@ function renderTrafficRange(data) {
 async function loadTrafficRange() {
   setDefaultRangeDates();
   $("traffic-range-result").innerHTML = `<div class="range-summary">${skelCards(4)}</div><div class="kt-skeleton kt-skel-chart"></div>`;
-  $("analytics-status-pill").textContent = "查询中";
-  $("analytics-status-pill").classList.remove("good", "bad");
+  setInlineBadge("analytics-status-pill", "查询中");
   try {
     const query = trafficRangeQuery();
     renderTrafficRange(await api(`/api/traffic/range?${query.toString()}`));
   } catch (error) {
-    $("analytics-status-pill").textContent = "异常";
-    $("analytics-status-pill").classList.add("bad");
+    setInlineBadge("analytics-status-pill", "异常", "bad");
     $("traffic-range-result").innerHTML = `<div class="empty-state">${escapeHtml(friendlyError(error.message))}</div>`;
   }
 }
@@ -1641,9 +1754,7 @@ async function exportTrafficRangeCsv() {
   setDefaultRangeDates();
   const button = $("export-traffic-range-btn");
   button.disabled = true;
-  $("analytics-status-pill").textContent = "导出中";
-  $("analytics-status-pill").title = "";
-  $("analytics-status-pill").classList.remove("good", "bad");
+  setInlineBadge("analytics-status-pill", "导出中");
   try {
     const query = trafficRangeQuery();
     const response = await fetch(`/api/traffic/range/export.csv?${query.toString()}`, {
@@ -1659,14 +1770,12 @@ async function exportTrafficRangeCsv() {
       `komari-traffic-${$("traffic-range-from").value}-${$("traffic-range-to").value}.csv`,
     );
     downloadBlob(blob, filename);
-    $("analytics-status-pill").textContent = "已导出";
-    $("analytics-status-pill").title = "";
-    $("analytics-status-pill").classList.add("good");
+    setInlineBadge("analytics-status-pill", "已导出");
+    window.setTimeout(() => setInlineBadge("analytics-status-pill"), 1800);
   } catch (error) {
     const message = friendlyError(error.message);
-    $("analytics-status-pill").textContent = "导出失败";
+    setInlineBadge("analytics-status-pill", "导出失败", "bad");
     $("analytics-status-pill").title = message;
-    $("analytics-status-pill").classList.add("bad");
     console.warn(message);
   } finally {
     button.disabled = false;
