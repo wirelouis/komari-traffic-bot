@@ -519,6 +519,13 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             k.validate_runtime_config({"telegram_chat_id": "bad id"})
 
+    def test_config_validation_allows_sampling_without_telegram(self):
+        self.patch_attr("KOMARI_BASE_URL", "https://komari.example")
+        self.patch_attr("TELEGRAM_BOT_TOKEN", "")
+        self.patch_attr("TELEGRAM_CHAT_ID", "")
+
+        k.validate_config_or_raise()
+
     def test_traffic_range_summary_aggregates_daily_and_weekly(self):
         k.upsert_daily_usage("2026-06-01", {
             "n1": {"name": "Node One", "up": 10, "down": 20},
@@ -573,6 +580,31 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(result["missing_days"], [])
         self.assertEqual(result["total"]["total"], 75)
         self.assertEqual([group["key"] for group in result["groups"]], result["days"])
+
+    def test_traffic_range_summary_prefers_snapshots_over_existing_rollup(self):
+        day = date(2026, 6, 1)
+        next_day = date(2026, 6, 2)
+        k.upsert_daily_usage("2026-06-01", {
+            "n1": {"name": "Node One", "up": 999, "down": 999},
+        }, source="stale_report")
+        k.save_traffic_snapshot(int(k.start_of_day(day).timestamp()), {
+            "n1": {"name": "Node One", "up": 100, "down": 200},
+        })
+        k.save_traffic_snapshot(int(k.start_of_day(next_day).timestamp()), {
+            "n1": {"name": "Node One", "up": 130, "down": 260},
+        })
+
+        with patch.object(k, "today_date", return_value=next_day), patch.object(
+            k,
+            "now_dt",
+            return_value=datetime(2026, 6, 2, 0, 0, tzinfo=k.TZ),
+        ):
+            result = k.traffic_range_summary(day, day, group="daily")
+
+        self.assertEqual(result["source"], "traffic_snapshots")
+        self.assertEqual(result["rollup_days"], 0)
+        self.assertEqual(result["snapshot_days"], 1)
+        self.assertEqual(result["total"]["total"], 90)
 
     def test_snapshot_range_usage_aggregates_adjacent_deltas(self):
         k.save_traffic_snapshot(1000, {
@@ -709,30 +741,29 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(usage["nodes"]["n1"]["up"], 5)
         self.assertEqual(usage["nodes"]["n1"]["down"], 15)
 
-    def test_live_period_combines_daily_rollup_and_open_day_snapshots(self):
+    def test_live_period_uses_realtime_snapshots_without_daily_rollup(self):
         k.upsert_daily_usage("2026-06-01", {
-            "n1": {"name": "Node One", "up": 10, "down": 20},
-        }, source="test")
-        k.save_traffic_snapshot(1780358400, {
+            "n1": {"name": "Node One", "up": 999, "down": 999},
+        }, source="stale_report")
+        k.save_traffic_snapshot(int(k.start_of_day(date(2026, 6, 1)).timestamp()), {
             "n1": {"name": "Node One", "up": 100, "down": 200},
-            "n2": {"name": "Node Two", "up": 5, "down": 7},
         })
-        k.save_traffic_snapshot(1780362000, {
-            "n1": {"name": "Node One", "up": 103, "down": 207},
-            "n2": {"name": "Node Two", "up": 8, "down": 11},
+        k.save_traffic_snapshot(int(k.start_of_day(date(2026, 6, 2)).timestamp()), {
+            "n1": {"name": "Node One", "up": 130, "down": 260},
         })
 
         with patch.object(k, "today_date", return_value=date(2026, 6, 2)):
             period = k.build_live_period_struct(
                 datetime(2026, 6, 1, tzinfo=k.TZ),
-                datetime(2026, 6, 2, 1, 0, tzinfo=k.TZ),
+                datetime(2026, 6, 2, tzinfo=k.TZ),
             )
 
         by_uuid = {item["uuid"]: item for item in period["nodes"]}
-        self.assertEqual(period["source"], "traffic_db+traffic_snapshots")
-        self.assertEqual(by_uuid["n1"]["up"], 13)
-        self.assertEqual(by_uuid["n1"]["down"], 27)
-        self.assertEqual(by_uuid["n2"]["total"], 7)
+        self.assertEqual(period["source"], "traffic_snapshots")
+        self.assertEqual(period["rollup_days"], 0)
+        self.assertEqual(by_uuid["n1"]["up"], 30)
+        self.assertEqual(by_uuid["n1"]["down"], 60)
+        self.assertEqual(period["total"]["total"], 90)
 
     def test_live_week_falls_back_to_completed_day_snapshots_when_rollup_missing(self):
         monday = date(2026, 6, 1)
@@ -757,7 +788,7 @@ class CoreTests(unittest.TestCase):
 
         self.assertEqual(today["total"]["total"], 10)
         self.assertEqual(week["total"]["total"], 40)
-        self.assertEqual(week["snapshot_days"], 1)
+        self.assertEqual(week["snapshot_days"], 2)
         self.assertEqual(week["missing_days"], [])
 
     def test_report_schedule_validation_and_due_key(self):

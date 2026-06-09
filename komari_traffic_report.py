@@ -249,8 +249,6 @@ def _require_non_negative_int(name: str, value: int):
 def validate_config_or_raise():
     required = {
         "KOMARI_BASE_URL": KOMARI_BASE_URL,
-        "TELEGRAM_BOT_TOKEN": TELEGRAM_BOT_TOKEN,
-        "TELEGRAM_CHAT_ID": TELEGRAM_CHAT_ID,
     }
     missing = [k for k, v in required.items() if not str(v).strip()]
     if missing:
@@ -1242,6 +1240,13 @@ def snapshot_range_usage(from_ts: int | float, to_ts: int | float) -> dict:
     start = int(from_ts)
     end = int(to_ts)
     samples, segments = snapshot_delta_segments(start, end)
+    sample_days = sorted({
+        datetime.fromtimestamp(int(sample.get("ts", 0) or 0), TZ).strftime("%Y-%m-%d")
+        for sample in samples
+        if int(sample.get("ts", 0) or 0) > 0
+    })
+    sample_from_ts = int(samples[0].get("ts", 0) or 0) if samples else 0
+    sample_to_ts = int(samples[-1].get("ts", 0) or 0) if samples else 0
     if len(samples) < 2:
         return {
             "from_ts": start,
@@ -1251,6 +1256,9 @@ def snapshot_range_usage(from_ts: int | float, to_ts: int | float) -> dict:
             "reset_warnings": [],
             "sample_count": len(samples),
             "segment_count": 0,
+            "sample_from_ts": sample_from_ts,
+            "sample_to_ts": sample_to_ts,
+            "sample_days": sample_days,
             "source": "traffic_snapshots",
         }
     totals: dict[str, dict] = {}
@@ -1273,6 +1281,9 @@ def snapshot_range_usage(from_ts: int | float, to_ts: int | float) -> dict:
         "reset_warnings": list(dict.fromkeys(warnings)),
         "sample_count": len(samples),
         "segment_count": len(segments),
+        "sample_from_ts": sample_from_ts,
+        "sample_to_ts": sample_to_ts,
+        "sample_days": sample_days,
         "source": "traffic_snapshots",
     }
 
@@ -1409,18 +1420,6 @@ def traffic_range_summary(from_day: date, to_day: date, group: str = "daily") ->
     migrate_history_to_traffic_db()
     start = from_day.strftime("%Y-%m-%d")
     end = to_day.strftime("%Y-%m-%d")
-    with traffic_db_session() as conn:
-        rows = conn.execute(
-            """
-            SELECT day, uuid, COALESCE(NULLIF(name, ''), uuid) AS name, SUM(up) AS up, SUM(down) AS down
-            FROM node_daily_usage
-            WHERE day >= ? AND day <= ?
-            GROUP BY day, uuid
-            ORDER BY day ASC, (SUM(up) + SUM(down)) DESC
-            """,
-            (start, end),
-        ).fetchall()
-
     total_nodes: dict[str, dict] = {}
     group_nodes: dict[str, dict] = {}
     group_labels: dict[str, str] = {}
@@ -1450,25 +1449,11 @@ def traffic_range_summary(from_day: date, to_day: date, group: str = "daily") ->
         bucket[uuid]["down"] += down
         bucket[uuid]["name"] = name or bucket[uuid].get("name") or uuid
 
-    for row in rows:
-        day_text = str(row["day"])
-        try:
-            row_day = parse_date_yyyy_mm_dd(day_text)
-        except Exception:
-            continue
-        uuid = str(row["uuid"])
-        name = str(row["name"] or uuid)
-        add_usage(row_day, uuid, name, int(row["up"] or 0), int(row["down"] or 0))
-        rollup_days.add(day_text)
-
     today = today_date()
     now = now_dt()
     d = from_day
     while d <= to_day:
         day_text = d.strftime("%Y-%m-%d")
-        if day_text in rollup_days:
-            d += timedelta(days=1)
-            continue
         if d > today:
             missing_days.append(day_text)
             d += timedelta(days=1)
@@ -1495,7 +1480,20 @@ def traffic_range_summary(from_day: date, to_day: date, group: str = "daily") ->
             reset_warnings.extend(usage.get("reset_warnings", []))
             sample_count += int(usage.get("sample_count", 0) or 0)
         else:
-            missing_days.append(day_text)
+            day_usage = aggregate_daily_usage(d, d)
+            if day_usage:
+                for uuid, item in day_usage.items():
+                    uid = str(uuid)
+                    add_usage(
+                        d,
+                        uid,
+                        str(item.get("name") or uid),
+                        int(item.get("up", 0) or 0),
+                        int(item.get("down", 0) or 0),
+                    )
+                rollup_days.add(day_text)
+            else:
+                missing_days.append(day_text)
         d += timedelta(days=1)
 
     node_rows = _traffic_node_rows_from_map(total_nodes)
@@ -1526,7 +1524,7 @@ def traffic_range_summary(from_day: date, to_day: date, group: str = "daily") ->
         "skipped": list(dict.fromkeys(str(item) for item in skipped)),
         "reset_warnings": list(dict.fromkeys(str(item) for item in reset_warnings)),
         "sample_count": sample_count,
-        "source": "traffic_db+traffic_snapshots" if rollup_days and snapshot_days else ("traffic_snapshots" if snapshot_days else "traffic_db"),
+        "source": "traffic_snapshots+traffic_db" if rollup_days and snapshot_days else ("traffic_snapshots" if snapshot_days else "traffic_db"),
     }
 
 
@@ -1723,9 +1721,13 @@ def telegram_send_alert(text: str):
     return telegram_send_to_chat(text, telegram_alert_chat_id(), parse_mode="HTML")
 
 
+def telegram_configured() -> bool:
+    return bool(str(TELEGRAM_BOT_TOKEN or "").strip() and str(TELEGRAM_CHAT_ID or "").strip())
+
+
 def safe_telegram_send(text: str):
     try:
-        if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+        if telegram_configured():
             telegram_send(text)
     except Exception:
         pass
@@ -2152,6 +2154,9 @@ def build_records_summary(hours: int) -> dict:
         "to": to_text,
         "from_ts": from_ts,
         "to_ts": now_ts,
+        "sample_from_ts": int(usage.get("sample_from_ts", 0) or 0),
+        "sample_to_ts": int(usage.get("sample_to_ts", 0) or 0),
+        "sample_days": usage.get("sample_days", []),
         "nodes": out_nodes,
         "top_nodes": out_nodes[: max(0, int(TOP_N))],
         "total": _traffic_total_from_rows(out_nodes),
@@ -2254,6 +2259,9 @@ def build_snapshot_period_struct(from_dt: datetime, to_dt: datetime | None = Non
         "skipped": usage.get("skipped", []),
         "reset_warnings": usage.get("reset_warnings", []),
         "sample_count": usage.get("sample_count", 0),
+        "sample_from_ts": int(usage.get("sample_from_ts", 0) or 0),
+        "sample_to_ts": int(usage.get("sample_to_ts", 0) or 0),
+        "sample_days": usage.get("sample_days", []),
         "source": usage.get("source", "traffic_snapshots"),
         "note": "snapshot_window" if int(usage.get("sample_count", 0) or 0) >= 2 else "insufficient_snapshots",
     }
@@ -2272,6 +2280,10 @@ def _snapshot_usage_to_struct(usage: dict, hours: int | None = None, limit: int 
         "skipped": usage.get("skipped", []),
         "reset_warnings": usage.get("reset_warnings", []),
         "sample_count": int(usage.get("sample_count", 0) or 0),
+        "segment_count": int(usage.get("segment_count", 0) or 0),
+        "sample_from_ts": int(usage.get("sample_from_ts", 0) or 0),
+        "sample_to_ts": int(usage.get("sample_to_ts", 0) or 0),
+        "sample_days": usage.get("sample_days", []),
         "source": usage.get("source", "traffic_snapshots"),
     }
     if hours is not None:
@@ -2437,60 +2449,21 @@ def _snapshot_usage_has_nodes(usage: dict) -> bool:
 
 def build_live_period_struct(from_dt: datetime, to_dt: datetime | None = None, label: str | None = None) -> dict:
     """
-    Build a current-period view from durable daily rollups plus live snapshots.
+    Build a current-period view directly from continuous traffic_snapshots.
 
-    Completed days come from node_daily_usage; the open day comes from adjacent
-    traffic_snapshots deltas. This avoids period-start marker files while keeping long
-    periods usable even after raw snapshot retention prunes older rows.
+    Daily/weekly/monthly reports may still write daily rollups for archival fallback,
+    but live dashboard periods must not depend on those scheduled jobs.
     """
     to_dt = to_dt or now_dt()
     if from_dt > to_dt:
         raise RuntimeError("from_dt must be <= to_dt")
 
-    nodes_map: dict[str, dict] = {}
-    skipped: list[str] = []
-    reset_warnings: list[str] = []
-    sample_count = 0
-    has_rollup = False
-    snapshot_days = 0
-    rollup_days = 0
-    missing_days: list[str] = []
+    usage = snapshot_range_usage(int(from_dt.timestamp()), int(to_dt.timestamp()))
+    rows = _traffic_node_rows_from_map(usage.get("nodes", {}))
+    sample_count = int(usage.get("sample_count", 0) or 0)
+    snapshot_days = len(usage.get("sample_days", []) or [])
 
-    open_day_start = start_of_day(to_dt.date())
-    historical_end = min(to_dt.date() - timedelta(days=1), today_date() - timedelta(days=1))
-    if from_dt.date() <= historical_end:
-        d = from_dt.date()
-        while d <= historical_end:
-            day_usage = history_sum(d, d)
-            if day_usage:
-                _merge_usage_maps(nodes_map, day_usage)
-                has_rollup = True
-                rollup_days += 1
-            else:
-                day_start = start_of_day(d)
-                day_end = start_of_day(d + timedelta(days=1))
-                usage = snapshot_range_usage(int(day_start.timestamp()), int(day_end.timestamp()))
-                if _snapshot_usage_has_nodes(usage):
-                    _merge_usage_maps(nodes_map, usage.get("nodes", {}))
-                    skipped.extend(usage.get("skipped", []))
-                    reset_warnings.extend(usage.get("reset_warnings", []))
-                    sample_count += int(usage.get("sample_count", 0) or 0)
-                    snapshot_days += 1
-                else:
-                    missing_days.append(d.strftime("%Y-%m-%d"))
-            d += timedelta(days=1)
-
-    live_start = max(from_dt, open_day_start)
-    if live_start < to_dt:
-        usage = snapshot_range_usage(int(live_start.timestamp()), int(to_dt.timestamp()))
-        _merge_usage_maps(nodes_map, usage.get("nodes", {}))
-        skipped.extend(usage.get("skipped", []))
-        reset_warnings.extend(usage.get("reset_warnings", []))
-        sample_count += int(usage.get("sample_count", 0) or 0)
-
-    rows = _traffic_node_rows_from_map(nodes_map)
-    note = "partial_period" if missing_days and rows else ("snapshot_window" if sample_count >= 2 else ("rollup_only" if has_rollup else "insufficient_snapshots"))
-    source = "traffic_db+traffic_snapshots" if has_rollup and sample_count else ("traffic_db" if has_rollup else "traffic_snapshots")
+    note = "snapshot_window" if sample_count >= 2 else "insufficient_snapshots"
     return {
         "from": from_dt.strftime("%Y-%m-%d %H:%M:%S %Z"),
         "to": to_dt.strftime("%Y-%m-%d %H:%M:%S %Z"),
@@ -2498,13 +2471,17 @@ def build_live_period_struct(from_dt: datetime, to_dt: datetime | None = None, l
         "nodes": rows,
         "top_nodes": rows[: max(0, int(TOP_N))],
         "total": _traffic_total_from_rows(rows),
-        "skipped": list(dict.fromkeys(str(item) for item in skipped)),
-        "reset_warnings": list(dict.fromkeys(str(item) for item in reset_warnings)),
+        "skipped": list(dict.fromkeys(str(item) for item in usage.get("skipped", []))),
+        "reset_warnings": list(dict.fromkeys(str(item) for item in usage.get("reset_warnings", []))),
         "sample_count": sample_count,
-        "rollup_days": rollup_days,
+        "segment_count": int(usage.get("segment_count", 0) or 0),
+        "sample_from_ts": int(usage.get("sample_from_ts", 0) or 0),
+        "sample_to_ts": int(usage.get("sample_to_ts", 0) or 0),
+        "sample_days": usage.get("sample_days", []),
+        "rollup_days": 0,
         "snapshot_days": snapshot_days,
-        "missing_days": missing_days,
-        "source": source,
+        "missing_days": [],
+        "source": "traffic_snapshots",
         "note": note,
     }
 
@@ -3033,7 +3010,7 @@ def sample_worker_loop():
     while not SAMPLE_STOP_EVENT.is_set():
         try:
             take_sample_if_due(force=False)
-            run_alert_check(dry_run=False, notify=True, force_sample=False)
+            run_alert_check(dry_run=False, notify=telegram_configured(), force_sample=False)
         except Exception:
             logging.exception("sample worker error")
         SAMPLE_STOP_EVENT.wait(timeout=max(1, SAMPLE_INTERVAL_SECONDS))
@@ -3832,10 +3809,23 @@ def parse_top_scope(text: str):
 
 def listen_commands():
     ensure_dirs()
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 未设置")
-
     logging.info("Komari traffic bot starting (stat_tz=%s)", STAT_TZ)
+
+    # 启动先采一次样；采样是实时统计主链路，不依赖 Telegram/报表推送。
+    try:
+        take_sample_if_due(force=True)
+        run_alert_check(dry_run=False, notify=telegram_configured(), force_sample=False)
+    except Exception:
+        logging.exception("initial sample or alert check failed")
+    start_sample_worker()
+
+    if not telegram_configured():
+        logging.warning("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 未设置，进入仅采样模式")
+        while not SHUTTING_DOWN:
+            time.sleep(3)
+        stop_sample_worker()
+        return
+
     if BOT_START_NOTIFY and should_alert("bot_start", 60):
         instance_label = BOT_INSTANCE_NAME or "default"
         allowed_chats = parse_chat_ids_env("TELEGRAM_ALLOWED_CHAT_IDS", str(TELEGRAM_CHAT_ID))
@@ -3846,14 +3836,6 @@ def listen_commands():
             f"💬 可接收命令 chat 数：{len(allowed_chats)}"
         )
     offset = load_offset()
-
-    # 启动先采一次样
-    try:
-        take_sample_if_due(force=True)
-        run_alert_check(dry_run=False, notify=True, force_sample=False)
-    except Exception:
-        pass
-    start_sample_worker()
     start_report_scheduler()
 
     while True:
