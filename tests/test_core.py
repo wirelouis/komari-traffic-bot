@@ -537,6 +537,43 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(weekly["groups"][0]["key"], "2026-06-01")
         self.assertEqual(weekly["groups"][0]["total"]["total"], 49)
 
+    def test_traffic_range_summary_fills_missing_days_from_snapshots(self):
+        day6 = date(2026, 6, 6)
+        day7 = date(2026, 6, 7)
+        day8 = date(2026, 6, 8)
+        day9 = date(2026, 6, 9)
+
+        k.save_traffic_snapshot(int(k.start_of_day(day6).timestamp()), {
+            "n1": {"name": "Node One", "up": 0, "down": 0},
+        })
+        k.save_traffic_snapshot(int(k.start_of_day(day7).timestamp()), {
+            "n1": {"name": "Node One", "up": 10, "down": 20},
+        })
+        k.save_traffic_snapshot(int(k.start_of_day(day8).timestamp()), {
+            "n1": {"name": "Node One", "up": 13, "down": 27},
+        })
+        k.save_traffic_snapshot(int(k.start_of_day(day9).timestamp()), {
+            "n1": {"name": "Node One", "up": 20, "down": 40},
+        })
+        k.save_traffic_snapshot(int(k.start_of_day(day9).timestamp()) + 12 * 3600, {
+            "n1": {"name": "Node One", "up": 25, "down": 50},
+        })
+
+        with patch.object(k, "today_date", return_value=day9), patch.object(
+            k,
+            "now_dt",
+            return_value=datetime(2026, 6, 9, 12, 0, tzinfo=k.TZ),
+        ):
+            result = k.traffic_range_summary(day6, day9, group="daily")
+
+        self.assertEqual(result["source"], "traffic_snapshots")
+        self.assertEqual(result["day_count"], 4)
+        self.assertEqual(result["days"], ["2026-06-06", "2026-06-07", "2026-06-08", "2026-06-09"])
+        self.assertEqual(result["snapshot_days"], 4)
+        self.assertEqual(result["missing_days"], [])
+        self.assertEqual(result["total"]["total"], 75)
+        self.assertEqual([group["key"] for group in result["groups"]], result["days"])
+
     def test_snapshot_range_usage_aggregates_adjacent_deltas(self):
         k.save_traffic_snapshot(1000, {
             "n1": {"name": "Node One", "up": 10, "down": 20},

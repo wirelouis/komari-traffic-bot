@@ -1425,18 +1425,16 @@ def traffic_range_summary(from_day: date, to_day: date, group: str = "daily") ->
     group_nodes: dict[str, dict] = {}
     group_labels: dict[str, str] = {}
     covered_days = set()
-    for row in rows:
-        day_text = str(row["day"])
-        try:
-            row_day = parse_date_yyyy_mm_dd(day_text)
-        except Exception:
-            continue
-        covered_days.add(day_text)
-        uuid = str(row["uuid"])
-        name = str(row["name"] or uuid)
-        up = int(row["up"] or 0)
-        down = int(row["down"] or 0)
+    rollup_days = set()
+    snapshot_days = set()
+    missing_days: list[str] = []
+    skipped: list[str] = []
+    reset_warnings: list[str] = []
+    sample_count = 0
 
+    def add_usage(row_day: date, uuid: str, name: str, up: int, down: int):
+        day_text = row_day.strftime("%Y-%m-%d")
+        covered_days.add(day_text)
         if uuid not in total_nodes:
             total_nodes[uuid] = {"name": name, "up": 0, "down": 0}
         total_nodes[uuid]["up"] += up
@@ -1451,6 +1449,54 @@ def traffic_range_summary(from_day: date, to_day: date, group: str = "daily") ->
         bucket[uuid]["up"] += up
         bucket[uuid]["down"] += down
         bucket[uuid]["name"] = name or bucket[uuid].get("name") or uuid
+
+    for row in rows:
+        day_text = str(row["day"])
+        try:
+            row_day = parse_date_yyyy_mm_dd(day_text)
+        except Exception:
+            continue
+        uuid = str(row["uuid"])
+        name = str(row["name"] or uuid)
+        add_usage(row_day, uuid, name, int(row["up"] or 0), int(row["down"] or 0))
+        rollup_days.add(day_text)
+
+    today = today_date()
+    now = now_dt()
+    d = from_day
+    while d <= to_day:
+        day_text = d.strftime("%Y-%m-%d")
+        if day_text in rollup_days:
+            d += timedelta(days=1)
+            continue
+        if d > today:
+            missing_days.append(day_text)
+            d += timedelta(days=1)
+            continue
+        day_start = start_of_day(d)
+        day_end = now if d == today else start_of_day(d + timedelta(days=1))
+        if day_end <= day_start:
+            missing_days.append(day_text)
+            d += timedelta(days=1)
+            continue
+        usage = snapshot_range_usage(int(day_start.timestamp()), int(day_end.timestamp()))
+        if _snapshot_usage_has_nodes(usage):
+            for uuid, item in (usage.get("nodes") or {}).items():
+                uid = str(uuid)
+                add_usage(
+                    d,
+                    uid,
+                    str(item.get("name") or uid),
+                    int(item.get("up", 0) or 0),
+                    int(item.get("down", 0) or 0),
+                )
+            snapshot_days.add(day_text)
+            skipped.extend(usage.get("skipped", []))
+            reset_warnings.extend(usage.get("reset_warnings", []))
+            sample_count += int(usage.get("sample_count", 0) or 0)
+        else:
+            missing_days.append(day_text)
+        d += timedelta(days=1)
 
     node_rows = _traffic_node_rows_from_map(total_nodes)
     groups = []
@@ -1474,7 +1520,13 @@ def traffic_range_summary(from_day: date, to_day: date, group: str = "daily") ->
         "top_nodes": node_rows[: max(0, int(TOP_N))],
         "total": _traffic_total_from_rows(node_rows),
         "groups": groups,
-        "source": "traffic_db",
+        "rollup_days": len(rollup_days),
+        "snapshot_days": len(snapshot_days),
+        "missing_days": missing_days,
+        "skipped": list(dict.fromkeys(str(item) for item in skipped)),
+        "reset_warnings": list(dict.fromkeys(str(item) for item in reset_warnings)),
+        "sample_count": sample_count,
+        "source": "traffic_db+traffic_snapshots" if rollup_days and snapshot_days else ("traffic_snapshots" if snapshot_days else "traffic_db"),
     }
 
 
