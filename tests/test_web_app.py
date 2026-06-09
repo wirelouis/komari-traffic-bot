@@ -327,7 +327,7 @@ class WebAppTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         last_24h = payload["data"]["records"]["last_24h"]
         self.assertTrue(last_24h["ok"])
-        self.assertEqual(last_24h["data"]["source"], "traffic_snapshots")
+        self.assertEqual(last_24h["data"]["source"], "traffic_segments")
         self.assertEqual(last_24h["data"]["error"], "insufficient_snapshots")
         self.assertFalse(payload["data"]["services"]["komari"]["configured"])
 

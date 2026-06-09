@@ -3,7 +3,7 @@ import sys
 import tempfile
 import types
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -573,7 +573,8 @@ class CoreTests(unittest.TestCase):
         ):
             result = k.traffic_range_summary(day6, day9, group="daily")
 
-        self.assertEqual(result["source"], "traffic_snapshots")
+        self.assertEqual(result["source"], "traffic_segments")
+        self.assertEqual(result["source_parts"], ["traffic_segments"])
         self.assertEqual(result["day_count"], 4)
         self.assertEqual(result["days"], ["2026-06-06", "2026-06-07", "2026-06-08", "2026-06-09"])
         self.assertEqual(result["snapshot_days"], 4)
@@ -601,7 +602,8 @@ class CoreTests(unittest.TestCase):
         ):
             result = k.traffic_range_summary(day, day, group="daily")
 
-        self.assertEqual(result["source"], "traffic_snapshots")
+        self.assertEqual(result["source"], "traffic_segments")
+        self.assertEqual(result["source_parts"], ["traffic_segments"])
         self.assertEqual(result["rollup_days"], 0)
         self.assertEqual(result["snapshot_days"], 1)
         self.assertEqual(result["total"]["total"], 90)
@@ -622,6 +624,7 @@ class CoreTests(unittest.TestCase):
 
         usage = k.snapshot_range_usage(1000, 1600)
 
+        self.assertEqual(usage["source"], "traffic_segments")
         self.assertEqual(usage["sample_count"], 3)
         self.assertEqual(usage["nodes"]["n1"]["up"], 10)
         self.assertEqual(usage["nodes"]["n1"]["down"], 25)
@@ -688,7 +691,8 @@ class CoreTests(unittest.TestCase):
             result = k.build_records_summary(24)
 
         by_uuid = {node["uuid"]: node for node in result["nodes"]}
-        self.assertEqual(result["source"], "traffic_snapshots")
+        self.assertEqual(result["source"], "traffic_segments")
+        self.assertEqual(result["source_parts"], ["traffic_segments"])
         self.assertEqual(result["sample_count"], 2)
         self.assertEqual(by_uuid["n1"]["up"], 60)
         self.assertEqual(by_uuid["n1"]["down"], 80)
@@ -740,6 +744,83 @@ class CoreTests(unittest.TestCase):
 
         self.assertEqual(usage["nodes"]["n1"]["up"], 5)
         self.assertEqual(usage["nodes"]["n1"]["down"], 15)
+        self.assertEqual(k.traffic_segments_count(), 1)
+        daily = k.aggregate_daily_usage(date(1970, 1, 1), date(1970, 1, 1))["n1"]
+        self.assertEqual(daily["up"], 5)
+        self.assertEqual(daily["down"], 15)
+
+    def test_segment_materialization_splits_cross_midnight(self):
+        day1 = date(2026, 6, 1)
+        day2 = date(2026, 6, 2)
+        start_ts = int((k.start_of_day(day2) - timedelta(minutes=30)).timestamp())
+        end_ts = int((k.start_of_day(day2) + timedelta(minutes=30)).timestamp())
+        k.save_traffic_snapshot(start_ts, {
+            "n1": {"name": "Node One", "up": 0, "down": 0},
+        })
+        k.save_traffic_snapshot(end_ts, {
+            "n1": {"name": "Node One", "up": 120, "down": 60},
+        })
+
+        k.rebuild_traffic_segments_from_snapshots()
+
+        day1_usage = k.aggregate_daily_usage(day1, day1)["n1"]
+        day2_usage = k.aggregate_daily_usage(day2, day2)["n1"]
+        self.assertEqual(day1_usage["up"], 60)
+        self.assertEqual(day1_usage["down"], 30)
+        self.assertEqual(day2_usage["up"], 60)
+        self.assertEqual(day2_usage["down"], 30)
+
+    def test_live_week_uses_history_for_6_7_8_and_live_today(self):
+        day6 = date(2026, 6, 6)
+        day7 = date(2026, 6, 7)
+        day8 = date(2026, 6, 8)
+        day9 = date(2026, 6, 9)
+        for day, total in ((day6, 10), (day7, 20), (day8, 30)):
+            k.upsert_daily_usage(day.strftime("%Y-%m-%d"), {
+                "n1": {"name": "Node One", "up": total, "down": 0},
+            }, source="history_json")
+
+        start_ts = int(k.start_of_day(day9).timestamp())
+        now = datetime(2026, 6, 9, 12, 0, tzinfo=k.TZ)
+        k.save_traffic_snapshot(start_ts, {
+            "n1": {"name": "Node One", "up": 100, "down": 0},
+        })
+        k.save_traffic_snapshot(int(now.timestamp()), {
+            "n1": {"name": "Node One", "up": 140, "down": 0},
+        })
+
+        with patch.object(k, "today_date", return_value=day9), patch.object(k, "now_dt", return_value=now):
+            today = k.build_live_period_struct(k.start_of_day(day9), now)
+            week = k.build_live_period_struct(k.start_of_day(day8), now)
+            month = k.build_live_period_struct(k.start_of_day(date(2026, 6, 1)), now)
+
+        self.assertEqual(today["total"]["total"], 40)
+        self.assertEqual(week["total"]["total"], 70)
+        self.assertEqual(month["total"]["total"], 100)
+        self.assertNotEqual(today["total"]["total"], week["total"]["total"])
+        self.assertNotEqual(week["total"]["total"], month["total"]["total"])
+        self.assertEqual(week["source"], "traffic_db+traffic_segments")
+        self.assertEqual(week["rollup_days"], 1)
+        self.assertEqual(week["snapshot_days"], 1)
+        self.assertIn("2026-06-08", week["coverage_days"])
+        self.assertIn("2026-06-09", week["coverage_days"])
+
+    def test_live_period_marks_missing_days_when_only_today_samples_exist(self):
+        day9 = date(2026, 6, 9)
+        now = datetime(2026, 6, 9, 12, 0, tzinfo=k.TZ)
+        k.save_traffic_snapshot(int(k.start_of_day(day9).timestamp()), {
+            "n1": {"name": "Node One", "up": 100, "down": 0},
+        })
+        k.save_traffic_snapshot(int(now.timestamp()), {
+            "n1": {"name": "Node One", "up": 120, "down": 0},
+        })
+
+        with patch.object(k, "today_date", return_value=day9), patch.object(k, "now_dt", return_value=now):
+            week = k.build_live_period_struct(k.start_of_day(date(2026, 6, 8)), now)
+
+        self.assertEqual(week["total"]["total"], 20)
+        self.assertEqual(week["coverage_days"], ["2026-06-09"])
+        self.assertEqual(week["missing_days"], ["2026-06-08"])
 
     def test_live_period_uses_realtime_snapshots_without_daily_rollup(self):
         k.upsert_daily_usage("2026-06-01", {
@@ -759,7 +840,8 @@ class CoreTests(unittest.TestCase):
             )
 
         by_uuid = {item["uuid"]: item for item in period["nodes"]}
-        self.assertEqual(period["source"], "traffic_snapshots")
+        self.assertEqual(period["source"], "traffic_segments")
+        self.assertEqual(period["source_parts"], ["traffic_segments"])
         self.assertEqual(period["rollup_days"], 0)
         self.assertEqual(by_uuid["n1"]["up"], 30)
         self.assertEqual(by_uuid["n1"]["down"], 60)

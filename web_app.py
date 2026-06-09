@@ -758,6 +758,9 @@ def build_system_status_struct(include_recent: bool = True) -> dict:
     }
     maintenance = build_maintenance_status()
     recent_failures = len([run for run in recent_runs if run and run.get("status") != "success"])
+    latest_sample_ts = int(db_status.get("latest_sample_ts", 0) or 0)
+    sample_lag = db_status.get("sample_lag_seconds")
+    sample_stale = bool(db_status.get("sample_stale"))
     service_items = [
         {
             "key": "komari",
@@ -824,6 +827,17 @@ def build_system_status_struct(include_recent: bool = True) -> dict:
             "fix": "" if db_status.get("ok") else db_status.get("error") or "检查 data 目录权限。",
         },
         {
+            "key": "sampling",
+            "label": "实时采样",
+            "level": "warn" if (not latest_sample_ts or sample_stale) else "ok",
+            "message": "采样链路正常。" if latest_sample_ts and not sample_stale else ("采样已滞后。" if latest_sample_ts else "还没有采样快照。"),
+            "detail": (
+                f"最近采样：{db_status.get('latest_sample_at') or '暂无'}；"
+                f"滞后：{sample_lag if sample_lag is not None else '-'} 秒。"
+            ),
+            "fix": "" if latest_sample_ts and not sample_stale else "确认 bot/listen 服务正在运行。",
+        },
+        {
             "key": "runs",
             "label": "任务记录",
             "level": "bad" if recent_failures else "ok",
@@ -886,6 +900,10 @@ def build_system_status_struct(include_recent: bool = True) -> dict:
             "sample_thread_alive": bool(k.SAMPLE_THREAD and k.SAMPLE_THREAD.is_alive()),
             "scheduler_thread_alive": bool(k.SCHEDULER_THREAD and k.SCHEDULER_THREAD.is_alive()),
             "sample_interval_seconds": k.SAMPLE_INTERVAL_SECONDS,
+            "latest_sample_ts": latest_sample_ts,
+            "latest_sample_at": db_status.get("latest_sample_at", ""),
+            "sample_lag_seconds": sample_lag,
+            "sample_stale": sample_stale,
             "scheduler_note": "Docker 部署中通常由 bot/listen 服务执行采样和应用内计划，Web 服务负责展示状态。",
             "schedules": {
                 "total": len(schedules),
@@ -1051,10 +1069,18 @@ def build_period_summary(scope: str) -> dict:
         "skipped": current_period.get("skipped", []),
         "reset_warnings": current_period.get("reset_warnings", []),
         "sample_count": current_period.get("sample_count", 0),
+        "segment_count": current_period.get("segment_count", 0),
         "rollup_days": current_period.get("rollup_days", 0),
         "snapshot_days": current_period.get("snapshot_days", 0),
+        "segment_days": current_period.get("segment_days", 0),
+        "coverage_days": current_period.get("coverage_days", []),
         "missing_days": current_period.get("missing_days", []),
         "source": current_period.get("source", "traffic_snapshots"),
+        "source_parts": current_period.get("source_parts", []),
+        "latest_sample_ts": current_period.get("latest_sample_ts", 0),
+        "latest_sample_at": current_period.get("latest_sample_at", ""),
+        "sample_lag_seconds": current_period.get("sample_lag_seconds"),
+        "sample_stale": current_period.get("sample_stale", False),
     }
 
 

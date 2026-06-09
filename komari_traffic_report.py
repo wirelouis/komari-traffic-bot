@@ -707,6 +707,22 @@ def init_traffic_db():
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS traffic_segments (
+              sample_from_ts INTEGER NOT NULL,
+              sample_to_ts INTEGER NOT NULL,
+              uuid TEXT NOT NULL,
+              name TEXT NOT NULL,
+              up INTEGER NOT NULL DEFAULT 0,
+              down INTEGER NOT NULL DEFAULT 0,
+              skipped TEXT NOT NULL DEFAULT '[]',
+              reset_warnings TEXT NOT NULL DEFAULT '[]',
+              updated_at INTEGER NOT NULL,
+              PRIMARY KEY (sample_from_ts, sample_to_ts, uuid)
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS task_runs (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               type TEXT NOT NULL,
@@ -725,9 +741,12 @@ def init_traffic_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_task_runs_started ON task_runs(started_at DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_traffic_snapshots_uuid_ts ON traffic_snapshots(uuid, ts)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_traffic_snapshots_ts ON traffic_snapshots(ts)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_traffic_segments_range ON traffic_segments(sample_from_ts, sample_to_ts)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_traffic_segments_uuid_range ON traffic_segments(uuid, sample_from_ts, sample_to_ts)")
         conn.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(1, ?)", (now_dt().isoformat(),))
         conn.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(2, ?)", (now_dt().isoformat(),))
         conn.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(3, ?)", (now_dt().isoformat(),))
+        conn.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(4, ?)", (now_dt().isoformat(),))
 
 
 def _json_dumps_compact(data) -> str:
@@ -916,7 +935,7 @@ def prune_task_runs(retention_days: int | None = None, now_ts: int | float | Non
 
 def traffic_db_table_counts() -> dict:
     init_traffic_db()
-    tables = ("node_daily_usage", "period_rollups", "traffic_snapshots", "task_runs")
+    tables = ("node_daily_usage", "period_rollups", "traffic_snapshots", "traffic_segments", "task_runs")
     counts = {}
     with traffic_db_session() as conn:
         for table in tables:
@@ -941,9 +960,12 @@ def traffic_db_healthcheck() -> dict:
         "size": size,
         "size_human": human_bytes(size),
         "daily_rows": counts.get("node_daily_usage", 0),
+        "snapshot_rows": counts.get("traffic_snapshots", 0),
+        "segment_rows": counts.get("traffic_segments", 0),
         "task_runs": counts.get("task_runs", 0),
         "table_counts": counts,
         "quick_check": "ok",
+        **traffic_sample_lag_status(),
     }
 
 
@@ -1123,6 +1145,109 @@ def traffic_snapshot_rows_between(from_ts: int | float, to_ts: int | float) -> l
     ]
 
 
+def traffic_snapshot_rows_all(from_ts: int | float | None = None, to_ts: int | float | None = None) -> list[dict]:
+    init_traffic_db()
+    where = []
+    params: list[int] = []
+    if from_ts is not None:
+        where.append("ts >= ?")
+        params.append(int(from_ts))
+    if to_ts is not None:
+        where.append("ts <= ?")
+        params.append(int(to_ts))
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    with traffic_db_session() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT ts, uuid, COALESCE(NULLIF(name, ''), uuid) AS name, up, down, skipped
+            FROM traffic_snapshots
+            {where_sql}
+            ORDER BY ts ASC, uuid ASC
+            """,
+            params,
+        ).fetchall()
+    return [
+        {
+            "ts": int(row["ts"] or 0),
+            "uuid": str(row["uuid"]),
+            "name": str(row["name"] or row["uuid"]),
+            "up": int(row["up"] or 0),
+            "down": int(row["down"] or 0),
+            "skipped": _json_loads_list(row["skipped"]),
+        }
+        for row in rows
+    ]
+
+
+def traffic_snapshot_rows_for_timestamps(timestamps: list[int]) -> list[dict]:
+    values = sorted({int(ts) for ts in timestamps if int(ts or 0) > 0})
+    if not values:
+        return []
+    init_traffic_db()
+    placeholders = ",".join("?" for _ in values)
+    with traffic_db_session() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT ts, uuid, COALESCE(NULLIF(name, ''), uuid) AS name, up, down, skipped
+            FROM traffic_snapshots
+            WHERE ts IN ({placeholders})
+            ORDER BY ts ASC, uuid ASC
+            """,
+            values,
+        ).fetchall()
+    return [
+        {
+            "ts": int(row["ts"] or 0),
+            "uuid": str(row["uuid"]),
+            "name": str(row["name"] or row["uuid"]),
+            "up": int(row["up"] or 0),
+            "down": int(row["down"] or 0),
+            "skipped": _json_loads_list(row["skipped"]),
+        }
+        for row in rows
+    ]
+
+
+def latest_traffic_snapshot_ts() -> int:
+    init_traffic_db()
+    with traffic_db_session() as conn:
+        row = conn.execute("SELECT MAX(ts) AS ts FROM traffic_snapshots").fetchone()
+    return int(row["ts"] or 0) if row and row["ts"] is not None else 0
+
+
+def latest_traffic_snapshot_timestamps(limit: int = 2, to_ts: int | float | None = None) -> list[int]:
+    init_traffic_db()
+    params: list[int] = []
+    where = ""
+    if to_ts is not None:
+        where = "WHERE ts <= ?"
+        params.append(int(to_ts))
+    params.append(max(1, int(limit)))
+    with traffic_db_session() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT ts
+            FROM (SELECT DISTINCT ts FROM traffic_snapshots {where} ORDER BY ts DESC LIMIT ?)
+            ORDER BY ts ASC
+            """,
+            params,
+        ).fetchall()
+    return [int(row["ts"] or 0) for row in rows]
+
+
+def traffic_sample_lag_status(now_ts: int | float | None = None) -> dict:
+    latest_ts = latest_traffic_snapshot_ts()
+    now_value = int(now_ts if now_ts is not None else time.time())
+    lag = max(0, now_value - latest_ts) if latest_ts else None
+    return {
+        "latest_sample_ts": latest_ts,
+        "latest_sample_at": datetime.fromtimestamp(latest_ts, TZ).strftime("%Y-%m-%d %H:%M:%S %Z") if latest_ts else "",
+        "sample_lag_seconds": lag,
+        "sample_stale": bool(lag is not None and lag > max(1, int(SAMPLE_INTERVAL_SECONDS)) * 2),
+        "sample_interval_seconds": int(SAMPLE_INTERVAL_SECONDS),
+    }
+
+
 def _json_loads_list(text: str) -> list:
     try:
         value = json.loads(text or "[]")
@@ -1173,6 +1298,108 @@ def _hour_bucket_label_and_end(ts: int) -> tuple[str, int]:
     return bucket_start.strftime("%Y-%m-%d %H:00"), bucket_end
 
 
+def _segment_from_samples(prev: dict, cur: dict) -> dict | None:
+    prev_ts = int(prev.get("ts", 0) or 0)
+    cur_ts = int(cur.get("ts", 0) or 0)
+    if cur_ts <= prev_ts:
+        return None
+    deltas, segment_warnings = compute_strict_sample_delta_from_maps(cur.get("nodes", {}), prev.get("nodes", {}))
+    return {
+        "sample_from_ts": prev_ts,
+        "sample_to_ts": cur_ts,
+        "segment_seconds": cur_ts - prev_ts,
+        "nodes": deltas,
+        "skipped": [str(item) for item in (prev.get("skipped", []) or []) + (cur.get("skipped", []) or [])],
+        "reset_warnings": segment_warnings,
+    }
+
+
+def save_traffic_segments(segments: list[dict]) -> int:
+    if not segments:
+        return 0
+    init_traffic_db()
+    updated_at = int(time.time())
+    rows = []
+    for segment in segments:
+        start = int(segment.get("sample_from_ts", 0) or 0)
+        end = int(segment.get("sample_to_ts", 0) or 0)
+        if end <= start:
+            continue
+        skipped_json = json.dumps(list(dict.fromkeys(str(item) for item in (segment.get("skipped", []) or []))), ensure_ascii=False)
+        reset_json = json.dumps(list(dict.fromkeys(str(item) for item in (segment.get("reset_warnings", []) or []))), ensure_ascii=False)
+        for uuid, item in (segment.get("nodes") or {}).items():
+            if not isinstance(item, dict):
+                continue
+            uid = str(uuid or "").strip()
+            if not uid:
+                continue
+            up = max(0, int(item.get("up", 0) or 0))
+            down = max(0, int(item.get("down", 0) or 0))
+            rows.append((start, end, uid, str(item.get("name") or uid), up, down, skipped_json, reset_json, updated_at))
+    if not rows:
+        return 0
+    with traffic_db_session() as conn:
+        conn.executemany(
+            """
+            INSERT INTO traffic_segments(sample_from_ts, sample_to_ts, uuid, name, up, down, skipped, reset_warnings, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(sample_from_ts, sample_to_ts, uuid) DO UPDATE SET
+              name=excluded.name,
+              up=excluded.up,
+              down=excluded.down,
+              skipped=excluded.skipped,
+              reset_warnings=excluded.reset_warnings,
+              updated_at=excluded.updated_at
+            """,
+            rows,
+        )
+    return len(rows)
+
+
+def traffic_segment_rows_between(from_ts: int | float, to_ts: int | float) -> list[dict]:
+    init_traffic_db()
+    start = int(from_ts)
+    end = int(to_ts)
+    with traffic_db_session() as conn:
+        rows = conn.execute(
+            """
+            SELECT sample_from_ts, sample_to_ts, uuid, COALESCE(NULLIF(name, ''), uuid) AS name,
+                   up, down, skipped, reset_warnings
+            FROM traffic_segments
+            WHERE sample_to_ts > ? AND sample_from_ts < ?
+            ORDER BY sample_from_ts ASC, sample_to_ts ASC, uuid ASC
+            """,
+            (start, end),
+        ).fetchall()
+    return [
+        {
+            "sample_from_ts": int(row["sample_from_ts"] or 0),
+            "sample_to_ts": int(row["sample_to_ts"] or 0),
+            "uuid": str(row["uuid"]),
+            "name": str(row["name"] or row["uuid"]),
+            "up": int(row["up"] or 0),
+            "down": int(row["down"] or 0),
+            "skipped": _json_loads_list(row["skipped"]),
+            "reset_warnings": _json_loads_list(row["reset_warnings"]),
+        }
+        for row in rows
+    ]
+
+
+def build_segments_from_samples(samples: list[dict]) -> list[dict]:
+    segments = []
+    prev = None
+    for sample in samples:
+        if not isinstance(sample, dict):
+            continue
+        if prev is not None:
+            segment = _segment_from_samples(prev, sample)
+            if segment:
+                segments.append(segment)
+        prev = sample
+    return segments
+
+
 def snapshot_delta_segments(from_ts: int | float, to_ts: int | float) -> tuple[list[dict], list[dict]]:
     start = int(from_ts)
     end = int(to_ts)
@@ -1188,13 +1415,14 @@ def snapshot_delta_segments(from_ts: int | float, to_ts: int | float) -> tuple[l
     segments = []
     prev = samples[0]
     for cur in samples[1:]:
-        prev_ts = int(prev.get("ts", 0) or 0)
-        cur_ts = int(cur.get("ts", 0) or 0)
-        segment_seconds = cur_ts - prev_ts
-        if segment_seconds <= 0:
+        raw_segment = _segment_from_samples(prev, cur)
+        if not raw_segment:
             prev = cur
             continue
 
+        prev_ts = int(raw_segment.get("sample_from_ts", 0) or 0)
+        cur_ts = int(raw_segment.get("sample_to_ts", 0) or 0)
+        segment_seconds = int(raw_segment.get("segment_seconds", 0) or 0)
         overlap_start = max(prev_ts, start)
         overlap_end = min(cur_ts, end)
         overlap_seconds = overlap_end - overlap_start
@@ -1202,7 +1430,6 @@ def snapshot_delta_segments(from_ts: int | float, to_ts: int | float) -> tuple[l
             prev = cur
             continue
 
-        deltas, segment_warnings = compute_strict_sample_delta_from_maps(cur.get("nodes", {}), prev.get("nodes", {}))
         segments.append({
             "sample_from_ts": prev_ts,
             "sample_to_ts": cur_ts,
@@ -1210,9 +1437,9 @@ def snapshot_delta_segments(from_ts: int | float, to_ts: int | float) -> tuple[l
             "to_ts": overlap_end,
             "overlap_seconds": overlap_seconds,
             "segment_seconds": segment_seconds,
-            "nodes": deltas,
-            "skipped": [str(item) for item in (prev.get("skipped", []) or []) + (cur.get("skipped", []) or [])],
-            "reset_warnings": segment_warnings,
+            "nodes": raw_segment.get("nodes", {}),
+            "skipped": raw_segment.get("skipped", []),
+            "reset_warnings": raw_segment.get("reset_warnings", []),
         })
         prev = cur
     return samples, segments
@@ -1236,56 +1463,259 @@ def migrate_samples_to_traffic_db() -> int:
     return migrated
 
 
-def snapshot_range_usage(from_ts: int | float, to_ts: int | float) -> dict:
+def _traffic_segment_usage(from_ts: int | float, to_ts: int | float) -> dict:
     start = int(from_ts)
     end = int(to_ts)
-    samples, segments = snapshot_delta_segments(start, end)
+    rows = traffic_segment_rows_between(start, end)
     sample_days = sorted({
-        datetime.fromtimestamp(int(sample.get("ts", 0) or 0), TZ).strftime("%Y-%m-%d")
-        for sample in samples
-        if int(sample.get("ts", 0) or 0) > 0
+        day
+        for row in rows
+        for day in (
+            datetime.fromtimestamp(int(row.get("sample_from_ts", 0) or 0), TZ).strftime("%Y-%m-%d"),
+            datetime.fromtimestamp(max(int(row.get("sample_to_ts", 0) or 0) - 1, int(row.get("sample_from_ts", 0) or 0)), TZ).strftime("%Y-%m-%d"),
+        )
+        if int(row.get("sample_from_ts", 0) or 0) > 0 and int(row.get("sample_to_ts", 0) or 0) > 0
     })
-    sample_from_ts = int(samples[0].get("ts", 0) or 0) if samples else 0
-    sample_to_ts = int(samples[-1].get("ts", 0) or 0) if samples else 0
-    if len(samples) < 2:
+    sample_points = set()
+    for row in rows:
+        sample_points.add(int(row.get("sample_from_ts", 0) or 0))
+        sample_points.add(int(row.get("sample_to_ts", 0) or 0))
+    sample_points.discard(0)
+    sample_from_ts = min(sample_points) if sample_points else 0
+    sample_to_ts = max(sample_points) if sample_points else 0
+    if not rows:
         return {
             "from_ts": start,
             "to_ts": end,
             "nodes": {},
             "skipped": [],
             "reset_warnings": [],
-            "sample_count": len(samples),
+            "sample_count": 0,
             "segment_count": 0,
             "sample_from_ts": sample_from_ts,
             "sample_to_ts": sample_to_ts,
             "sample_days": sample_days,
-            "source": "traffic_snapshots",
+            "source": "traffic_segments",
+            "source_parts": [],
         }
+
     totals: dict[str, dict] = {}
     skipped: list[str] = []
     warnings: list[str] = []
-    for segment in segments:
-        scaled = _scale_delta_map(segment.get("nodes", {}), int(segment.get("overlap_seconds", 0) or 0), int(segment.get("segment_seconds", 0) or 0))
-        skipped.extend(segment.get("skipped", []))
-        warnings.extend(segment.get("reset_warnings", []))
-        for uuid, item in scaled.items():
-            entry = totals.setdefault(uuid, {"name": item.get("name") or uuid, "up": 0, "down": 0})
-            entry["name"] = item.get("name") or entry.get("name") or uuid
-            entry["up"] += max(0, int(item.get("up", 0) or 0))
-            entry["down"] += max(0, int(item.get("down", 0) or 0))
+    segment_keys = set()
+    for row in rows:
+        segment_start = int(row.get("sample_from_ts", 0) or 0)
+        segment_end = int(row.get("sample_to_ts", 0) or 0)
+        segment_seconds = segment_end - segment_start
+        overlap_seconds = min(segment_end, end) - max(segment_start, start)
+        if segment_seconds <= 0 or overlap_seconds <= 0:
+            continue
+        uuid = str(row.get("uuid") or "")
+        if not uuid:
+            continue
+        up = _scale_bytes_by_overlap(int(row.get("up", 0) or 0), overlap_seconds, segment_seconds)
+        down = _scale_bytes_by_overlap(int(row.get("down", 0) or 0), overlap_seconds, segment_seconds)
+        entry = totals.setdefault(uuid, {"name": row.get("name") or uuid, "up": 0, "down": 0})
+        entry["name"] = row.get("name") or entry.get("name") or uuid
+        entry["up"] += up
+        entry["down"] += down
+        skipped.extend(row.get("skipped", []))
+        warnings.extend(row.get("reset_warnings", []))
+        segment_keys.add((segment_start, segment_end))
     return {
         "from_ts": start,
         "to_ts": end,
         "nodes": totals,
         "skipped": list(dict.fromkeys(skipped)),
         "reset_warnings": list(dict.fromkeys(warnings)),
-        "sample_count": len(samples),
-        "segment_count": len(segments),
+        "sample_count": len(sample_points),
+        "segment_count": len(segment_keys),
         "sample_from_ts": sample_from_ts,
         "sample_to_ts": sample_to_ts,
         "sample_days": sample_days,
-        "source": "traffic_snapshots",
+        "source": "traffic_segments",
+        "source_parts": ["traffic_segments"],
     }
+
+
+def _segment_days(segment: dict) -> list[date]:
+    start = int(segment.get("sample_from_ts", 0) or 0)
+    end = int(segment.get("sample_to_ts", 0) or 0)
+    if end <= start:
+        return []
+    days = []
+    d = datetime.fromtimestamp(start, TZ).date()
+    last = datetime.fromtimestamp(end - 1, TZ).date()
+    while d <= last:
+        days.append(d)
+        d += timedelta(days=1)
+    return days
+
+
+def traffic_segments_exist_for_day(day_value: date) -> bool:
+    day_start = int(start_of_day(day_value).timestamp())
+    day_end = int(start_of_day(day_value + timedelta(days=1)).timestamp())
+    init_traffic_db()
+    with traffic_db_session() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM traffic_segments WHERE sample_to_ts > ? AND sample_from_ts < ? LIMIT 1",
+            (day_start, day_end),
+        ).fetchone()
+    return row is not None
+
+
+def replace_daily_usage(day_str: str, deltas: dict, source: str = "history", source_from: str = "", source_to: str = "", reset_warnings: list[str] | None = None, skipped: list[str] | None = None):
+    init_traffic_db()
+    with traffic_db_session() as conn:
+        conn.execute("DELETE FROM node_daily_usage WHERE day = ?", (day_str,))
+    upsert_daily_usage(
+        day_str,
+        deltas,
+        source=source,
+        source_from=source_from,
+        source_to=source_to,
+        reset_warnings=reset_warnings,
+        skipped=skipped,
+    )
+
+
+def materialize_daily_usage_from_segments(days: list[date]) -> int:
+    count = 0
+    for day in sorted(set(days)):
+        day_start = int(start_of_day(day).timestamp())
+        day_end = int(start_of_day(day + timedelta(days=1)).timestamp())
+        usage = _traffic_segment_usage(day_start, day_end)
+        nodes = usage.get("nodes", {})
+        if not nodes:
+            continue
+        replace_daily_usage(
+            day.strftime("%Y-%m-%d"),
+            nodes,
+            source="traffic_segments",
+            source_from=str(int(usage.get("sample_from_ts", 0) or 0)),
+            source_to=str(int(usage.get("sample_to_ts", 0) or 0)),
+            reset_warnings=usage.get("reset_warnings", []),
+            skipped=usage.get("skipped", []),
+        )
+        count += len(nodes)
+    return count
+
+
+def rebuild_traffic_segments_from_snapshots(from_ts: int | float | None = None, to_ts: int | float | None = None) -> dict:
+    rows = traffic_snapshot_rows_all(from_ts, to_ts)
+    samples = snapshots_to_samples(rows)
+    segments = build_segments_from_samples(samples)
+    saved = save_traffic_segments(segments)
+    days: list[date] = []
+    for segment in segments:
+        days.extend(_segment_days(segment))
+    daily_rows = materialize_daily_usage_from_segments(days)
+    return {"samples": len(samples), "segments": len(segments), "saved_rows": saved, "daily_rows": daily_rows}
+
+
+def traffic_segments_count() -> int:
+    init_traffic_db()
+    with traffic_db_session() as conn:
+        row = conn.execute("SELECT COUNT(*) AS c FROM traffic_segments").fetchone()
+    return int(row["c"] or 0)
+
+
+def traffic_snapshot_sample_count() -> int:
+    init_traffic_db()
+    with traffic_db_session() as conn:
+        row = conn.execute("SELECT COUNT(DISTINCT ts) AS c FROM traffic_snapshots").fetchone()
+    return int(row["c"] or 0)
+
+
+def traffic_segment_pair_count() -> int:
+    init_traffic_db()
+    with traffic_db_session() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS c
+            FROM (
+              SELECT sample_from_ts, sample_to_ts
+              FROM traffic_segments
+              GROUP BY sample_from_ts, sample_to_ts
+            )
+            """
+        ).fetchone()
+    return int(row["c"] or 0)
+
+
+def missing_traffic_segment_pairs() -> dict:
+    snapshot_rows = traffic_snapshot_rows_all()
+    samples = snapshots_to_samples(snapshot_rows)
+    expected = [
+        (int(samples[index - 1]["ts"]), int(samples[index]["ts"]))
+        for index in range(1, len(samples))
+    ]
+    if not expected:
+        return {"samples": len(samples), "expected_pairs": 0, "missing_pairs": []}
+
+    init_traffic_db()
+    with traffic_db_session() as conn:
+        rows = conn.execute(
+            """
+            SELECT sample_from_ts, sample_to_ts
+            FROM traffic_segments
+            GROUP BY sample_from_ts, sample_to_ts
+            """
+        ).fetchall()
+    existing = {(int(row["sample_from_ts"] or 0), int(row["sample_to_ts"] or 0)) for row in rows}
+    missing = [pair for pair in expected if pair not in existing]
+    return {
+        "samples": len(samples),
+        "expected_pairs": len(expected),
+        "existing_pairs": len(existing),
+        "missing_pairs": missing,
+    }
+
+
+def ensure_traffic_segments_backfilled() -> dict:
+    migrate_samples_to_traffic_db()
+    status = missing_traffic_segment_pairs()
+    expected_pairs = int(status.get("expected_pairs", 0) or 0)
+    missing_pairs = status.get("missing_pairs", []) or []
+    if expected_pairs <= 0:
+        return {"skipped": True, "reason": "insufficient_snapshots", "samples": int(status.get("samples", 0) or 0)}
+    if not missing_pairs:
+        return {"skipped": True, "reason": "segments_current", "samples": int(status.get("samples", 0) or 0), "segment_pairs": expected_pairs}
+    result = rebuild_traffic_segments_from_snapshots()
+    result["skipped"] = False
+    result["expected_pairs"] = expected_pairs
+    result["missing_pairs"] = len(missing_pairs)
+    return result
+
+
+def materialize_latest_traffic_segment(current_ts: int | float | None = None) -> dict:
+    ts_limit = int(current_ts if current_ts is not None else time.time())
+    timestamps = latest_traffic_snapshot_timestamps(2, to_ts=ts_limit)
+    if len(timestamps) < 2:
+        return {"skipped": True, "reason": "insufficient_snapshots", "samples": len(timestamps)}
+    rows = traffic_snapshot_rows_for_timestamps(timestamps)
+    samples = snapshots_to_samples(rows)
+    if len(samples) < 2:
+        return {"skipped": True, "reason": "insufficient_samples", "samples": len(samples)}
+    segments = build_segments_from_samples(samples[-2:])
+    saved = save_traffic_segments(segments)
+    days: list[date] = []
+    for segment in segments:
+        days.extend(_segment_days(segment))
+    daily_rows = materialize_daily_usage_from_segments(days)
+    return {
+        "skipped": False,
+        "samples": len(samples),
+        "segments": len(segments),
+        "saved_rows": saved,
+        "daily_rows": daily_rows,
+        "days": sorted({d.strftime("%Y-%m-%d") for d in days}),
+    }
+
+
+def snapshot_range_usage(from_ts: int | float, to_ts: int | float) -> dict:
+    ensure_traffic_segments_backfilled()
+    return _traffic_segment_usage(from_ts, to_ts)
 
 
 def upsert_daily_usage(day_str: str, deltas: dict, source: str = "history", source_from: str = "", source_to: str = "", reset_warnings: list[str] | None = None, skipped: list[str] | None = None):
@@ -1409,6 +1839,123 @@ def _traffic_group_key(day_value: date, group: str) -> tuple[str, str]:
     return day_value.strftime("%Y-%m-%d"), day_value.strftime("%Y-%m-%d")
 
 
+def _source_label_from_parts(parts: list[str]) -> str:
+    unique = list(dict.fromkeys(str(part) for part in parts if str(part or "").strip()))
+    if not unique:
+        return "none"
+    return "+".join(unique)
+
+
+def _add_usage_to_node_map(nodes: dict, uuid: str, name: str, up: int, down: int):
+    uid = str(uuid)
+    entry = nodes.setdefault(uid, {"name": name or uid, "up": 0, "down": 0})
+    entry["name"] = name or entry.get("name") or uid
+    entry["up"] += max(0, int(up or 0))
+    entry["down"] += max(0, int(down or 0))
+
+
+def build_daily_period_usage(from_dt: datetime, to_dt: datetime | None = None) -> dict:
+    to_dt = to_dt or now_dt()
+    if from_dt > to_dt:
+        raise RuntimeError("from_dt must be <= to_dt")
+
+    ensure_dirs()
+    ensure_traffic_segments_backfilled()
+    migrate_history_to_traffic_db()
+
+    total_nodes: dict[str, dict] = {}
+    covered_days = set()
+    rollup_days = set()
+    segment_days = set()
+    missing_days: list[str] = []
+    skipped: list[str] = []
+    reset_warnings: list[str] = []
+    sample_count = 0
+    segment_count = 0
+    sample_from_ts = 0
+    sample_to_ts = 0
+    sample_days = set()
+    source_parts: list[str] = []
+
+    now_value = now_dt()
+    last_day = to_dt.date()
+    d = from_dt.date()
+    while d <= last_day:
+        day_text = d.strftime("%Y-%m-%d")
+        day_start = start_of_day(d)
+        day_end = start_of_day(d + timedelta(days=1))
+        window_start = max(day_start, from_dt)
+        window_end = min(day_end, to_dt)
+        if window_end <= window_start:
+            d += timedelta(days=1)
+            continue
+        effective_end = min(window_end, now_value)
+        if effective_end <= window_start:
+            missing_days.append(day_text)
+            d += timedelta(days=1)
+            continue
+        usage = _traffic_segment_usage(int(window_start.timestamp()), int(effective_end.timestamp()))
+        if _snapshot_usage_has_nodes(usage):
+            for uuid, item in (usage.get("nodes") or {}).items():
+                _add_usage_to_node_map(total_nodes, str(uuid), str(item.get("name") or uuid), int(item.get("up", 0) or 0), int(item.get("down", 0) or 0))
+            covered_days.add(day_text)
+            segment_days.add(day_text)
+            source_parts.append("traffic_segments")
+            skipped.extend(usage.get("skipped", []))
+            reset_warnings.extend(usage.get("reset_warnings", []))
+            sample_count += int(usage.get("sample_count", 0) or 0)
+            segment_count += int(usage.get("segment_count", 0) or 0)
+            from_sample = int(usage.get("sample_from_ts", 0) or 0)
+            to_sample = int(usage.get("sample_to_ts", 0) or 0)
+            sample_from_ts = min([ts for ts in (sample_from_ts, from_sample) if ts] or [0])
+            sample_to_ts = max(sample_to_ts, to_sample)
+            sample_days.update(str(item) for item in (usage.get("sample_days", []) or []))
+        else:
+            day_usage = aggregate_daily_usage(d, d)
+            if day_usage:
+                for uuid, item in day_usage.items():
+                    _add_usage_to_node_map(total_nodes, str(uuid), str(item.get("name") or uuid), int(item.get("up", 0) or 0), int(item.get("down", 0) or 0))
+                covered_days.add(day_text)
+                rollup_days.add(day_text)
+                source_parts.append("traffic_db")
+            else:
+                missing_days.append(day_text)
+        d += timedelta(days=1)
+
+    node_rows = _traffic_node_rows_from_map(total_nodes)
+    lag = traffic_sample_lag_status()
+    source = _source_label_from_parts(source_parts)
+    note = "snapshot_window" if "traffic_segments" in source_parts else ("daily_rollup" if source_parts else "insufficient_snapshots")
+    return {
+        "from": from_dt.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "to": to_dt.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "nodes": node_rows,
+        "top_nodes": node_rows[: max(0, int(TOP_N))],
+        "total": _traffic_total_from_rows(node_rows),
+        "days": sorted(covered_days),
+        "coverage_days": sorted(covered_days),
+        "day_count": len(covered_days),
+        "rollup_days": len(rollup_days),
+        "snapshot_days": len(segment_days),
+        "segment_days": len(segment_days),
+        "missing_days": sorted(set(missing_days)),
+        "skipped": list(dict.fromkeys(str(item) for item in skipped)),
+        "reset_warnings": list(dict.fromkeys(str(item) for item in reset_warnings)),
+        "sample_count": sample_count,
+        "segment_count": segment_count,
+        "sample_from_ts": sample_from_ts,
+        "sample_to_ts": sample_to_ts,
+        "sample_days": sorted(sample_days),
+        "source": source,
+        "source_parts": list(dict.fromkeys(source_parts)),
+        "note": note,
+        "latest_sample_ts": lag.get("latest_sample_ts", 0),
+        "latest_sample_at": lag.get("latest_sample_at", ""),
+        "sample_lag_seconds": lag.get("sample_lag_seconds"),
+        "sample_stale": lag.get("sample_stale", False),
+    }
+
+
 def traffic_range_summary(from_day: date, to_day: date, group: str = "daily") -> dict:
     if from_day > to_day:
         raise RuntimeError("from must be <= to")
@@ -1416,87 +1963,24 @@ def traffic_range_summary(from_day: date, to_day: date, group: str = "daily") ->
     if group not in ("daily", "weekly", "monthly"):
         raise RuntimeError("group must be daily, weekly, or monthly")
 
-    ensure_dirs()
-    migrate_history_to_traffic_db()
-    start = from_day.strftime("%Y-%m-%d")
-    end = to_day.strftime("%Y-%m-%d")
-    total_nodes: dict[str, dict] = {}
+    start_dt = start_of_day(from_day)
+    end_dt = start_of_day(to_day + timedelta(days=1))
+    period = build_daily_period_usage(start_dt, end_dt)
     group_nodes: dict[str, dict] = {}
     group_labels: dict[str, str] = {}
-    covered_days = set()
-    rollup_days = set()
-    snapshot_days = set()
-    missing_days: list[str] = []
-    skipped: list[str] = []
-    reset_warnings: list[str] = []
-    sample_count = 0
 
-    def add_usage(row_day: date, uuid: str, name: str, up: int, down: int):
-        day_text = row_day.strftime("%Y-%m-%d")
-        covered_days.add(day_text)
-        if uuid not in total_nodes:
-            total_nodes[uuid] = {"name": name, "up": 0, "down": 0}
-        total_nodes[uuid]["up"] += up
-        total_nodes[uuid]["down"] += down
-        total_nodes[uuid]["name"] = name or total_nodes[uuid].get("name") or uuid
-
-        key, label = _traffic_group_key(row_day, group)
+    for day_text in period.get("days", []):
+        day_value = parse_date_yyyy_mm_dd(day_text)
+        window_start = max(start_of_day(day_value), start_dt)
+        window_end = min(start_of_day(day_value + timedelta(days=1)), end_dt, now_dt())
+        day_usage = _traffic_segment_usage(int(window_start.timestamp()), int(window_end.timestamp())) if window_end > window_start else {"nodes": {}}
+        nodes = day_usage.get("nodes", {}) if _snapshot_usage_has_nodes(day_usage) else aggregate_daily_usage(day_value, day_value)
+        key, label = _traffic_group_key(day_value, group)
         group_labels[key] = label
         bucket = group_nodes.setdefault(key, {})
-        if uuid not in bucket:
-            bucket[uuid] = {"name": name, "up": 0, "down": 0}
-        bucket[uuid]["up"] += up
-        bucket[uuid]["down"] += down
-        bucket[uuid]["name"] = name or bucket[uuid].get("name") or uuid
+        for uuid, item in (nodes or {}).items():
+            _add_usage_to_node_map(bucket, str(uuid), str(item.get("name") or uuid), int(item.get("up", 0) or 0), int(item.get("down", 0) or 0))
 
-    today = today_date()
-    now = now_dt()
-    d = from_day
-    while d <= to_day:
-        day_text = d.strftime("%Y-%m-%d")
-        if d > today:
-            missing_days.append(day_text)
-            d += timedelta(days=1)
-            continue
-        day_start = start_of_day(d)
-        day_end = now if d == today else start_of_day(d + timedelta(days=1))
-        if day_end <= day_start:
-            missing_days.append(day_text)
-            d += timedelta(days=1)
-            continue
-        usage = snapshot_range_usage(int(day_start.timestamp()), int(day_end.timestamp()))
-        if _snapshot_usage_has_nodes(usage):
-            for uuid, item in (usage.get("nodes") or {}).items():
-                uid = str(uuid)
-                add_usage(
-                    d,
-                    uid,
-                    str(item.get("name") or uid),
-                    int(item.get("up", 0) or 0),
-                    int(item.get("down", 0) or 0),
-                )
-            snapshot_days.add(day_text)
-            skipped.extend(usage.get("skipped", []))
-            reset_warnings.extend(usage.get("reset_warnings", []))
-            sample_count += int(usage.get("sample_count", 0) or 0)
-        else:
-            day_usage = aggregate_daily_usage(d, d)
-            if day_usage:
-                for uuid, item in day_usage.items():
-                    uid = str(uuid)
-                    add_usage(
-                        d,
-                        uid,
-                        str(item.get("name") or uid),
-                        int(item.get("up", 0) or 0),
-                        int(item.get("down", 0) or 0),
-                    )
-                rollup_days.add(day_text)
-            else:
-                missing_days.append(day_text)
-        d += timedelta(days=1)
-
-    node_rows = _traffic_node_rows_from_map(total_nodes)
     groups = []
     for key in sorted(group_nodes.keys()):
         rows_for_group = _traffic_node_rows_from_map(group_nodes[key])
@@ -1509,22 +1993,27 @@ def traffic_range_summary(from_day: date, to_day: date, group: str = "daily") ->
         })
 
     return {
-        "from": start,
-        "to": end,
+        "from": from_day.strftime("%Y-%m-%d"),
+        "to": to_day.strftime("%Y-%m-%d"),
         "group": group,
-        "days": sorted(covered_days),
-        "day_count": len(covered_days),
-        "nodes": node_rows,
-        "top_nodes": node_rows[: max(0, int(TOP_N))],
-        "total": _traffic_total_from_rows(node_rows),
+        "days": period.get("days", []),
+        "coverage_days": period.get("coverage_days", []),
+        "day_count": period.get("day_count", 0),
+        "nodes": period.get("nodes", []),
+        "top_nodes": period.get("top_nodes", []),
+        "total": period.get("total", _traffic_total_from_rows([])),
         "groups": groups,
-        "rollup_days": len(rollup_days),
-        "snapshot_days": len(snapshot_days),
-        "missing_days": missing_days,
-        "skipped": list(dict.fromkeys(str(item) for item in skipped)),
-        "reset_warnings": list(dict.fromkeys(str(item) for item in reset_warnings)),
-        "sample_count": sample_count,
-        "source": "traffic_snapshots+traffic_db" if rollup_days and snapshot_days else ("traffic_snapshots" if snapshot_days else "traffic_db"),
+        "rollup_days": period.get("rollup_days", 0),
+        "snapshot_days": period.get("snapshot_days", 0),
+        "segment_days": period.get("segment_days", 0),
+        "missing_days": period.get("missing_days", []),
+        "skipped": period.get("skipped", []),
+        "reset_warnings": period.get("reset_warnings", []),
+        "sample_count": period.get("sample_count", 0),
+        "segment_count": period.get("segment_count", 0),
+        "source": period.get("source", "none"),
+        "source_parts": period.get("source_parts", []),
+        "sample_lag_seconds": period.get("sample_lag_seconds"),
     }
 
 
@@ -1533,6 +2022,11 @@ def migrate_history_to_traffic_db():
     hot = load_json(HISTORY_PATH, {"days": {}}).get("days", {})
     for day_str, deltas in (hot or {}).items():
         if isinstance(deltas, dict):
+            try:
+                if traffic_segments_exist_for_day(parse_date_yyyy_mm_dd(day_str)):
+                    continue
+            except Exception:
+                pass
             upsert_daily_usage(day_str, deltas, source="history_json")
     if not os.path.isdir(DATA_DIR):
         return
@@ -1546,6 +2040,11 @@ def migrate_history_to_traffic_db():
             continue
         for day_str, deltas in (arc or {}).items():
             if isinstance(deltas, dict):
+                try:
+                    if traffic_segments_exist_for_day(parse_date_yyyy_mm_dd(day_str)):
+                        continue
+                except Exception:
+                    pass
                 upsert_daily_usage(day_str, deltas, source="history_archive")
 
 
@@ -2165,6 +2664,8 @@ def build_records_summary(hours: int) -> dict:
         "warnings": list(dict.fromkeys(str(item) for item in usage.get("reset_warnings", []))),
         "sample_count": sample_count,
         "segment_count": int(usage.get("segment_count", 0) or 0),
+        "source_parts": usage.get("source_parts", []),
+        **traffic_sample_lag_status(now_ts),
         "source": usage.get("source", "traffic_snapshots"),
         "note": "snapshot_window" if sample_count >= 2 else "insufficient_snapshots",
     }
@@ -2449,41 +2950,19 @@ def _snapshot_usage_has_nodes(usage: dict) -> bool:
 
 def build_live_period_struct(from_dt: datetime, to_dt: datetime | None = None, label: str | None = None) -> dict:
     """
-    Build a current-period view directly from continuous traffic_snapshots.
+    Build a current-period view from the unified realtime daily materialization.
 
-    Daily/weekly/monthly reports may still write daily rollups for archival fallback,
-    but live dashboard periods must not depend on those scheduled jobs.
+    traffic_segments are preferred when available. Historical daily rollups fill
+    dates that have no snapshot coverage, so scheduled reports are no longer a
+    prerequisite for the web dashboard.
     """
     to_dt = to_dt or now_dt()
     if from_dt > to_dt:
         raise RuntimeError("from_dt must be <= to_dt")
 
-    usage = snapshot_range_usage(int(from_dt.timestamp()), int(to_dt.timestamp()))
-    rows = _traffic_node_rows_from_map(usage.get("nodes", {}))
-    sample_count = int(usage.get("sample_count", 0) or 0)
-    snapshot_days = len(usage.get("sample_days", []) or [])
-
-    note = "snapshot_window" if sample_count >= 2 else "insufficient_snapshots"
-    return {
-        "from": from_dt.strftime("%Y-%m-%d %H:%M:%S %Z"),
-        "to": to_dt.strftime("%Y-%m-%d %H:%M:%S %Z"),
-        "label": label or f"{from_dt.strftime('%Y-%m-%d %H:%M')} → {to_dt.strftime('%Y-%m-%d %H:%M')}",
-        "nodes": rows,
-        "top_nodes": rows[: max(0, int(TOP_N))],
-        "total": _traffic_total_from_rows(rows),
-        "skipped": list(dict.fromkeys(str(item) for item in usage.get("skipped", []))),
-        "reset_warnings": list(dict.fromkeys(str(item) for item in usage.get("reset_warnings", []))),
-        "sample_count": sample_count,
-        "segment_count": int(usage.get("segment_count", 0) or 0),
-        "sample_from_ts": int(usage.get("sample_from_ts", 0) or 0),
-        "sample_to_ts": int(usage.get("sample_to_ts", 0) or 0),
-        "sample_days": usage.get("sample_days", []),
-        "rollup_days": 0,
-        "snapshot_days": snapshot_days,
-        "missing_days": [],
-        "source": "traffic_snapshots",
-        "note": note,
-    }
+    period = build_daily_period_usage(from_dt, to_dt)
+    period["label"] = label or f"{from_dt.strftime('%Y-%m-%d %H:%M')} → {to_dt.strftime('%Y-%m-%d %H:%M')}"
+    return period
 
 
 def build_today_delta_struct() -> dict | None:
@@ -2502,7 +2981,12 @@ def build_today_delta_struct() -> dict | None:
         "reset_warnings": period.get("reset_warnings", []),
         "note": period.get("note", "snapshot_window"),
         "source": period.get("source", "traffic_snapshots"),
+        "source_parts": period.get("source_parts", []),
         "sample_count": period.get("sample_count", 0),
+        "segment_count": period.get("segment_count", 0),
+        "coverage_days": period.get("coverage_days", []),
+        "missing_days": period.get("missing_days", []),
+        "sample_lag_seconds": period.get("sample_lag_seconds"),
         "total": period.get("total", _traffic_total_from_rows([])),
     }
     return result
@@ -2856,6 +3340,11 @@ def history_append(day_str: str, deltas: dict):
     hist.setdefault("days", {})
     hist["days"][day_str] = deltas
     save_json_atomic(HISTORY_PATH, hist)
+    try:
+        if traffic_segments_exist_for_day(parse_date_yyyy_mm_dd(day_str)):
+            return
+    except Exception:
+        pass
     upsert_daily_usage(day_str, deltas, source="daily_report")
 
 
@@ -2910,10 +3399,16 @@ def archive_and_prune_history():
 
 def history_sum(from_day: date, to_day: date) -> dict:
     ensure_dirs()
-    migrate_history_to_traffic_db()
-    db_summed = aggregate_daily_usage(from_day, to_day)
-    if db_summed:
-        return db_summed
+    period = build_daily_period_usage(start_of_day(from_day), start_of_day(to_day + timedelta(days=1)))
+    if period.get("nodes"):
+        return {
+            str(item.get("uuid") or item.get("name")): {
+                "name": item.get("name") or item.get("uuid") or "",
+                "up": int(item.get("up", 0) or 0),
+                "down": int(item.get("down", 0) or 0),
+            }
+            for item in period.get("nodes", [])
+        }
 
     summed = {}
     hot = load_json(HISTORY_PATH, {"days": {}}).get("days", {})
@@ -2975,6 +3470,7 @@ def take_sample_if_due(force: bool = False, record: bool = True, source: str = "
         nodes_map = build_nodes_map_from_current(current)
 
         save_traffic_snapshot(now_ts, nodes_map, skipped)
+        segment_result = materialize_latest_traffic_segment(now_ts)
         prune_traffic_snapshots(now_ts)
 
         samples.append({"ts": now_ts, "nodes": nodes_map, "skipped": skipped})
@@ -2988,7 +3484,7 @@ def take_sample_if_due(force: bool = False, record: bool = True, source: str = "
                 started_at=started,
                 finished_at=time.time(),
                 summary=f"采样 {len(nodes_map)} 个节点，跳过 {len(skipped)} 个",
-                metadata={"nodes": len(nodes_map), "skipped": skipped, "force": bool(force)},
+                metadata={"nodes": len(nodes_map), "skipped": skipped, "force": bool(force), "segments": segment_result},
             )
     except Exception as exc:
         if record:
