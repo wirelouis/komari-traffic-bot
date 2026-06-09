@@ -716,11 +716,7 @@ def build_traffic_db_status() -> dict:
         "error": "",
     }
     try:
-        k.init_traffic_db()
-        with k.traffic_db_session() as conn:
-            result["daily_rows"] = int(conn.execute("SELECT COUNT(*) AS c FROM node_daily_usage").fetchone()["c"] or 0)
-            result["task_runs"] = int(conn.execute("SELECT COUNT(*) AS c FROM task_runs").fetchone()["c"] or 0)
-        result["table_counts"] = k.traffic_db_table_counts()
+        result.update(k.traffic_db_healthcheck())
     except Exception as exc:
         result["ok"] = False
         result["error"] = str(exc)

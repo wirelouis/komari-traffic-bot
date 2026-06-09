@@ -439,6 +439,27 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(vacuum["table_counts"]["node_daily_usage"], 1)
         self.assertIn("after_size_human", vacuum)
 
+    def test_traffic_db_healthcheck_reports_counts_and_rejects_bad_quick_check(self):
+        k.record_task_run("sample", "test", "success", started_at=1000, finished_at=1001)
+
+        status = k.traffic_db_healthcheck()
+
+        self.assertTrue(status["ok"])
+        self.assertEqual(status["quick_check"], "ok")
+        self.assertEqual(status["task_runs"], 1)
+
+        class BadConn:
+            def execute(self, _sql):
+                return self
+
+            def fetchone(self):
+                return ["database disk image is malformed"]
+
+        with patch.object(k, "init_traffic_db", lambda: None), patch.object(k, "traffic_db_session") as session_factory:
+            session_factory.return_value.__enter__.return_value = BadConn()
+            with self.assertRaises(RuntimeError):
+                k.traffic_db_healthcheck()
+
     def test_runtime_config_save_load_and_validate(self):
         saved = k.save_runtime_config({
             "bot_instance_name": "edge-prod",

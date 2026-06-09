@@ -805,6 +805,7 @@ class WebAppTests(unittest.TestCase):
         text = response.text
         payload = response.json()["data"]
         self.assertEqual(payload["data"]["sqlite"]["task_runs"], 1)
+        self.assertEqual(payload["data"]["sqlite"]["quick_check"], "ok")
         self.assertEqual(payload["build"]["version"], "test-version")
         self.assertEqual(payload["build"]["commit_short"], "abcdefabcdef")
         self.assertIn("maintenance", payload["data"])

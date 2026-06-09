@@ -298,6 +298,11 @@ def run_healthcheck_or_raise():
                 raise RuntimeError(f"Corrupted file: {p}: {e}")
 
     try:
+        traffic_db_healthcheck()
+    except Exception as e:
+        raise RuntimeError(f"SQLite healthcheck failed: {e}")
+
+    try:
         HTTP_SESSION.get(KOMARI_BASE_URL, timeout=TIMEOUT, headers=build_komari_headers())
     except Exception as e:
         raise RuntimeError(f"Komari unreachable: {e}")
@@ -920,6 +925,28 @@ def traffic_db_table_counts() -> dict:
             row = conn.execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()
             counts[table] = int(row["c"] or 0)
     return counts
+
+
+def traffic_db_healthcheck() -> dict:
+    init_traffic_db()
+    with traffic_db_session() as conn:
+        quick = conn.execute("PRAGMA quick_check").fetchone()
+        quick_result = str(quick[0] if quick else "")
+        if quick_result.lower() != "ok":
+            raise RuntimeError(f"SQLite quick_check failed: {quick_result}")
+    counts = traffic_db_table_counts()
+    size = os.path.getsize(TRAFFIC_DB_PATH) if os.path.exists(TRAFFIC_DB_PATH) else 0
+    return {
+        "ok": True,
+        "path": TRAFFIC_DB_PATH,
+        "exists": os.path.exists(TRAFFIC_DB_PATH),
+        "size": size,
+        "size_human": human_bytes(size),
+        "daily_rows": counts.get("node_daily_usage", 0),
+        "task_runs": counts.get("task_runs", 0),
+        "table_counts": counts,
+        "quick_check": "ok",
+    }
 
 
 def traffic_db_maintenance_status(retention_days: int | None = None, now_ts: int | float | None = None) -> dict:
