@@ -99,6 +99,7 @@ class RuntimeConfigRequest(BaseModel):
     komari_fetch_workers: int | None = None
     sample_interval_seconds: int | None = None
     sample_retention_hours: int | None = None
+    traffic_snapshot_retention_days: int | None = None
     ai_pack_cache_ttl_seconds: int | None = None
     task_run_retention_days: int | None = None
     alerts_enabled: bool | None = None

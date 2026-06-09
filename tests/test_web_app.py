@@ -49,7 +49,6 @@ class WebAppTests(unittest.TestCase):
         self.patch_attr(k, "DATA_DIR", str(self.tmp_path))
         self.patch_attr(k, "SAMPLES_PATH", str(self.tmp_path / "samples.json"))
         self.patch_attr(k, "ALERTS_STATE_PATH", str(self.tmp_path / "alerts_state.json"))
-        self.patch_attr(k, "BASELINES_PATH", str(self.tmp_path / "baselines.json"))
         self.patch_attr(k, "HISTORY_PATH", str(self.tmp_path / "history.json"))
         self.patch_attr(k, "REPORT_SCHEDULES_PATH", str(self.tmp_path / "report_schedules.json"))
         self.patch_attr(k, "TRAFFIC_DB_PATH", str(self.tmp_path / "traffic.db"))
@@ -79,6 +78,7 @@ class WebAppTests(unittest.TestCase):
         self.patch_attr(k, "BOT_INSTANCE_NAME", "")
         self.patch_attr(k, "TOP_N", 3)
         self.patch_attr(k, "TASK_RUN_RETENTION_DAYS", 90)
+        self.patch_attr(k, "TRAFFIC_SNAPSHOT_RETENTION_DAYS", 45)
 
     def login(self):
         response = self.client.post("/api/auth/login", json={"username": "admin", "password": "test-password"})
@@ -377,7 +377,7 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(last_24h["node_count"], 12)
         self.assertNotIn("machines", last_24h)
 
-    def test_period_summary_uses_sqlite_snapshots_without_baseline(self):
+    def test_period_summary_uses_sqlite_snapshots_without_marker_file(self):
         self.login()
         now = datetime(2026, 6, 2, 1, 0, tzinfo=k.TZ)
         with patch.object(k, "today_date", return_value=date(2026, 6, 2)), patch.object(k, "now_dt", return_value=now):
@@ -395,7 +395,6 @@ class WebAppTests(unittest.TestCase):
         today = response.json()["data"]["periods"]["today"]["data"]
         self.assertEqual(today["note"], "snapshot_window")
         self.assertEqual(today["total"]["total"], 21)
-        self.assertFalse((self.tmp_path / "baselines.json").exists())
 
     def test_alert_check_dry_run_does_not_persist_state(self):
         self.login()
@@ -408,6 +407,8 @@ class WebAppTests(unittest.TestCase):
                 {"ts": 4600, "nodes": {"u1": {"name": "node-a", "up": 50, "down": 100}}, "skipped": []},
             ]
         })
+        k.save_traffic_snapshot(1000, {"u1": {"name": "node-a", "up": 0, "down": 0}})
+        k.save_traffic_snapshot(4600, {"u1": {"name": "node-a", "up": 50, "down": 100}})
 
         response = self.client.post("/api/alerts/check", json={"notify": False})
 
@@ -831,6 +832,7 @@ class WebAppTests(unittest.TestCase):
             "top_n": 8,
             "komari_timeout_seconds": 20,
             "sample_interval_seconds": 120,
+            "traffic_snapshot_retention_days": 120,
             "ai_pack_cache_ttl_seconds": 7200,
             "task_run_retention_days": 30,
             "alerts_enabled": False,
@@ -845,6 +847,7 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(payload["values"]["telegram_chat_id"], "987654321")
         self.assertEqual(payload["values"]["ai_model"], "gpt-5.4-mini")
         self.assertEqual(payload["values"]["top_n"], 8)
+        self.assertEqual(payload["values"]["traffic_snapshot_retention_days"], 120)
         self.assertFalse(payload["values"]["alerts_enabled"])
         self.assertEqual(payload["values"]["alert_total_window_bytes"], 2 * 1024 ** 3)
         self.assertEqual(payload["config"]["values"]["ai_pack_cache_ttl_seconds"], 7200)
@@ -857,9 +860,11 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(k.AI_MODEL, "gpt-5.4-mini")
         self.assertEqual(k.TOP_N, 8)
         self.assertEqual(k.SAMPLE_INTERVAL_SECONDS, 120)
+        self.assertEqual(k.TRAFFIC_SNAPSHOT_RETENTION_DAYS, 120)
         self.assertFalse(k.ALERTS_ENABLED)
         saved = k.load_json(str(self.tmp_path / "runtime_config.json"), {})
         self.assertEqual(saved["config"]["task_run_retention_days"], 30)
+        self.assertEqual(saved["config"]["traffic_snapshot_retention_days"], 120)
         self.assertEqual(saved["config"]["alert_total_window_bytes"], 2 * 1024 ** 3)
         runs = k.list_task_runs(limit=10, task_type="maintenance")
         self.assertEqual(runs[0]["source"], "web:config")

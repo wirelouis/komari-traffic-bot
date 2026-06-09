@@ -103,7 +103,6 @@ class CoreTests(unittest.TestCase):
         self.patch_attr("DATA_DIR", str(self.tmp_path))
         self.patch_attr("SAMPLES_PATH", str(self.tmp_path / "samples.json"))
         self.patch_attr("ALERTS_STATE_PATH", str(self.tmp_path / "alerts_state.json"))
-        self.patch_attr("BASELINES_PATH", str(self.tmp_path / "baselines.json"))
         self.patch_attr("HISTORY_PATH", str(self.tmp_path / "history.json"))
         self.patch_attr("REPORT_SCHEDULES_PATH", str(self.tmp_path / "report_schedules.json"))
         self.patch_attr("TRAFFIC_DB_PATH", str(self.tmp_path / "traffic.db"))
@@ -133,6 +132,7 @@ class CoreTests(unittest.TestCase):
         self.patch_attr("KOMARI_FETCH_WORKERS", 4)
         self.patch_attr("SAMPLE_INTERVAL_SECONDS", 300)
         self.patch_attr("SAMPLE_RETENTION_HOURS", 48)
+        self.patch_attr("TRAFFIC_SNAPSHOT_RETENTION_DAYS", 45)
         self.patch_attr("AI_PACK_CACHE_TTL_SECONDS", 3600)
         self.patch_attr("TASK_RUN_RETENTION_DAYS", 90)
 
@@ -202,16 +202,15 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(k.is_in_silence_window(early, "23:00-07:00"))
         self.assertFalse(k.is_in_silence_window(noon, "23:00-07:00"))
 
-    def test_compute_delta_handles_counter_reset(self):
-        current = [k.NodeTotal(uuid="u1", name="node-a", up=10, down=20)]
-        baseline = {"u1": {"name": "node-a", "up": 100, "down": 200}}
+    def test_strict_sample_delta_ignores_counter_reset_absolute_value(self):
+        current = {"u1": {"name": "node-a", "up": 10, "down": 20}}
+        previous = {"u1": {"name": "node-a", "up": 100, "down": 200}}
 
-        deltas, new_baseline, warnings = k.compute_delta_from_nodes(current, baseline)
+        deltas, warnings = k.compute_strict_sample_delta_from_maps(current, previous)
 
-        self.assertEqual(deltas["u1"]["up"], 10)
-        self.assertEqual(deltas["u1"]["down"], 20)
-        self.assertEqual(new_baseline["u1"]["up"], 10)
-        self.assertEqual(warnings, ["node-a"])
+        self.assertEqual(deltas["u1"]["up"], 0)
+        self.assertEqual(deltas["u1"]["down"], 0)
+        self.assertEqual(warnings, ["node-a(counter_reset)"])
 
     def test_top_lines_orders_by_total(self):
         lines = k.top_lines(
@@ -354,6 +353,8 @@ class CoreTests(unittest.TestCase):
                 {"ts": 4600, "nodes": {"u1": {"name": "node-a", "up": 50, "down": 100}}, "skipped": []},
             ]
         })
+        k.save_traffic_snapshot(1000, {"u1": {"name": "node-a", "up": 0, "down": 0}})
+        k.save_traffic_snapshot(4600, {"u1": {"name": "node-a", "up": 50, "down": 100}})
 
         result = k.run_alert_check(dry_run=True, notify=True, force_sample=False)
 
@@ -451,6 +452,7 @@ class CoreTests(unittest.TestCase):
             "komari_fetch_workers": 8,
             "sample_interval_seconds": 120,
             "sample_retention_hours": 24,
+            "traffic_snapshot_retention_days": 120,
             "ai_pack_cache_ttl_seconds": 1800,
             "task_run_retention_days": 45,
             "alerts_enabled": False,
@@ -471,12 +473,15 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(k.AI_MODEL, "gpt-5.4-mini")
         self.assertEqual(k.TOP_N, 6)
         self.assertEqual(k.TIMEOUT, 20)
+        self.assertEqual(k.TRAFFIC_SNAPSHOT_RETENTION_DAYS, 120)
         self.assertFalse(k.ALERTS_ENABLED)
         self.assertEqual(k.ALERT_SILENCE_WINDOWS, "23:00-07:00")
         self.assertEqual(k.ALERT_TOTAL_WINDOW_BYTES, 2 * 1024 ** 3)
         self.assertEqual(k.load_runtime_config()["task_run_retention_days"], 45)
+        self.assertEqual(k.load_runtime_config()["traffic_snapshot_retention_days"], 120)
         current = k.current_runtime_config()
         self.assertEqual(current["values"]["ai_pack_cache_ttl_seconds"], 1800)
+        self.assertEqual(current["values"]["traffic_snapshot_retention_days"], 120)
         self.assertEqual(current["values"]["alert_total_window_bytes"], 2 * 1024 ** 3)
         self.assertTrue(str(self.tmp_path) in current["path"])
         fields = {item["key"]: item for item in current["editable"]}
@@ -533,6 +538,43 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(usage["nodes"]["n2"]["up"], 3)
         self.assertEqual(usage["nodes"]["n2"]["down"], 6)
         self.assertIn("Node Two(counter_reset)", usage["reset_warnings"])
+
+    def test_last_hours_struct_uses_sqlite_snapshots_and_ignores_reset_absolute_value(self):
+        self.patch_attr("take_sample_if_due", lambda **_kwargs: None)
+        with patch.object(k.time, "time", return_value=1600):
+            k.save_traffic_snapshot(1000, {
+                "n1": {"name": "Node One", "up": 100, "down": 200},
+            })
+            k.save_traffic_snapshot(1300, {
+                "n1": {"name": "Node One", "up": 110, "down": 230},
+            })
+            k.save_traffic_snapshot(1600, {
+                "n1": {"name": "Node One", "up": 2, "down": 3},
+            })
+
+            result = k.get_last_hours_nodes_struct(1)
+            top = k.get_top_last_hours_struct(1, 3)
+
+        self.assertEqual(result["sample_count"], 3)
+        self.assertEqual(result["nodes"][0]["up"], 10)
+        self.assertEqual(result["nodes"][0]["down"], 30)
+        self.assertIn("Node One(counter_reset)", result["reset_warnings"])
+        self.assertEqual(top["nodes"][0]["total"], 40)
+
+    def test_hourly_by_node_summary_uses_sqlite_snapshots(self):
+        k.save_traffic_snapshot(1000, {
+            "n1": {"name": "Node One", "up": 10, "down": 20},
+        })
+        k.save_traffic_snapshot(3700, {
+            "n1": {"name": "Node One", "up": 15, "down": 25},
+        })
+
+        result = k.build_snapshot_hourly_by_node_summary(1000, 3700, label_date=date(1970, 1, 1))
+
+        self.assertEqual(result["source"], "traffic_snapshots")
+        self.assertEqual(result["nodes"][0]["uuid"], "n1")
+        self.assertEqual(result["nodes"][0]["total"], 10)
+        self.assertEqual(result["nodes"][0]["hours"][0]["total"], 10)
 
     def test_take_sample_writes_sqlite_snapshots(self):
         samples = [

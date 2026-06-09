@@ -137,10 +137,11 @@ STAT_TZ=Asia/Shanghai
 # Top ranking size
 TOP_N=3
 
-# Sampling for /top Nh (short-window diff only by default)
-# Long-range history should come from Komari /api/records/load
+# Continuous snapshots: sample every 5 minutes and keep raw snapshots for 45 days by default
+# samples is only a short compatibility cache; traffic stats use traffic.db snapshots
 SAMPLE_INTERVAL_SECONDS=300
 SAMPLE_RETENTION_HOURS=2
+TRAFFIC_SNAPSHOT_RETENTION_DAYS=45
 
 # History retention
 HISTORY_HOT_DAYS=60
@@ -214,11 +215,6 @@ Web console: `http://localhost:8080`
 
 Configure delivery schedules in the Web console under Telegram delivery. They are executed by the `bot` service running in `listen` mode. If an older deployment still has a `cron` service, remove that service and the `./crontab:/app/crontab:ro` mount from `docker-compose.yml` to avoid duplicate reports.
 
-### 4️⃣ Initialize baseline (run once)
-```
-docker compose exec bot \
-  python /app/komari_traffic_report.py bootstrap
-```
 ## 🧭 Web Console
 
 The Web console is a lightweight dashboard for traffic overview, node analysis, long-term analytics with range CSV export, alert controls, Telegram delivery, AI Q&A, and system health.
@@ -262,13 +258,11 @@ This ensures daily reports are triggered at local midnight.
 
 All runtime data is stored in ./data:
 
-Baselines
+traffic.db (primary SQLite storage: continuous traffic snapshots, per-day node rollups, task runs)
 
-Samples (for /top Nh)
+History (daily records & compressed archives, migrated into SQLite on read)
 
-History (daily records & compressed archives)
-
-traffic.db (SQLite long-term traffic rollup database, auto-migrated from legacy history)
+Samples (short compatibility cache for consecutive node-failure state; traffic stats use SQLite snapshots)
 
 Telegram update offset
 
@@ -279,6 +273,8 @@ node_bindings (manual Web-console overrides from traffic nodes to Komari machine
 report_schedules (app-managed Web-console delivery schedules)
 
 Upgrades and restarts will not lose data.
+
+Current periods, recent Nh windows, hourly distributions, and alert windows are computed from adjacent deltas in `traffic.db` continuous snapshots. If a node counter rolls back or resets, that negative segment is treated as 0 instead of counting the current absolute value as window traffic. `TRAFFIC_SNAPSHOT_RETENTION_DAYS` controls raw snapshot retention and defaults to `45`; daily reports write durable rollups, so long-term week/month/range analytics do not require keeping every raw snapshot forever.
 
 `TASK_RUN_RETENTION_DAYS` controls the suggested retention window for Web-console task run history. The default is `90` days; set it to `0` to disable pruning. The System page maintenance actions only prune old `task_runs` rows or run SQLite vacuum; they do not delete daily, weekly, or monthly traffic rollups.
 
@@ -340,8 +336,6 @@ To confirm the image is the one just built by GitHub Actions, check that the rep
 ## 🔐 Admin commands (admin chats only)
 
 - `/archive` -> sends a confirmation code, then execute with `/confirm_archive <code>`
-- `/bootstrap` -> blocked when historical-risk is detected; execute via `/confirm_bootstrap <code>`
-- `/rebuild_baselines` -> sends confirmation code, then execute via `/confirm_rebuild_baselines <code>`
 - `/alerts` -> show alert status
 - `/mute_alerts 2h` / `/unmute_alerts` -> temporarily mute or resume alerts
 

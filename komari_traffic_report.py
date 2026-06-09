@@ -149,7 +149,6 @@ SAMPLE_INTERVAL_SECONDS = int(os.environ.get("SAMPLE_INTERVAL_SECONDS", "300")) 
 SAMPLE_RETENTION_HOURS = int(os.environ.get("SAMPLE_RETENTION_HOURS", "2"))    # 默认保留 2 小时采样
 TRAFFIC_SNAPSHOT_RETENTION_DAYS = max(1, int(os.environ.get("TRAFFIC_SNAPSHOT_RETENTION_DAYS", "45")))
 
-BASELINES_PATH = os.path.join(DATA_DIR, "baselines.json")
 HISTORY_PATH = os.path.join(DATA_DIR, "history.json")
 SAMPLES_PATH = os.path.join(DATA_DIR, "samples.json")
 TG_OFFSET_PATH = os.path.join(DATA_DIR, "tg_offset.txt")
@@ -288,7 +287,7 @@ def run_healthcheck_or_raise():
     except Exception as e:
         raise RuntimeError(f"DATA_DIR not writable: {DATA_DIR}: {e}")
 
-    for p in [BASELINES_PATH, HISTORY_PATH, SAMPLES_PATH, TG_OFFSET_PATH, TG_CONFIRM_PATH, ALERTS_STATE_PATH]:
+    for p in [HISTORY_PATH, SAMPLES_PATH, TG_OFFSET_PATH, TG_CONFIRM_PATH, ALERTS_STATE_PATH]:
         if os.path.exists(p):
             try:
                 if p == TG_OFFSET_PATH:
@@ -485,6 +484,7 @@ def validate_runtime_config(payload: dict) -> dict:
         "komari_fetch_workers": _parse_editable_int(payload, "komari_fetch_workers", KOMARI_FETCH_WORKERS, 1, 32),
         "sample_interval_seconds": _parse_editable_int(payload, "sample_interval_seconds", SAMPLE_INTERVAL_SECONDS, 60, 3600),
         "sample_retention_hours": _parse_editable_int(payload, "sample_retention_hours", SAMPLE_RETENTION_HOURS, 1, 168),
+        "traffic_snapshot_retention_days": _parse_editable_int(payload, "traffic_snapshot_retention_days", TRAFFIC_SNAPSHOT_RETENTION_DAYS, 1, 3650),
         "ai_pack_cache_ttl_seconds": _parse_editable_int(payload, "ai_pack_cache_ttl_seconds", AI_PACK_CACHE_TTL_SECONDS, 0, 86400),
         "task_run_retention_days": _parse_editable_int(payload, "task_run_retention_days", TASK_RUN_RETENTION_DAYS, 0, 3650),
         "alerts_enabled": _parse_editable_bool(payload, "alerts_enabled", ALERTS_ENABLED),
@@ -502,7 +502,7 @@ def validate_runtime_config(payload: dict) -> dict:
 
 def apply_runtime_config(config: dict) -> dict:
     global BOT_INSTANCE_NAME, TOP_N, TIMEOUT, KOMARI_FETCH_WORKERS, SAMPLE_INTERVAL_SECONDS, SAMPLE_RETENTION_HOURS
-    global AI_PACK_CACHE_TTL_SECONDS, TASK_RUN_RETENTION_DAYS
+    global TRAFFIC_SNAPSHOT_RETENTION_DAYS, AI_PACK_CACHE_TTL_SECONDS, TASK_RUN_RETENTION_DAYS
     global KOMARI_BASE_URL, TELEGRAM_CHAT_ID, TELEGRAM_ALERT_CHAT_ID, AI_API_BASE, AI_MODEL
     global ALERTS_ENABLED, ALERT_RECOVERY_NOTIFY, ALERT_COOLDOWN_SECONDS, ALERT_WINDOW_MINUTES, ALERT_NODE_MISSING_SAMPLES
     global ALERT_SILENCE_WINDOWS, ALERT_TOTAL_WINDOW_BYTES, ALERT_NODE_WINDOW_BYTES, ALERT_DAILY_TOTAL_BYTES, ALERT_DAILY_NODE_BYTES
@@ -518,6 +518,7 @@ def apply_runtime_config(config: dict) -> dict:
     KOMARI_FETCH_WORKERS = clean["komari_fetch_workers"]
     SAMPLE_INTERVAL_SECONDS = clean["sample_interval_seconds"]
     SAMPLE_RETENTION_HOURS = clean["sample_retention_hours"]
+    TRAFFIC_SNAPSHOT_RETENTION_DAYS = clean["traffic_snapshot_retention_days"]
     AI_PACK_CACHE_TTL_SECONDS = clean["ai_pack_cache_ttl_seconds"]
     TASK_RUN_RETENTION_DAYS = clean["task_run_retention_days"]
     ALERTS_ENABLED = clean["alerts_enabled"]
@@ -562,6 +563,7 @@ def current_runtime_config() -> dict:
         "komari_fetch_workers": stored_config.get("komari_fetch_workers", KOMARI_FETCH_WORKERS),
         "sample_interval_seconds": stored_config.get("sample_interval_seconds", SAMPLE_INTERVAL_SECONDS),
         "sample_retention_hours": stored_config.get("sample_retention_hours", SAMPLE_RETENTION_HOURS),
+        "traffic_snapshot_retention_days": stored_config.get("traffic_snapshot_retention_days", TRAFFIC_SNAPSHOT_RETENTION_DAYS),
         "ai_pack_cache_ttl_seconds": stored_config.get("ai_pack_cache_ttl_seconds", AI_PACK_CACHE_TTL_SECONDS),
         "task_run_retention_days": stored_config.get("task_run_retention_days", TASK_RUN_RETENTION_DAYS),
         "alerts_enabled": stored_config.get("alerts_enabled", ALERTS_ENABLED),
@@ -597,7 +599,8 @@ def current_runtime_config() -> dict:
             field("komari_timeout_seconds", "Komari 超时（秒）", "number", "探针接口慢时可适当调大。", min=3, max=120, group="基础"),
             field("komari_fetch_workers", "节点并发数", "number", "节点很多时可适当调大，太大会增加探针压力。", min=1, max=32, group="基础"),
             field("sample_interval_seconds", "采样间隔（秒）", "number", "用于短时间 Top 和告警检测。", min=60, max=3600, group="基础"),
-            field("sample_retention_hours", "短时采样保留（小时）", "number", "用于最近 Nh 查询，不影响长期 SQLite 汇总。", min=1, max=168, group="基础"),
+            field("sample_retention_hours", "兼容采样缓存（小时）", "number", "仅用于短期兼容状态；流量统计使用 SQLite 连续快照。", min=1, max=168, group="基础"),
+            field("traffic_snapshot_retention_days", "连续快照保留天数", "number", "用于最近窗口、小时分布和当前周期统计。", min=1, max=3650, group="基础"),
             field("ai_pack_cache_ttl_seconds", "AI 缓存 TTL（秒）", "number", "0 表示每次实时生成。", min=0, max=86400, group="基础"),
             field("task_run_retention_days", "任务记录保留天数", "number", "0 表示关闭清理。", min=0, max=3650, group="基础"),
             field("alerts_enabled", "启用告警", "boolean", "关闭后不会产生新的告警事件。", group="告警"),
@@ -2022,74 +2025,6 @@ def build_nodes_map_from_current(current: list[NodeTotal]) -> dict:
     return {n.uuid: {"name": n.name, "up": n.up, "down": n.down} for n in current}
 
 
-def compute_delta_from_nodes(current: list[NodeTotal], baseline_nodes: dict) -> tuple[dict, dict, list[str]]:
-    """
-    baseline_nodes: {uuid:{name,up,down}}
-    returns: (deltas, new_baseline_nodes, reset_warnings)
-    """
-    deltas = {}
-    new_baseline = {}
-    reset_warnings = []
-
-    for n in current:
-        prev = baseline_nodes.get(n.uuid, {})
-        prev_up = int(prev.get("up", 0))
-        prev_down = int(prev.get("down", 0))
-
-        up_delta = n.up - prev_up
-        down_delta = n.down - prev_down
-
-        reset = False
-        if up_delta < 0:
-            up_delta = n.up
-            reset = True
-        if down_delta < 0:
-            down_delta = n.down
-            reset = True
-        if reset:
-            reset_warnings.append(n.name)
-
-        deltas[n.uuid] = {"name": n.name, "up": up_delta, "down": down_delta}
-        new_baseline[n.uuid] = {"name": n.name, "up": n.up, "down": n.down}
-
-    return deltas, new_baseline, reset_warnings
-
-
-def compute_delta_from_maps(current_nodes_map: dict, baseline_nodes_map: dict) -> tuple[dict, list[str]]:
-    """
-    current_nodes_map / baseline_nodes_map:
-      {uuid:{name,up,down}}
-    returns: (deltas, reset_warnings)
-    """
-    deltas = {}
-    reset_warnings = []
-    for uuid, cur in current_nodes_map.items():
-        prev = baseline_nodes_map.get(uuid, {})
-        name = cur.get("name", uuid)
-
-        cur_up = int(cur.get("up", 0))
-        cur_down = int(cur.get("down", 0))
-        prev_up = int(prev.get("up", 0))
-        prev_down = int(prev.get("down", 0))
-
-        up_delta = cur_up - prev_up
-        down_delta = cur_down - prev_down
-
-        reset = False
-        if up_delta < 0:
-            up_delta = cur_up
-            reset = True
-        if down_delta < 0:
-            down_delta = cur_down
-            reset = True
-        if reset:
-            reset_warnings.append(name)
-
-        deltas[uuid] = {"name": name, "up": up_delta, "down": down_delta}
-
-    return deltas, reset_warnings
-
-
 def compute_strict_sample_delta_from_maps(current_nodes_map: dict, previous_nodes_map: dict) -> tuple[dict, list[str]]:
     """
     用于 samples.json 邻近样本之间的严格差分。
@@ -2174,6 +2109,156 @@ def build_snapshot_period_struct(from_dt: datetime, to_dt: datetime | None = Non
     }
 
 
+def _snapshot_usage_to_struct(usage: dict, hours: int | None = None, limit: int | None = None) -> dict:
+    from_ts = int(usage.get("from_ts", 0) or 0)
+    to_ts = int(usage.get("to_ts", 0) or 0)
+    nodes = _traffic_node_rows_from_map(usage.get("nodes", {}))
+    if limit is not None:
+        nodes = nodes[: max(0, int(limit))]
+    result = {
+        "from": datetime.fromtimestamp(from_ts, TZ).strftime("%Y-%m-%d %H:%M:%S %Z") if from_ts else "",
+        "to": datetime.fromtimestamp(to_ts, TZ).strftime("%Y-%m-%d %H:%M:%S %Z") if to_ts else "",
+        "nodes": nodes,
+        "skipped": usage.get("skipped", []),
+        "reset_warnings": usage.get("reset_warnings", []),
+        "sample_count": int(usage.get("sample_count", 0) or 0),
+        "source": usage.get("source", "traffic_snapshots"),
+    }
+    if hours is not None:
+        result["hours"] = int(hours)
+    return result
+
+
+def build_snapshot_hourly_total_summary(from_ts: int, to_ts: int) -> dict:
+    rows = traffic_snapshot_rows_between(from_ts, to_ts)
+    samples = snapshots_to_samples(rows)
+    if len(samples) < 2:
+        return {
+            "from": datetime.fromtimestamp(int(from_ts), TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
+            "to": datetime.fromtimestamp(int(to_ts), TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
+            "error": "insufficient_samples",
+            "message": "采样点不足，无法计算小时级分布。",
+            "sample_count": len(samples),
+            "source": "traffic_snapshots",
+        }
+
+    bucket_map: dict[str, dict] = {}
+    warnings: list[str] = []
+    prev = samples[0]
+    for cur in samples[1:]:
+        cur_ts = int(cur.get("ts", 0) or 0)
+        deltas, segment_warnings = compute_strict_sample_delta_from_maps(cur.get("nodes", {}), prev.get("nodes", {}))
+        warnings.extend(segment_warnings)
+        up = sum(int(v.get("up", 0) or 0) for v in deltas.values())
+        down = sum(int(v.get("down", 0) or 0) for v in deltas.values())
+        total = up + down
+        hour_label = datetime.fromtimestamp(cur_ts, TZ).strftime("%Y-%m-%d %H:00")
+        bucket = bucket_map.setdefault(hour_label, {"hour": hour_label, "up": 0, "down": 0, "total": 0})
+        bucket["up"] += up
+        bucket["down"] += down
+        bucket["total"] += total
+        prev = cur
+
+    hours = list(bucket_map.values())
+    hours.sort(key=lambda x: x["hour"])
+    for item in hours:
+        item["up_human"] = human_bytes(item["up"])
+        item["down_human"] = human_bytes(item["down"])
+        item["total_human"] = human_bytes(item["total"])
+
+    peak_hour = max(hours, key=lambda x: x["total"]) if hours else None
+    valley_hour = min(hours, key=lambda x: x["total"]) if hours else None
+    return {
+        "from": datetime.fromtimestamp(int(from_ts), TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "to": datetime.fromtimestamp(int(to_ts), TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "hours": hours,
+        "peak_hour": peak_hour,
+        "valley_hour": valley_hour,
+        "reset_warnings": list(dict.fromkeys(warnings)),
+        "sample_count": len(samples),
+        "source": "traffic_snapshots",
+    }
+
+
+def build_snapshot_hourly_by_node_summary(from_ts: int, to_ts: int, label_date: date | None = None) -> dict:
+    rows = traffic_snapshot_rows_between(from_ts, to_ts)
+    samples = snapshots_to_samples(rows)
+    base = {
+        "date": label_date.strftime("%Y-%m-%d") if label_date else "",
+        "from": datetime.fromtimestamp(int(from_ts), TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "to": datetime.fromtimestamp(int(to_ts), TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "sample_count": len(samples),
+        "source": "traffic_snapshots",
+    }
+    if len(samples) < 2:
+        base.update({
+            "error": "insufficient_samples",
+            "message": "采样点不足，无法计算节点小时级分布。",
+        })
+        return base
+
+    node_hour_map: dict[str, dict] = {}
+    warnings: list[str] = []
+    prev = samples[0]
+    for cur in samples[1:]:
+        cur_ts = int(cur.get("ts", 0) or 0)
+        deltas, segment_warnings = compute_strict_sample_delta_from_maps(cur.get("nodes", {}), prev.get("nodes", {}))
+        warnings.extend(segment_warnings)
+        hour_label = datetime.fromtimestamp(cur_ts, TZ).strftime("%Y-%m-%d %H:00")
+
+        for uuid, item in deltas.items():
+            name = item.get("name") or uuid
+            up = int(item.get("up", 0) or 0)
+            down = int(item.get("down", 0) or 0)
+            total = up + down
+            node = node_hour_map.setdefault(
+                str(uuid),
+                {"uuid": str(uuid), "name": name, "up": 0, "down": 0, "total": 0, "hours_map": {}},
+            )
+            node["name"] = name or node["name"]
+            node["up"] += up
+            node["down"] += down
+            node["total"] += total
+            hour = node["hours_map"].setdefault(hour_label, {"hour": hour_label, "up": 0, "down": 0, "total": 0})
+            hour["up"] += up
+            hour["down"] += down
+            hour["total"] += total
+
+        prev = cur
+
+    nodes = []
+    for node in node_hour_map.values():
+        hours = list(node.pop("hours_map").values())
+        hours.sort(key=lambda x: x["hour"])
+        for item in hours:
+            item["up_human"] = human_bytes(item["up"])
+            item["down_human"] = human_bytes(item["down"])
+            item["total_human"] = human_bytes(item["total"])
+        peak_hour = max(hours, key=lambda x: x["total"]) if hours else None
+        valley_hour = min(hours, key=lambda x: x["total"]) if hours else None
+        nodes.append({
+            "uuid": node["uuid"],
+            "name": node["name"],
+            "up": node["up"],
+            "down": node["down"],
+            "total": node["total"],
+            "up_human": human_bytes(node["up"]),
+            "down_human": human_bytes(node["down"]),
+            "total_human": human_bytes(node["total"]),
+            "hours": hours,
+            "peak_hour": peak_hour,
+            "valley_hour": valley_hour,
+        })
+
+    nodes.sort(key=lambda x: (x["total"], x["down"], x["up"], x["name"].lower()), reverse=True)
+    base.update({
+        "nodes": nodes,
+        "top_nodes": nodes[: max(0, int(TOP_N))],
+        "reset_warnings": list(dict.fromkeys(warnings)),
+    })
+    return base
+
+
 def _merge_usage_maps(target: dict, source: dict):
     for uuid, item in (source or {}).items():
         if not isinstance(item, dict):
@@ -2189,7 +2274,7 @@ def build_live_period_struct(from_dt: datetime, to_dt: datetime | None = None, l
     Build a current-period view from durable daily rollups plus live snapshots.
 
     Completed days come from node_daily_usage; the open day comes from adjacent
-    traffic_snapshots deltas. This avoids baseline files while keeping long
+    traffic_snapshots deltas. This avoids period-start marker files while keeping long
     periods usable even after raw snapshot retention prunes older rows.
     """
     to_dt = to_dt or now_dt()
@@ -2258,7 +2343,7 @@ def build_today_delta_struct() -> dict | None:
 
 def get_top_last_hours_struct(hours: int, n: int) -> dict | None:
     """
-    基于 samples.json 计算最近 N 小时的 Top 榜（结构化）。
+    基于 traffic_snapshots 连续快照计算最近 N 小时的 Top 榜（结构化）。
     """
     if hours <= 0:
         return None
@@ -2267,58 +2352,15 @@ def get_top_last_hours_struct(hours: int, n: int) -> dict | None:
     take_sample_if_due(force=True)
 
     now_ts = int(time.time())
-    target_ts = now_ts - hours * 3600
-    base = get_sample_at_or_before(target_ts)
-    if base is None:
-        return {
-            "hours": hours,
-            "error": "no_base_sample",
-            "message": f"还没有足够的采样历史来计算最近 {hours} 小时的数据。",
-        }
-
-    data = load_samples()
-    samples = data.get("samples", [])
-    if not samples:
-        return {
-            "hours": hours,
-            "error": "no_samples",
-            "message": "采样数据为空。",
-        }
-
-    cur = samples[-1]
-    deltas, reset_warnings = compute_delta_from_maps(cur.get("nodes", {}), base.get("nodes", {}))
-    skipped = list(dict.fromkeys((base.get("skipped", []) or []) + (cur.get("skipped", []) or [])))
-
-    from_dt = datetime.fromtimestamp(int(base["ts"]), TZ)
-    to_dt = datetime.fromtimestamp(int(cur["ts"]), TZ)
-
-    nodes = []
-    for v in deltas.values():
-        up = int(v.get("up", 0))
-        down = int(v.get("down", 0))
-        total = up + down
-        nodes.append(
-            {
-                "name": v.get("name", ""),
-                "up": up,
-                "down": down,
-                "total": total,
-                "up_human": human_bytes(up),
-                "down_human": human_bytes(down),
-                "total_human": human_bytes(total),
-            }
-        )
-    nodes.sort(key=lambda x: (x["total"], x["down"], x["up"], x["name"].lower()), reverse=True)
-    nodes = nodes[: max(0, int(n))]
-
-    return {
-        "hours": hours,
-        "from": from_dt.strftime("%Y-%m-%d %H:%M:%S %Z"),
-        "to": to_dt.strftime("%Y-%m-%d %H:%M:%S %Z"),
-        "nodes": nodes,
-        "skipped": skipped,
-        "reset_warnings": reset_warnings,
-    }
+    usage = snapshot_range_usage(now_ts - hours * 3600, now_ts)
+    if int(usage.get("sample_count", 0) or 0) < 2:
+        result = _snapshot_usage_to_struct(usage, hours=hours, limit=n)
+        result.update({
+            "error": "insufficient_snapshots",
+            "message": f"还没有足够的连续快照来计算最近 {hours} 小时的数据。",
+        })
+        return result
+    return _snapshot_usage_to_struct(usage, hours=hours, limit=n)
 
 
 def get_last_hours_nodes_struct(hours: int) -> dict | None:
@@ -2332,134 +2374,35 @@ def get_last_hours_nodes_struct(hours: int) -> dict | None:
     take_sample_if_due(force=True)
 
     now_ts = int(time.time())
-    target_ts = now_ts - hours * 3600
-    base = get_sample_at_or_before(target_ts)
-    if base is None:
-        return {
-            "hours": hours,
-            "error": "no_base_sample",
-            "message": f"还没有足够的采样历史来计算最近 {hours} 小时的数据。",
-        }
-
-    data = load_samples()
-    samples = data.get("samples", [])
-    if not samples:
-        return {
-            "hours": hours,
-            "error": "no_samples",
-            "message": "采样数据为空。",
-        }
-
-    cur = samples[-1]
-    deltas, warnings = compute_strict_sample_delta_from_maps(cur.get("nodes", {}), base.get("nodes", {}))
-    skipped = list(dict.fromkeys((base.get("skipped", []) or []) + (cur.get("skipped", []) or [])))
-
-    from_dt = datetime.fromtimestamp(int(base["ts"]), TZ)
-    to_dt = datetime.fromtimestamp(int(cur["ts"]), TZ)
-
-    nodes = []
-    for v in deltas.values():
-        up = int(v.get("up", 0))
-        down = int(v.get("down", 0))
-        total = up + down
-        nodes.append(
-            {
-                "name": v.get("name", ""),
-                "up": up,
-                "down": down,
-                "total": total,
-                "up_human": human_bytes(up),
-                "down_human": human_bytes(down),
-                "total_human": human_bytes(total),
-            }
-        )
-    nodes.sort(key=lambda x: (x["total"], x["down"], x["up"], x["name"].lower()), reverse=True)
-
-    return {
-        "hours": hours,
-        "from": from_dt.strftime("%Y-%m-%d %H:%M:%S %Z"),
-        "to": to_dt.strftime("%Y-%m-%d %H:%M:%S %Z"),
-        "nodes": nodes,
-        "skipped": skipped,
-        "warnings": warnings,
-    }
+    usage = snapshot_range_usage(now_ts - hours * 3600, now_ts)
+    result = _snapshot_usage_to_struct(usage, hours=hours)
+    result["warnings"] = result.get("reset_warnings", [])
+    if int(usage.get("sample_count", 0) or 0) < 2:
+        result.update({
+            "error": "insufficient_snapshots",
+            "message": f"还没有足够的连续快照来计算最近 {hours} 小时的数据。",
+        })
+    return result
 
 
 
 def build_last_24h_hourly_summary() -> dict:
     """
-    基于 samples.json 构造最近 24 小时按小时分桶的总流量分布，
+    基于 traffic_snapshots 构造最近 24 小时按小时分桶的总流量分布，
     用于回答“小时级峰谷”问题。
     """
     ensure_dirs()
     take_sample_if_due(force=True)
 
-    data = load_samples()
-    samples = sorted(data.get("samples", []), key=lambda x: int(x.get("ts", 0)))
-    if len(samples) < 2:
-        return {
-            "error": "insufficient_samples",
-            "message": "采样点不足，无法计算最近 24 小时小时级分布。",
-        }
-
     now_ts = int(time.time())
     from_ts = now_ts - 24 * 3600
-
-    # 从最近一个 <= from_ts 的样本开始累计差分
-    prev = None
-    for s0 in samples:
-        ts0 = int(s0.get("ts", 0))
-        if ts0 <= from_ts:
-            prev = s0
-        else:
-            break
-    if prev is None:
-        prev = samples[0]
-
-    bucket_map: dict[str, dict] = {}
-
-    for cur in samples:
-        cur_ts = int(cur.get("ts", 0))
-        if cur_ts <= int(prev.get("ts", 0)):
-            continue
-        if cur_ts < from_ts:
-            prev = cur
-            continue
-
-        deltas, _warnings = compute_strict_sample_delta_from_maps(cur.get("nodes", {}), prev.get("nodes", {}))
-        up = sum(int(v.get("up", 0)) for v in deltas.values())
-        down = sum(int(v.get("down", 0)) for v in deltas.values())
-        total = up + down
-
-        hour_label = datetime.fromtimestamp(cur_ts, TZ).strftime("%Y-%m-%d %H:00")
-        if hour_label not in bucket_map:
-            bucket_map[hour_label] = {"hour": hour_label, "up": 0, "down": 0, "total": 0}
-        bucket_map[hour_label]["up"] += up
-        bucket_map[hour_label]["down"] += down
-        bucket_map[hour_label]["total"] += total
-
-        prev = cur
-
-    hours = list(bucket_map.values())
-    hours.sort(key=lambda x: x["hour"])
-    for h in hours:
-        h["up_human"] = human_bytes(h["up"])
-        h["down_human"] = human_bytes(h["down"])
-        h["total_human"] = human_bytes(h["total"])
-
-    peak_hour = max(hours, key=lambda x: x["total"]) if hours else None
-    valley_hour = min(hours, key=lambda x: x["total"]) if hours else None
-
-    return {
-        "from": datetime.fromtimestamp(from_ts, TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
-        "to": datetime.fromtimestamp(now_ts, TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
-        "hours": hours,
-        "peak_hour": peak_hour,
-        "valley_hour": valley_hour,
-    }
+    result = build_snapshot_hourly_total_summary(from_ts, now_ts)
+    if result.get("error") == "insufficient_samples":
+        result["message"] = "采样点不足，无法计算最近 24 小时小时级分布。"
+    return result
 def build_yesterday_hourly_by_node_summary() -> dict:
     """
-    基于 samples.json 统计“昨天 00:00~24:00”各节点小时级走势。
+    基于 traffic_snapshots 统计“昨天 00:00~24:00”各节点小时级走势。
     用于回答“某节点昨天哪个小时最忙、是否有峰谷”。
     """
     ensure_dirs()
@@ -2469,96 +2412,15 @@ def build_yesterday_hourly_by_node_summary() -> dict:
     yday = td - timedelta(days=1)
     from_ts = int(start_of_day(yday).timestamp())
     to_ts = int(start_of_day(td).timestamp())
-
-    data = load_samples()
-    samples = sorted(data.get("samples", []), key=lambda x: int(x.get("ts", 0)))
-    if len(samples) < 2:
-        return {
-            "date": yday.strftime("%Y-%m-%d"),
-            "error": "insufficient_samples",
-            "message": "采样点不足，无法计算昨天节点小时级分布。",
-        }
-
-    prev = None
-    for s0 in samples:
-        ts0 = int(s0.get("ts", 0))
-        if ts0 <= from_ts:
-            prev = s0
-        else:
-            break
-    if prev is None:
-        prev = samples[0]
-
-    node_hour_map: dict[str, dict] = {}
-    for cur in samples:
-        cur_ts = int(cur.get("ts", 0))
-        if cur_ts <= int(prev.get("ts", 0)):
-            continue
-        if cur_ts < from_ts:
-            prev = cur
-            continue
-        if cur_ts > to_ts:
-            break
-
-        deltas, _warnings = compute_strict_sample_delta_from_maps(cur.get("nodes", {}), prev.get("nodes", {}))
-        hour_label = datetime.fromtimestamp(cur_ts, TZ).strftime("%Y-%m-%d %H:00")
-
-        for v in deltas.values():
-            name = v.get("name", "")
-            up = int(v.get("up", 0))
-            down = int(v.get("down", 0))
-            total = up + down
-            if name not in node_hour_map:
-                node_hour_map[name] = {"name": name, "up": 0, "down": 0, "total": 0, "hours_map": {}}
-            node_hour_map[name]["up"] += up
-            node_hour_map[name]["down"] += down
-            node_hour_map[name]["total"] += total
-            hm = node_hour_map[name]["hours_map"]
-            if hour_label not in hm:
-                hm[hour_label] = {"hour": hour_label, "up": 0, "down": 0, "total": 0}
-            hm[hour_label]["up"] += up
-            hm[hour_label]["down"] += down
-            hm[hour_label]["total"] += total
-
-        prev = cur
-
-    nodes = []
-    for node in node_hour_map.values():
-        hours = list(node["hours_map"].values())
-        hours.sort(key=lambda x: x["hour"])
-        for h in hours:
-            h["up_human"] = human_bytes(h["up"])
-            h["down_human"] = human_bytes(h["down"])
-            h["total_human"] = human_bytes(h["total"])
-        peak_hour = max(hours, key=lambda x: x["total"]) if hours else None
-        valley_hour = min(hours, key=lambda x: x["total"]) if hours else None
-
-        nodes.append({
-            "name": node["name"],
-            "up": node["up"],
-            "down": node["down"],
-            "total": node["total"],
-            "up_human": human_bytes(node["up"]),
-            "down_human": human_bytes(node["down"]),
-            "total_human": human_bytes(node["total"]),
-            "hours": hours,
-            "peak_hour": peak_hour,
-            "valley_hour": valley_hour,
-        })
-
-    nodes.sort(key=lambda x: (x["total"], x["down"], x["up"], x["name"].lower()), reverse=True)
-    return {
-        "date": yday.strftime("%Y-%m-%d"),
-        "from": datetime.fromtimestamp(from_ts, TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
-        "to": datetime.fromtimestamp(to_ts, TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
-        "nodes": nodes,
-        "top_nodes": nodes[: max(0, int(TOP_N))],
-    }
+    result = build_snapshot_hourly_by_node_summary(from_ts, to_ts, label_date=yday)
+    if result.get("error") == "insufficient_samples":
+        result["message"] = "采样点不足，无法计算昨天节点小时级分布。"
+    return result
 
 
 def build_today_hourly_by_node_summary() -> dict:
     """
-    基于 samples.json 统计“今天 00:00~当前”各节点小时级走势。
+    基于 traffic_snapshots 统计“今天 00:00~当前”各节点小时级走势。
     """
     ensure_dirs()
     take_sample_if_due(force=True)
@@ -2566,89 +2428,10 @@ def build_today_hourly_by_node_summary() -> dict:
     td = today_date()
     from_ts = int(start_of_day(td).timestamp())
     now_ts = int(time.time())
-
-    data = load_samples()
-    samples = sorted(data.get("samples", []), key=lambda x: int(x.get("ts", 0)))
-    if len(samples) < 2:
-        return {
-            "date": td.strftime("%Y-%m-%d"),
-            "error": "insufficient_samples",
-            "message": "采样点不足，无法计算今天节点小时级分布。",
-        }
-
-    prev = None
-    for s0 in samples:
-        ts0 = int(s0.get("ts", 0))
-        if ts0 <= from_ts:
-            prev = s0
-        else:
-            break
-    if prev is None:
-        prev = samples[0]
-
-    node_hour_map: dict[str, dict] = {}
-    for cur in samples:
-        cur_ts = int(cur.get("ts", 0))
-        if cur_ts <= int(prev.get("ts", 0)):
-            continue
-        if cur_ts < from_ts:
-            prev = cur
-            continue
-
-        deltas, _warnings = compute_strict_sample_delta_from_maps(cur.get("nodes", {}), prev.get("nodes", {}))
-        hour_label = datetime.fromtimestamp(cur_ts, TZ).strftime("%Y-%m-%d %H:00")
-
-        for v in deltas.values():
-            name = v.get("name", "")
-            up = int(v.get("up", 0))
-            down = int(v.get("down", 0))
-            total = up + down
-            if name not in node_hour_map:
-                node_hour_map[name] = {"name": name, "up": 0, "down": 0, "total": 0, "hours_map": {}}
-            node_hour_map[name]["up"] += up
-            node_hour_map[name]["down"] += down
-            node_hour_map[name]["total"] += total
-            hm = node_hour_map[name]["hours_map"]
-            if hour_label not in hm:
-                hm[hour_label] = {"hour": hour_label, "up": 0, "down": 0, "total": 0}
-            hm[hour_label]["up"] += up
-            hm[hour_label]["down"] += down
-            hm[hour_label]["total"] += total
-
-        prev = cur
-
-    nodes = []
-    for node in node_hour_map.values():
-        hours = list(node["hours_map"].values())
-        hours.sort(key=lambda x: x["hour"])
-        for h in hours:
-            h["up_human"] = human_bytes(h["up"])
-            h["down_human"] = human_bytes(h["down"])
-            h["total_human"] = human_bytes(h["total"])
-        peak_hour = max(hours, key=lambda x: x["total"]) if hours else None
-        valley_hour = min(hours, key=lambda x: x["total"]) if hours else None
-
-        nodes.append({
-            "name": node["name"],
-            "up": node["up"],
-            "down": node["down"],
-            "total": node["total"],
-            "up_human": human_bytes(node["up"]),
-            "down_human": human_bytes(node["down"]),
-            "total_human": human_bytes(node["total"]),
-            "hours": hours,
-            "peak_hour": peak_hour,
-            "valley_hour": valley_hour,
-        })
-
-    nodes.sort(key=lambda x: (x["total"], x["down"], x["up"], x["name"].lower()), reverse=True)
-    return {
-        "date": td.strftime("%Y-%m-%d"),
-        "from": datetime.fromtimestamp(from_ts, TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
-        "to": datetime.fromtimestamp(now_ts, TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
-        "nodes": nodes,
-        "top_nodes": nodes[: max(0, int(TOP_N))],
-    }
+    result = build_snapshot_hourly_by_node_summary(from_ts, now_ts, label_date=td)
+    if result.get("error") == "insufficient_samples":
+        result["message"] = "采样点不足，无法计算今天节点小时级分布。"
+    return result
 
 
 def load_ai_pack_cache() -> dict:
@@ -2990,90 +2773,7 @@ def history_sum(from_day: date, to_day: date) -> dict:
     return summed
 
 
-# -------------------- Baseline（按 tag） --------------------
-
-def load_baselines():
-    base = load_json(BASELINES_PATH, {"baselines": {}})
-    if "version" not in base:
-        base["version"] = 1
-    base.setdefault("baselines", {})
-    return base
-
-
-def save_baseline(tag: str, nodes: dict):
-    base = load_baselines()
-    base["baselines"][tag] = {
-        "nodes": nodes,
-        "ts": now_dt().strftime("%Y-%m-%d %H:%M:%S %Z"),
-    }
-    save_json_atomic(BASELINES_PATH, base)
-
-
-def _iter_day_baselines_sorted(base: dict):
-    entries = []
-    for tag, item in base.get("baselines", {}).items():
-        try:
-            d = datetime.strptime(tag, "%Y-%m-%d").date()
-        except Exception:
-            continue
-        entries.append((d, tag, item))
-    entries.sort(key=lambda x: x[0])
-    return entries
-
-
-def rebuild_period_baselines(since_day: date | None = None, dry_run: bool = False) -> tuple[int, int, int]:
-    """
-    从日基线重建 WEEK-/MONTH- 基线。
-    returns: (daily_count, week_rebuilt, month_rebuilt)
-    """
-    ensure_dirs()
-    base = load_baselines()
-    entries = _iter_day_baselines_sorted(base)
-    if since_day is None:
-        since_day = date(2026, 2, 1)
-
-    week_count = 0
-    month_count = 0
-    daily_count = 0
-    for d, _tag, item in entries:
-        if d < since_day:
-            continue
-        daily_count += 1
-        nodes = item.get("nodes", {})
-        ts = item.get("ts", now_dt().strftime("%Y-%m-%d %H:%M:%S %Z"))
-
-        if d == start_of_week(d):
-            week_tag = f"WEEK-{d.strftime('%Y-%m-%d')}"
-            if not dry_run:
-                base["baselines"][week_tag] = {"nodes": nodes, "ts": ts}
-            week_count += 1
-
-        if d == start_of_month(d):
-            month_tag = f"MONTH-{d.strftime('%Y-%m-%d')}"
-            if not dry_run:
-                base["baselines"][month_tag] = {"nodes": nodes, "ts": ts}
-            month_count += 1
-
-    if not dry_run:
-        save_json_atomic(BASELINES_PATH, base)
-    return daily_count, week_count, month_count
-
-
-def get_baseline_nodes(tag: str) -> dict | None:
-    base = load_baselines()
-    b = base.get("baselines", {}).get(tag)
-    if not b:
-        return None
-    return b.get("nodes", {})
-
-
-def set_baseline_to_current(tag: str):
-    ensure_dirs()
-    current, _skipped = fetch_nodes_and_totals()
-    save_baseline(tag, build_nodes_map_from_current(current))
-
-
-# -------------------- 采样器（用于 /top Nh） --------------------
+# -------------------- 采样器（用于连续快照、/top Nh 和告警） --------------------
 
 def load_samples():
     return load_json(SAMPLES_PATH, {"samples": []})
@@ -3164,25 +2864,6 @@ def stop_sample_worker():
     SAMPLE_STOP_EVENT.set()
     if SAMPLE_THREAD and SAMPLE_THREAD.is_alive():
         SAMPLE_THREAD.join(timeout=3)
-
-
-def get_sample_at_or_before(target_ts: int):
-    data = load_samples()
-    samples = data.get("samples", [])
-    if not samples:
-        return None
-
-    lo, hi = 0, len(samples) - 1
-    best = None
-    while lo <= hi:
-        mid = (lo + hi) // 2
-        ts = int(samples[mid].get("ts", 0))
-        if ts <= target_ts:
-            best = samples[mid]
-            lo = mid + 1
-        else:
-            hi = mid - 1
-    return best
 
 
 # -------------------- 智能告警 --------------------
@@ -3349,17 +3030,15 @@ def collect_alert_candidates(state: dict, now_ts: int | None = None) -> list[dic
                 node_skips[name]["count"] = 0
 
         window_threshold_enabled = ALERT_TOTAL_WINDOW_BYTES > 0 or ALERT_NODE_WINDOW_BYTES > 0
-        if window_threshold_enabled and len(samples) >= 2:
-            target_ts = int(latest.get("ts", now_ts)) - ALERT_WINDOW_MINUTES * 60
-            base = get_sample_at_or_before(target_ts)
-            if base is not None and base is not latest:
-                deltas, reset_warnings = compute_strict_sample_delta_from_maps(
-                    latest.get("nodes", {}),
-                    base.get("nodes", {}),
-                )
+        if window_threshold_enabled:
+            target_ts = now_ts - ALERT_WINDOW_MINUTES * 60
+            usage = snapshot_range_usage(target_ts, now_ts)
+            if int(usage.get("sample_count", 0) or 0) >= 2:
+                deltas = usage.get("nodes", {})
+                reset_warnings = usage.get("reset_warnings", [])
                 total_up, total_down, total = _sum_deltas(deltas)
-                from_dt = datetime.fromtimestamp(int(base.get("ts", target_ts)), TZ)
-                to_dt = datetime.fromtimestamp(int(latest.get("ts", now_ts)), TZ)
+                from_dt = datetime.fromtimestamp(int(usage.get("from_ts", target_ts) or target_ts), TZ)
+                to_dt = datetime.fromtimestamp(int(usage.get("to_ts", now_ts) or now_ts), TZ)
                 label = f"{from_dt.strftime('%Y-%m-%d %H:%M')} -> {to_dt.strftime('%Y-%m-%d %H:%M')}"
 
                 if ALERT_TOTAL_WINDOW_BYTES > 0 and total >= ALERT_TOTAL_WINDOW_BYTES:
@@ -3808,74 +3487,24 @@ def stop_report_scheduler():
 def run_top_last_hours(hours: int):
     """
     /top Nh：最近 N 小时 Top 榜（合计）
-    依赖 samples.json（bot 周期采样）
+    依赖 traffic_snapshots 连续快照。
     """
     ensure_dirs()
     if hours <= 0:
         telegram_send("用法：/top 6h（N>0）")
         return
 
-    # 采最新 sample
-    take_sample_if_due(force=True)
-
-    now_ts = int(time.time())
-    target_ts = now_ts - hours * 3600
-    base = get_sample_at_or_before(target_ts)
-    if base is None:
+    result = get_top_last_hours_struct(hours, TOP_N)
+    if not result or result.get("error") or int(result.get("sample_count", 0) or 0) < 2:
         telegram_send(
-            "⚠️ 还没有足够的采样历史来计算这个时间范围。\n"
+            "⚠️ 还没有足够的连续快照来计算这个时间范围。\n"
             f"请保持 bot 服务运行一段时间后再试：/top {hours}h"
         )
         return
 
-    data = load_samples()
-    samples = data.get("samples", [])
-    if not samples:
-        telegram_send("⚠️ 采样数据为空，请稍后再试。")
-        return
-
-    cur = samples[-1]
-    deltas, reset_warnings = compute_delta_from_maps(cur.get("nodes", {}), base.get("nodes", {}))
-    skipped = list(dict.fromkeys((base.get("skipped", []) or []) + (cur.get("skipped", []) or [])))
-
-    from_dt = datetime.fromtimestamp(int(base["ts"]), TZ)
-    to_dt = datetime.fromtimestamp(int(cur["ts"]), TZ)
-    label = f"{from_dt.strftime('%Y-%m-%d %H:%M')} → {to_dt.strftime('%Y-%m-%d %H:%M')}"
-    send_top_only(label, deltas, reset_warnings, skipped=skipped)
-
-
-def bootstrap_period_baselines():
-    ensure_dirs()
-    td = today_date()
-    ws = start_of_week(td)
-    ms = start_of_month(td)
-
-    set_baseline_to_current(f"WEEK-{ws.strftime('%Y-%m-%d')}")
-    set_baseline_to_current(f"MONTH-{ms.strftime('%Y-%m-%d')}")
-    telegram_send("✅ 已建立本周 / 本月起点快照：现在可直接用 /week /month /top week /top month")
-
-
-def history_has_existing_data_risk() -> tuple[bool, str]:
-    hist = load_json(HISTORY_PATH, {"days": {}})
-    days = hist.get("days", {})
-    valid_days = 0
-    for k in days.keys():
-        try:
-            datetime.strptime(k, "%Y-%m-%d")
-            valid_days += 1
-        except Exception:
-            continue
-    if valid_days >= 7:
-        return True, f"history.json 中已有 {valid_days} 天记录"
-
-    archives = list(filter(None, [
-        p if re.fullmatch(r"history-\d{4}-\d{2}\.json\.gz", p) else None
-        for p in os.listdir(DATA_DIR)
-    ])) if os.path.isdir(DATA_DIR) else []
-    if archives:
-        return True, f"存在历史月归档文件 {archives[0]} 等"
-
-    return False, ""
+    label = f"{result.get('from', '')} → {result.get('to', '')}"
+    deltas = {str(item.get("uuid") or item.get("name")): item for item in result.get("nodes", [])}
+    send_top_only(label, deltas, result.get("reset_warnings", []), skipped=result.get("skipped", []))
 
 
 def load_confirm_state() -> dict:
@@ -4113,37 +3742,6 @@ def listen_commands():
                         f"如需继续，请发送：/confirm_archive {code}"
                     )
 
-                elif cmd == "/bootstrap":
-                    if not is_admin(chat_id):
-                        telegram_send("⛔ 无权限")
-                        continue
-                    risk, reason = history_has_existing_data_risk()
-                    if risk:
-                        telegram_send(
-                            "⛔ 检测到已有历史数据，拒绝执行 bootstrap。\n"
-                            f"原因：{reason}\n"
-                            "请使用 /rebuild_baselines 或手动脚本修复。"
-                        )
-                        continue
-                    code, _ = set_confirm_action(chat_id, "bootstrap")
-                    telegram_send(
-                        "⚠️ 准备执行 bootstrap（重建本周/本月起点快照）。\n"
-                        f"当前时间：{now.strftime('%Y-%m-%d %H:%M:%S %Z')}\n"
-                        "建议仅在新部署、无历史时使用。\n"
-                        f"如需继续，请发送：/confirm_bootstrap {code}"
-                    )
-
-                elif cmd == "/rebuild_baselines":
-                    if not is_admin(chat_id):
-                        telegram_send("⛔ 无权限")
-                        continue
-                    code, _ = set_confirm_action(chat_id, "rebuild_baselines")
-                    telegram_send(
-                        "⚠️ 准备执行 rebuild_baselines（从日基线重建 WEEK/MONTH 起点）。\n"
-                        f"当前时间：{now.strftime('%Y-%m-%d %H:%M:%S %Z')}\n"
-                        f"如需继续，请发送：/confirm_rebuild_baselines {code}"
-                    )
-
                 elif cmd == "/alerts":
                     if not is_admin(chat_id):
                         telegram_send("⛔ 无权限")
@@ -4179,38 +3777,6 @@ def listen_commands():
                         continue
                     archive_and_prune_history()
                     telegram_send("✅ 已执行历史归档压缩")
-
-                elif cmd == "/confirm_bootstrap":
-                    if not is_admin(chat_id):
-                        telegram_send("⛔ 无权限")
-                        continue
-                    code = arg_text.strip()
-                    if not consume_confirm_action(chat_id, "bootstrap", code):
-                        telegram_send("❌ 确认码无效或已过期")
-                        continue
-                    risk, reason = history_has_existing_data_risk()
-                    if risk:
-                        telegram_send(
-                            "⛔ 确认阶段检测到已有历史数据，拒绝执行 bootstrap。\n"
-                            f"原因：{reason}\n"
-                            "请使用 /rebuild_baselines。"
-                        )
-                        continue
-                    bootstrap_period_baselines()
-
-                elif cmd == "/confirm_rebuild_baselines":
-                    if not is_admin(chat_id):
-                        telegram_send("⛔ 无权限")
-                        continue
-                    code = arg_text.strip()
-                    if not consume_confirm_action(chat_id, "rebuild_baselines", code):
-                        telegram_send("❌ 确认码无效或已过期")
-                        continue
-                    daily_count, week_count, month_count = rebuild_period_baselines()
-                    telegram_send(
-                        "✅ 已从日基线重建 WEEK-/MONTH- 基线（>= 2026-02-01）\n"
-                        f"扫描日基线：{daily_count}，重建 WEEK：{week_count}，重建 MONTH：{month_count}"
-                    )
 
                 elif cmd in ("/ask", "/ai"):
                     question = text.partition(" ")[2].strip()
@@ -4248,8 +3814,8 @@ def listen_commands():
                         "/top 6h（任意Nh）\n"
                         "/ask 你的问题（或 /ai）\n"
                         "管理员：/alerts /mute_alerts 2h /unmute_alerts\n"
-                        "/archive /bootstrap /rebuild_baselines\n"
-                        "确认命令：/confirm_archive /confirm_bootstrap /confirm_rebuild_baselines"
+                        "/archive\n"
+                        "确认命令：/confirm_archive"
                     )
 
             if offset is not None:
@@ -4265,7 +3831,7 @@ def listen_commands():
 
 def main():
     if len(sys.argv) < 2:
-        raise RuntimeError("Usage: report_daily | report_weekly | report_monthly | listen | bootstrap [--force] | rebuild-baselines [--dry-run] [--since YYYY-MM-DD] | check_alerts [--dry-run] | health | config-validate")
+        raise RuntimeError("Usage: report_daily | report_weekly | report_monthly | listen | check_alerts [--dry-run] | health | config-validate")
 
     cmd = sys.argv[1].strip().lower()
 
@@ -4280,46 +3846,6 @@ def main():
         return 0
     if cmd == "listen":
         listen_commands()
-        return 0
-    if cmd == "bootstrap":
-        force = any(arg.strip().lower() == "--force" for arg in sys.argv[2:])
-        risk, reason = history_has_existing_data_risk()
-        if risk and not force:
-            raise RuntimeError(
-                "检测到已有历史数据，拒绝执行 bootstrap。"
-                f"原因：{reason}。"
-                "如确认要继续，请使用：bootstrap --force"
-            )
-        bootstrap_period_baselines()
-        return 0
-    if cmd == "rebuild-baselines":
-        dry_run = False
-        since_day = None
-        i = 2
-        while i < len(sys.argv):
-            arg = sys.argv[i].strip().lower()
-            if arg == "--dry-run":
-                dry_run = True
-                i += 1
-                continue
-            if arg == "--since":
-                if i + 1 >= len(sys.argv):
-                    raise RuntimeError("--since requires YYYY-MM-DD")
-                try:
-                    since_day = parse_date_yyyy_mm_dd(sys.argv[i + 1].strip())
-                except Exception as e:
-                    raise RuntimeError(f"invalid --since date: {sys.argv[i + 1]} ({e})")
-                i += 2
-                continue
-            raise RuntimeError(f"Unknown rebuild-baselines arg: {sys.argv[i]}")
-
-        daily_count, week_count, month_count = rebuild_period_baselines(since_day=since_day, dry_run=dry_run)
-        mode = "DRY-RUN" if dry_run else "APPLY"
-        since_text = since_day.strftime("%Y-%m-%d") if since_day else "2026-02-01"
-        print(
-            f"OK {mode} rebuilt baselines from daily snapshots (>= {since_text}): "
-            f"days={daily_count}, week={week_count}, month={month_count}"
-        )
         return 0
     if cmd in ("check_alerts", "check-alerts"):
         dry_run = False

@@ -132,10 +132,11 @@ STAT_TZ=Asia/Shanghai
 # Top 榜数量
 TOP_N=3
 
-# /top Nh 采样：每 5 分钟采样一次，默认仅保留 2 小时（用于短时差分）
-# 长期历史建议依赖 Komari /api/records/load
+# 连续快照：每 5 分钟采样一次，默认保留 45 天原始快照
+# samples 仅保留短期兼容缓存，流量统计以 traffic.db 快照为准
 SAMPLE_INTERVAL_SECONDS=300
 SAMPLE_RETENTION_HOURS=2
+TRAFFIC_SNAPSHOT_RETENTION_DAYS=45
 
 # 历史数据策略
 HISTORY_HOT_DAYS=60
@@ -210,11 +211,6 @@ Web 面板默认访问：`http://localhost:8080`
 
 推送计划直接在 Web 面板的「推送控制」里配置，由 `bot` 服务的 `listen` 进程执行。旧部署如果还保留 `cron` 服务，可以从 `docker-compose.yml` 中删除该服务以及 `./crontab:/app/crontab:ro` 挂载，避免重复推送。
 
-### 4️⃣ 初始化（只需一次）
-```
-docker compose exec bot \
-  python /app/komari_traffic_report.py bootstrap
-```
 ## 🧭 Web 面板
 
 Web 面板提供轻量控制台，用于查看总览、节点流量、长期分析、区间 CSV 导出、告警状态、Telegram 推送、AI 问答和系统健康。
@@ -291,13 +287,11 @@ docker compose logs --tail=100 web
 ## 📦 数据说明
 所有数据均保存在 ./data 目录中：
 
-baseline（起点快照）
+traffic.db（SQLite 主存储：连续流量快照、每日节点汇总、任务执行记录）
 
-samples（用于 /top Nh）
+history（日报历史 & 压缩归档，旧数据会在读取时迁移进 SQLite）
 
-history（日报历史 & 压缩归档）
-
-traffic.db（SQLite 长期流量汇总库，会从旧 history 自动迁移）
+samples（短期兼容缓存，用于节点连续失败状态；流量统计以 SQLite 快照为准）
 
 Telegram offset
 
@@ -308,6 +302,8 @@ node_bindings（Web 面板节点到 Komari 机器的手动绑定覆盖）
 report_schedules（Web 面板应用内推送计划）
 
 升级 / 重启容器不会丢数据。
+
+当前周期、最近 Nh、小时分布和告警窗口都基于 `traffic.db` 里的连续快照做相邻差分；如果节点计数器回退或重置，该段负差会按 0 处理，不会把当前累计值误算成窗口流量。`TRAFFIC_SNAPSHOT_RETENTION_DAYS` 控制连续快照保留天数，默认 45 天；日报会写入每日汇总，因此长期周/月/区间分析不依赖保留全部原始快照。
 
 `TASK_RUN_RETENTION_DAYS` 控制 Web 面板任务运行记录的建议保留天数，默认 `90` 天；设为 `0` 表示关闭清理。系统页的「数据维护」只会清理过旧的 `task_runs` 记录或执行 SQLite 压缩，不会删除每日/每周/月度流量汇总。
 
@@ -405,8 +401,6 @@ docker image inspect ghcr.io/wirelouis/komari-traffic-hub:latest --format '{{.Id
 ## 🔐 管理员命令（需管理员 chat）
 
 - `/archive` → 先发确认码，再通过 `/confirm_archive <code>` 执行
-- `/bootstrap` → 有历史数据风险时会拒绝；可通过 `/confirm_bootstrap <code>` 执行
-- `/rebuild_baselines` → 先发确认码，再通过 `/confirm_rebuild_baselines <code>` 执行
 - `/alerts` → 查看告警状态
 - `/mute_alerts 2h` / `/unmute_alerts` → 临时静默或恢复告警
 
