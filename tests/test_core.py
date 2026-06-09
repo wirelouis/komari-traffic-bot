@@ -636,6 +636,34 @@ class CoreTests(unittest.TestCase):
         self.assertIn("Node One(counter_reset)", result["reset_warnings"])
         self.assertEqual(top["nodes"][0]["total"], 40)
 
+    def test_records_summary_uses_sqlite_snapshots_not_komari_records(self):
+        self.patch_attr("take_sample_if_due", lambda **_kwargs: None)
+        self.patch_attr("fetch_node_records", lambda *_args, **_kwargs: self.fail("Komari records API should not be used for traffic totals"))
+        self.patch_attr("get_json", lambda *_args, **_kwargs: self.fail("Komari nodes API should not be required for traffic totals"))
+
+        now_ts = 100000
+        from_ts = now_ts - 24 * 3600
+        k.save_traffic_snapshot(from_ts, {
+            "n1": {"name": "Node One", "up": 100, "down": 200},
+            "n2": {"name": "Node Two", "up": 10, "down": 20},
+        })
+        k.save_traffic_snapshot(now_ts, {
+            "n1": {"name": "Node One", "up": 160, "down": 280},
+            "n2": {"name": "Node Two", "up": 40, "down": 70},
+        })
+
+        with patch.object(k.time, "time", return_value=now_ts):
+            result = k.build_records_summary(24)
+
+        by_uuid = {node["uuid"]: node for node in result["nodes"]}
+        self.assertEqual(result["source"], "traffic_snapshots")
+        self.assertEqual(result["sample_count"], 2)
+        self.assertEqual(by_uuid["n1"]["up"], 60)
+        self.assertEqual(by_uuid["n1"]["down"], 80)
+        self.assertEqual(by_uuid["n2"]["total"], 80)
+        self.assertEqual(result["total"]["total"], 220)
+        self.assertEqual(result["note"], "snapshot_window")
+
     def test_hourly_by_node_summary_uses_sqlite_snapshots(self):
         k.save_traffic_snapshot(1000, {
             "n1": {"name": "Node One", "up": 10, "down": 20},

@@ -2128,49 +2128,47 @@ def compute_traffic_from_records(records: list[dict]) -> dict:
 def build_records_summary(hours: int) -> dict:
     if hours <= 0:
         raise ValueError("hours must be > 0")
-    nodes_resp = get_json(f"{KOMARI_BASE_URL}/api/nodes")
-    if not (isinstance(nodes_resp, dict) and nodes_resp.get("status") == "success"):
-        raise RuntimeError(f"/api/nodes 返回异常：{nodes_resp}")
-    nodes = nodes_resp.get("data", [])
-    if not isinstance(nodes, list):
-        raise RuntimeError(f"/api/nodes data 非列表：{nodes_resp}")
 
-    out_nodes: list[dict] = []
-    skipped: list[str] = []
+    now_ts = int(time.time())
+    from_ts = now_ts - int(hours) * 3600
+    usage = snapshot_range_usage(from_ts, now_ts)
+    out_nodes = _traffic_node_rows_from_map(usage.get("nodes", {}))
 
-    def fetch_one(node: dict):
-        uuid = node.get("uuid")
-        name = node.get("name") or uuid or "unknown"
-        if not uuid:
-            return None, f"{name}(missing_uuid)"
-        try:
-            records = fetch_node_records(str(uuid), hours)
-            summary = compute_traffic_from_records(records)
-            summary["uuid"] = str(uuid)
-            summary["name"] = str(name)
-            return summary, None
-        except requests.exceptions.ReadTimeout:
-            return None, f"{name}(timeout)"
-        except Exception as e:
-            return None, f"{name}({type(e).__name__})"
+    from_text = datetime.fromtimestamp(from_ts, TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
+    to_text = datetime.fromtimestamp(now_ts, TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
+    empty_stats = _metric_stats([])
+    for item in out_nodes:
+        item["cpu"] = dict(empty_stats)
+        item["ram"] = dict(empty_stats)
+        item["disk"] = dict(empty_stats)
+        item["record_count"] = int(usage.get("sample_count", 0) or 0)
+        item["from"] = from_text
+        item["to"] = to_text
 
-    max_workers = max(1, min(len(nodes), KOMARI_FETCH_WORKERS))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_map = {executor.submit(fetch_one, n): n for n in nodes}
-        for future in concurrent.futures.as_completed(future_map):
-            item, err = future.result()
-            if err:
-                skipped.append(err)
-            elif item:
-                out_nodes.append(item)
-
-    out_nodes.sort(key=lambda x: (x["total"], x["down"], x["up"], x["name"].lower()), reverse=True)
-    return {
+    sample_count = int(usage.get("sample_count", 0) or 0)
+    result = {
         "hours": int(hours),
+        "from": from_text,
+        "to": to_text,
+        "from_ts": from_ts,
+        "to_ts": now_ts,
         "nodes": out_nodes,
         "top_nodes": out_nodes[: max(0, int(TOP_N))],
-        "skipped": sorted(skipped),
+        "total": _traffic_total_from_rows(out_nodes),
+        "skipped": list(dict.fromkeys(str(item) for item in usage.get("skipped", []))),
+        "reset_warnings": list(dict.fromkeys(str(item) for item in usage.get("reset_warnings", []))),
+        "warnings": list(dict.fromkeys(str(item) for item in usage.get("reset_warnings", []))),
+        "sample_count": sample_count,
+        "segment_count": int(usage.get("segment_count", 0) or 0),
+        "source": usage.get("source", "traffic_snapshots"),
+        "note": "snapshot_window" if sample_count >= 2 else "insufficient_snapshots",
     }
+    if sample_count < 2:
+        result.update({
+            "error": "insufficient_snapshots",
+            "message": f"还没有足够的连续快照来计算最近 {hours} 小时的数据。",
+        })
+    return result
 
 
 def build_nodes_map_from_current(current: list[NodeTotal]) -> dict:

@@ -326,8 +326,10 @@ class WebAppTests(unittest.TestCase):
         payload = response.json()
         self.assertTrue(payload["ok"])
         last_24h = payload["data"]["records"]["last_24h"]
-        self.assertFalse(last_24h["ok"])
-        self.assertIn("error", last_24h)
+        self.assertTrue(last_24h["ok"])
+        self.assertEqual(last_24h["data"]["source"], "traffic_snapshots")
+        self.assertEqual(last_24h["data"]["error"], "insufficient_snapshots")
+        self.assertFalse(payload["data"]["services"]["komari"]["configured"])
 
     def test_overview_compacts_large_node_payloads(self):
         self.login()
