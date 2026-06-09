@@ -1103,10 +1103,14 @@ def traffic_snapshot_rows_between(from_ts: int | float, to_ts: int | float) -> l
                 FROM traffic_snapshots
                 WHERE ts <= ?
             )
-            AND ts <= ?
+            AND ts <= (
+                SELECT COALESCE(MIN(ts), ?)
+                FROM traffic_snapshots
+                WHERE ts >= ?
+            )
             ORDER BY ts ASC, uuid ASC
             """,
-            (start, start, end),
+            (start, start, end, end),
         ).fetchall()
     return [
         {
@@ -1147,6 +1151,75 @@ def snapshots_to_samples(rows: list[dict]) -> list[dict]:
     return [samples_by_ts[ts] for ts in sorted(samples_by_ts)]
 
 
+def _scale_bytes_by_overlap(value: int, overlap_seconds: int, segment_seconds: int) -> int:
+    if segment_seconds <= 0 or overlap_seconds <= 0:
+        return 0
+    value = max(0, int(value or 0))
+    return (value * int(overlap_seconds) + segment_seconds // 2) // segment_seconds
+
+
+def _scale_delta_map(deltas: dict, overlap_seconds: int, segment_seconds: int) -> dict:
+    scaled = {}
+    for uuid, item in (deltas or {}).items():
+        if not isinstance(item, dict):
+            continue
+        up = _scale_bytes_by_overlap(int(item.get("up", 0) or 0), overlap_seconds, segment_seconds)
+        down = _scale_bytes_by_overlap(int(item.get("down", 0) or 0), overlap_seconds, segment_seconds)
+        scaled[str(uuid)] = {"name": item.get("name") or str(uuid), "up": up, "down": down}
+    return scaled
+
+
+def _hour_bucket_label_and_end(ts: int) -> tuple[str, int]:
+    bucket_start = datetime.fromtimestamp(int(ts), TZ).replace(minute=0, second=0, microsecond=0)
+    bucket_end = int((bucket_start + timedelta(hours=1)).timestamp())
+    return bucket_start.strftime("%Y-%m-%d %H:00"), bucket_end
+
+
+def snapshot_delta_segments(from_ts: int | float, to_ts: int | float) -> tuple[list[dict], list[dict]]:
+    start = int(from_ts)
+    end = int(to_ts)
+    if end <= start:
+        return [], []
+
+    migrate_samples_to_traffic_db()
+    rows = traffic_snapshot_rows_between(start, end)
+    samples = snapshots_to_samples(rows)
+    if len(samples) < 2:
+        return samples, []
+
+    segments = []
+    prev = samples[0]
+    for cur in samples[1:]:
+        prev_ts = int(prev.get("ts", 0) or 0)
+        cur_ts = int(cur.get("ts", 0) or 0)
+        segment_seconds = cur_ts - prev_ts
+        if segment_seconds <= 0:
+            prev = cur
+            continue
+
+        overlap_start = max(prev_ts, start)
+        overlap_end = min(cur_ts, end)
+        overlap_seconds = overlap_end - overlap_start
+        if overlap_seconds <= 0:
+            prev = cur
+            continue
+
+        deltas, segment_warnings = compute_strict_sample_delta_from_maps(cur.get("nodes", {}), prev.get("nodes", {}))
+        segments.append({
+            "sample_from_ts": prev_ts,
+            "sample_to_ts": cur_ts,
+            "from_ts": overlap_start,
+            "to_ts": overlap_end,
+            "overlap_seconds": overlap_seconds,
+            "segment_seconds": segment_seconds,
+            "nodes": deltas,
+            "skipped": [str(item) for item in (prev.get("skipped", []) or []) + (cur.get("skipped", []) or [])],
+            "reset_warnings": segment_warnings,
+        })
+        prev = cur
+    return samples, segments
+
+
 def migrate_samples_to_traffic_db() -> int:
     data = load_samples()
     samples = data.get("samples", []) if isinstance(data, dict) else []
@@ -1166,40 +1239,40 @@ def migrate_samples_to_traffic_db() -> int:
 
 
 def snapshot_range_usage(from_ts: int | float, to_ts: int | float) -> dict:
-    migrate_samples_to_traffic_db()
-    rows = traffic_snapshot_rows_between(from_ts, to_ts)
-    samples = snapshots_to_samples(rows)
+    start = int(from_ts)
+    end = int(to_ts)
+    samples, segments = snapshot_delta_segments(start, end)
     if len(samples) < 2:
         return {
-            "from_ts": int(from_ts),
-            "to_ts": int(to_ts),
+            "from_ts": start,
+            "to_ts": end,
             "nodes": {},
             "skipped": [],
             "reset_warnings": [],
             "sample_count": len(samples),
+            "segment_count": 0,
             "source": "traffic_snapshots",
         }
     totals: dict[str, dict] = {}
     skipped: list[str] = []
     warnings: list[str] = []
-    prev = samples[0]
-    for cur in samples[1:]:
-        deltas, segment_warnings = compute_strict_sample_delta_from_maps(cur.get("nodes", {}), prev.get("nodes", {}))
-        skipped.extend([str(item) for item in (prev.get("skipped", []) or []) + (cur.get("skipped", []) or [])])
-        warnings.extend(segment_warnings)
-        for uuid, item in deltas.items():
+    for segment in segments:
+        scaled = _scale_delta_map(segment.get("nodes", {}), int(segment.get("overlap_seconds", 0) or 0), int(segment.get("segment_seconds", 0) or 0))
+        skipped.extend(segment.get("skipped", []))
+        warnings.extend(segment.get("reset_warnings", []))
+        for uuid, item in scaled.items():
             entry = totals.setdefault(uuid, {"name": item.get("name") or uuid, "up": 0, "down": 0})
             entry["name"] = item.get("name") or entry.get("name") or uuid
             entry["up"] += max(0, int(item.get("up", 0) or 0))
             entry["down"] += max(0, int(item.get("down", 0) or 0))
-        prev = cur
     return {
-        "from_ts": int(samples[0].get("ts") or from_ts),
-        "to_ts": int(samples[-1].get("ts") or to_ts),
+        "from_ts": start,
+        "to_ts": end,
         "nodes": totals,
         "skipped": list(dict.fromkeys(skipped)),
         "reset_warnings": list(dict.fromkeys(warnings)),
         "sample_count": len(samples),
+        "segment_count": len(segments),
         "source": "traffic_snapshots",
     }
 
@@ -2157,8 +2230,7 @@ def _snapshot_usage_to_struct(usage: dict, hours: int | None = None, limit: int 
 
 
 def build_snapshot_hourly_total_summary(from_ts: int, to_ts: int) -> dict:
-    rows = traffic_snapshot_rows_between(from_ts, to_ts)
-    samples = snapshots_to_samples(rows)
+    samples, segments = snapshot_delta_segments(from_ts, to_ts)
     if len(samples) < 2:
         return {
             "from": datetime.fromtimestamp(int(from_ts), TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
@@ -2171,20 +2243,25 @@ def build_snapshot_hourly_total_summary(from_ts: int, to_ts: int) -> dict:
 
     bucket_map: dict[str, dict] = {}
     warnings: list[str] = []
-    prev = samples[0]
-    for cur in samples[1:]:
-        cur_ts = int(cur.get("ts", 0) or 0)
-        deltas, segment_warnings = compute_strict_sample_delta_from_maps(cur.get("nodes", {}), prev.get("nodes", {}))
-        warnings.extend(segment_warnings)
-        up = sum(int(v.get("up", 0) or 0) for v in deltas.values())
-        down = sum(int(v.get("down", 0) or 0) for v in deltas.values())
-        total = up + down
-        hour_label = datetime.fromtimestamp(cur_ts, TZ).strftime("%Y-%m-%d %H:00")
-        bucket = bucket_map.setdefault(hour_label, {"hour": hour_label, "up": 0, "down": 0, "total": 0})
-        bucket["up"] += up
-        bucket["down"] += down
-        bucket["total"] += total
-        prev = cur
+    skipped: list[str] = []
+    for segment in segments:
+        warnings.extend(segment.get("reset_warnings", []))
+        skipped.extend(segment.get("skipped", []))
+        cursor = int(segment.get("from_ts", 0) or 0)
+        segment_end = int(segment.get("to_ts", 0) or 0)
+        while cursor < segment_end:
+            hour_label, bucket_end = _hour_bucket_label_and_end(cursor)
+            part_end = min(segment_end, bucket_end)
+            part_seconds = part_end - cursor
+            scaled = _scale_delta_map(segment.get("nodes", {}), part_seconds, int(segment.get("segment_seconds", 0) or 0))
+            up = sum(int(v.get("up", 0) or 0) for v in scaled.values())
+            down = sum(int(v.get("down", 0) or 0) for v in scaled.values())
+            total = up + down
+            bucket = bucket_map.setdefault(hour_label, {"hour": hour_label, "up": 0, "down": 0, "total": 0})
+            bucket["up"] += up
+            bucket["down"] += down
+            bucket["total"] += total
+            cursor = part_end
 
     hours = list(bucket_map.values())
     hours.sort(key=lambda x: x["hour"])
@@ -2202,14 +2279,15 @@ def build_snapshot_hourly_total_summary(from_ts: int, to_ts: int) -> dict:
         "peak_hour": peak_hour,
         "valley_hour": valley_hour,
         "reset_warnings": list(dict.fromkeys(warnings)),
+        "skipped": list(dict.fromkeys(skipped)),
         "sample_count": len(samples),
+        "segment_count": len(segments),
         "source": "traffic_snapshots",
     }
 
 
 def build_snapshot_hourly_by_node_summary(from_ts: int, to_ts: int, label_date: date | None = None) -> dict:
-    rows = traffic_snapshot_rows_between(from_ts, to_ts)
-    samples = snapshots_to_samples(rows)
+    samples, segments = snapshot_delta_segments(from_ts, to_ts)
     base = {
         "date": label_date.strftime("%Y-%m-%d") if label_date else "",
         "from": datetime.fromtimestamp(int(from_ts), TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
@@ -2226,32 +2304,37 @@ def build_snapshot_hourly_by_node_summary(from_ts: int, to_ts: int, label_date: 
 
     node_hour_map: dict[str, dict] = {}
     warnings: list[str] = []
-    prev = samples[0]
-    for cur in samples[1:]:
-        cur_ts = int(cur.get("ts", 0) or 0)
-        deltas, segment_warnings = compute_strict_sample_delta_from_maps(cur.get("nodes", {}), prev.get("nodes", {}))
-        warnings.extend(segment_warnings)
-        hour_label = datetime.fromtimestamp(cur_ts, TZ).strftime("%Y-%m-%d %H:00")
+    skipped: list[str] = []
+    for segment in segments:
+        warnings.extend(segment.get("reset_warnings", []))
+        skipped.extend(segment.get("skipped", []))
+        cursor = int(segment.get("from_ts", 0) or 0)
+        segment_end = int(segment.get("to_ts", 0) or 0)
+        while cursor < segment_end:
+            hour_label, bucket_end = _hour_bucket_label_and_end(cursor)
+            part_end = min(segment_end, bucket_end)
+            part_seconds = part_end - cursor
+            scaled = _scale_delta_map(segment.get("nodes", {}), part_seconds, int(segment.get("segment_seconds", 0) or 0))
 
-        for uuid, item in deltas.items():
-            name = item.get("name") or uuid
-            up = int(item.get("up", 0) or 0)
-            down = int(item.get("down", 0) or 0)
-            total = up + down
-            node = node_hour_map.setdefault(
-                str(uuid),
-                {"uuid": str(uuid), "name": name, "up": 0, "down": 0, "total": 0, "hours_map": {}},
-            )
-            node["name"] = name or node["name"]
-            node["up"] += up
-            node["down"] += down
-            node["total"] += total
-            hour = node["hours_map"].setdefault(hour_label, {"hour": hour_label, "up": 0, "down": 0, "total": 0})
-            hour["up"] += up
-            hour["down"] += down
-            hour["total"] += total
+            for uuid, item in scaled.items():
+                name = item.get("name") or uuid
+                up = int(item.get("up", 0) or 0)
+                down = int(item.get("down", 0) or 0)
+                total = up + down
+                node = node_hour_map.setdefault(
+                    str(uuid),
+                    {"uuid": str(uuid), "name": name, "up": 0, "down": 0, "total": 0, "hours_map": {}},
+                )
+                node["name"] = name or node["name"]
+                node["up"] += up
+                node["down"] += down
+                node["total"] += total
+                hour = node["hours_map"].setdefault(hour_label, {"hour": hour_label, "up": 0, "down": 0, "total": 0})
+                hour["up"] += up
+                hour["down"] += down
+                hour["total"] += total
 
-        prev = cur
+            cursor = part_end
 
     nodes = []
     for node in node_hour_map.values():
@@ -2282,6 +2365,8 @@ def build_snapshot_hourly_by_node_summary(from_ts: int, to_ts: int, label_date: 
         "nodes": nodes,
         "top_nodes": nodes[: max(0, int(TOP_N))],
         "reset_warnings": list(dict.fromkeys(warnings)),
+        "skipped": list(dict.fromkeys(skipped)),
+        "segment_count": len(segments),
     })
     return base
 
@@ -3366,6 +3451,11 @@ def run_daily_send_yesterday():
     yday_label = yday.strftime("%Y-%m-%d")
     start = start_of_day(yday)
     end = start_of_day(today)
+
+    try:
+        take_sample_if_due(force=True, source="daily-report-boundary")
+    except Exception:
+        logging.exception("failed to capture daily report boundary snapshot")
 
     usage = snapshot_range_usage(int(start.timestamp()), int(end.timestamp()))
     deltas = usage.get("nodes", {})

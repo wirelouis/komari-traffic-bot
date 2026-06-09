@@ -560,6 +560,23 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(usage["nodes"]["n2"]["down"], 6)
         self.assertIn("Node Two(counter_reset)", usage["reset_warnings"])
 
+    def test_snapshot_range_usage_prorates_window_edges(self):
+        k.save_traffic_snapshot(1000, {
+            "n1": {"name": "Node One", "up": 0, "down": 0},
+        })
+        k.save_traffic_snapshot(1100, {
+            "n1": {"name": "Node One", "up": 100, "down": 200},
+        })
+
+        usage = k.snapshot_range_usage(1025, 1075)
+
+        self.assertEqual(usage["sample_count"], 2)
+        self.assertEqual(usage["segment_count"], 1)
+        self.assertEqual(usage["from_ts"], 1025)
+        self.assertEqual(usage["to_ts"], 1075)
+        self.assertEqual(usage["nodes"]["n1"]["up"], 50)
+        self.assertEqual(usage["nodes"]["n1"]["down"], 100)
+
     def test_last_hours_struct_uses_sqlite_snapshots_and_ignores_reset_absolute_value(self):
         self.patch_attr("take_sample_if_due", lambda **_kwargs: None)
         with patch.object(k.time, "time", return_value=1600):
@@ -596,6 +613,20 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(result["nodes"][0]["uuid"], "n1")
         self.assertEqual(result["nodes"][0]["total"], 10)
         self.assertEqual(result["nodes"][0]["hours"][0]["total"], 10)
+
+    def test_hourly_summary_splits_snapshot_segments_across_hour_boundaries(self):
+        k.save_traffic_snapshot(3600, {
+            "n1": {"name": "Node One", "up": 0, "down": 0},
+        })
+        k.save_traffic_snapshot(10800, {
+            "n1": {"name": "Node One", "up": 120, "down": 0},
+        })
+
+        total = k.build_snapshot_hourly_total_summary(3600, 10800)
+        by_node = k.build_snapshot_hourly_by_node_summary(3600, 10800, label_date=date(1970, 1, 1))
+
+        self.assertEqual([item["total"] for item in total["hours"]], [60, 60])
+        self.assertEqual([item["total"] for item in by_node["nodes"][0]["hours"]], [60, 60])
 
     def test_take_sample_writes_sqlite_snapshots(self):
         samples = [
