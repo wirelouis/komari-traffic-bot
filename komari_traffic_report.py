@@ -2381,6 +2381,10 @@ def _merge_usage_maps(target: dict, source: dict):
         entry["down"] += max(0, int(item.get("down", 0) or 0))
 
 
+def _snapshot_usage_has_nodes(usage: dict) -> bool:
+    return bool(usage.get("nodes") or {})
+
+
 def build_live_period_struct(from_dt: datetime, to_dt: datetime | None = None, label: str | None = None) -> dict:
     """
     Build a current-period view from durable daily rollups plus live snapshots.
@@ -2398,13 +2402,33 @@ def build_live_period_struct(from_dt: datetime, to_dt: datetime | None = None, l
     reset_warnings: list[str] = []
     sample_count = 0
     has_rollup = False
+    snapshot_days = 0
+    rollup_days = 0
+    missing_days: list[str] = []
 
     open_day_start = start_of_day(to_dt.date())
     historical_end = min(to_dt.date() - timedelta(days=1), today_date() - timedelta(days=1))
     if from_dt.date() <= historical_end:
-        historical = history_sum(from_dt.date(), historical_end)
-        _merge_usage_maps(nodes_map, historical)
-        has_rollup = bool(historical)
+        d = from_dt.date()
+        while d <= historical_end:
+            day_usage = history_sum(d, d)
+            if day_usage:
+                _merge_usage_maps(nodes_map, day_usage)
+                has_rollup = True
+                rollup_days += 1
+            else:
+                day_start = start_of_day(d)
+                day_end = start_of_day(d + timedelta(days=1))
+                usage = snapshot_range_usage(int(day_start.timestamp()), int(day_end.timestamp()))
+                if _snapshot_usage_has_nodes(usage):
+                    _merge_usage_maps(nodes_map, usage.get("nodes", {}))
+                    skipped.extend(usage.get("skipped", []))
+                    reset_warnings.extend(usage.get("reset_warnings", []))
+                    sample_count += int(usage.get("sample_count", 0) or 0)
+                    snapshot_days += 1
+                else:
+                    missing_days.append(d.strftime("%Y-%m-%d"))
+            d += timedelta(days=1)
 
     live_start = max(from_dt, open_day_start)
     if live_start < to_dt:
@@ -2412,10 +2436,10 @@ def build_live_period_struct(from_dt: datetime, to_dt: datetime | None = None, l
         _merge_usage_maps(nodes_map, usage.get("nodes", {}))
         skipped.extend(usage.get("skipped", []))
         reset_warnings.extend(usage.get("reset_warnings", []))
-        sample_count = int(usage.get("sample_count", 0) or 0)
+        sample_count += int(usage.get("sample_count", 0) or 0)
 
     rows = _traffic_node_rows_from_map(nodes_map)
-    note = "snapshot_window" if sample_count >= 2 else ("rollup_only" if has_rollup else "insufficient_snapshots")
+    note = "partial_period" if missing_days and rows else ("snapshot_window" if sample_count >= 2 else ("rollup_only" if has_rollup else "insufficient_snapshots"))
     source = "traffic_db+traffic_snapshots" if has_rollup and sample_count else ("traffic_db" if has_rollup else "traffic_snapshots")
     return {
         "from": from_dt.strftime("%Y-%m-%d %H:%M:%S %Z"),
@@ -2427,6 +2451,9 @@ def build_live_period_struct(from_dt: datetime, to_dt: datetime | None = None, l
         "skipped": list(dict.fromkeys(str(item) for item in skipped)),
         "reset_warnings": list(dict.fromkeys(str(item) for item in reset_warnings)),
         "sample_count": sample_count,
+        "rollup_days": rollup_days,
+        "snapshot_days": snapshot_days,
+        "missing_days": missing_days,
         "source": source,
         "note": note,
     }

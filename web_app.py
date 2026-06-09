@@ -1051,6 +1051,9 @@ def build_period_summary(scope: str) -> dict:
         "skipped": current_period.get("skipped", []),
         "reset_warnings": current_period.get("reset_warnings", []),
         "sample_count": current_period.get("sample_count", 0),
+        "rollup_days": current_period.get("rollup_days", 0),
+        "snapshot_days": current_period.get("snapshot_days", 0),
+        "missing_days": current_period.get("missing_days", []),
         "source": current_period.get("source", "traffic_snapshots"),
     }
 

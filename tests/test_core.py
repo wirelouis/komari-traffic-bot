@@ -669,6 +669,32 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(by_uuid["n1"]["down"], 27)
         self.assertEqual(by_uuid["n2"]["total"], 7)
 
+    def test_live_week_falls_back_to_completed_day_snapshots_when_rollup_missing(self):
+        monday = date(2026, 6, 1)
+        tuesday = date(2026, 6, 2)
+        mon_start = int(k.start_of_day(monday).timestamp())
+        tue_start = int(k.start_of_day(tuesday).timestamp())
+        tue_one = tue_start + 3600
+
+        k.save_traffic_snapshot(mon_start, {
+            "n1": {"name": "Node One", "up": 0, "down": 0},
+        })
+        k.save_traffic_snapshot(tue_start, {
+            "n1": {"name": "Node One", "up": 10, "down": 20},
+        })
+        k.save_traffic_snapshot(tue_one, {
+            "n1": {"name": "Node One", "up": 15, "down": 25},
+        })
+
+        with patch.object(k, "today_date", return_value=tuesday):
+            today = k.build_live_period_struct(k.start_of_day(tuesday), datetime(2026, 6, 2, 1, 0, tzinfo=k.TZ))
+            week = k.build_live_period_struct(k.start_of_day(monday), datetime(2026, 6, 2, 1, 0, tzinfo=k.TZ))
+
+        self.assertEqual(today["total"]["total"], 10)
+        self.assertEqual(week["total"]["total"], 40)
+        self.assertEqual(week["snapshot_days"], 1)
+        self.assertEqual(week["missing_days"], [])
+
     def test_report_schedule_validation_and_due_key(self):
         schedule = k.validate_report_schedule({
             "enabled": True,
