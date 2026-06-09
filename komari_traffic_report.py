@@ -144,9 +144,10 @@ AI_API_BASE = os.environ.get("AI_API_BASE", "").rstrip("/")
 AI_API_KEY = os.environ.get("AI_API_KEY", "").strip()
 AI_MODEL = os.environ.get("AI_MODEL", "").strip()
 
-# /top Nh 依赖采样快照：bot 运行时自动采样
+# /top Nh 与当前周期统计依赖连续采样：bot 运行时自动采样
 SAMPLE_INTERVAL_SECONDS = int(os.environ.get("SAMPLE_INTERVAL_SECONDS", "300"))  # 默认 5 分钟
 SAMPLE_RETENTION_HOURS = int(os.environ.get("SAMPLE_RETENTION_HOURS", "2"))    # 默认保留 2 小时采样
+TRAFFIC_SNAPSHOT_RETENTION_DAYS = max(1, int(os.environ.get("TRAFFIC_SNAPSHOT_RETENTION_DAYS", "45")))
 
 BASELINES_PATH = os.path.join(DATA_DIR, "baselines.json")
 HISTORY_PATH = os.path.join(DATA_DIR, "history.json")
@@ -716,8 +717,11 @@ def init_traffic_db():
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_task_runs_type_started ON task_runs(type, started_at DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_task_runs_started ON task_runs(started_at DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_traffic_snapshots_uuid_ts ON traffic_snapshots(uuid, ts)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_traffic_snapshots_ts ON traffic_snapshots(ts)")
         conn.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(1, ?)", (now_dt().isoformat(),))
         conn.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(2, ?)", (now_dt().isoformat(),))
+        conn.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(3, ?)", (now_dt().isoformat(),))
 
 
 def _json_dumps_compact(data) -> str:
@@ -1004,6 +1008,170 @@ def run_with_task_record(task_type: str, source: str, func, summary_func=None, m
             metadata=metadata or {},
         )
         raise
+
+
+def save_traffic_snapshot(ts: int | float, nodes_map: dict, skipped: list[str] | None = None):
+    if not isinstance(nodes_map, dict):
+        return
+    init_traffic_db()
+    ts_int = int(ts)
+    skipped_json = json.dumps([str(item) for item in (skipped or [])], ensure_ascii=False)
+    rows = []
+    for uuid, item in nodes_map.items():
+        if not isinstance(item, dict):
+            continue
+        uuid_text = str(uuid or "").strip()
+        if not uuid_text:
+            continue
+        rows.append((
+            ts_int,
+            uuid_text,
+            str(item.get("name") or uuid_text),
+            max(0, int(item.get("up", 0) or 0)),
+            max(0, int(item.get("down", 0) or 0)),
+            skipped_json,
+        ))
+    if not rows:
+        return
+    with traffic_db_session() as conn:
+        conn.executemany(
+            """
+            INSERT INTO traffic_snapshots(ts, uuid, name, up, down, skipped)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(ts, uuid) DO UPDATE SET
+              name=excluded.name,
+              up=excluded.up,
+              down=excluded.down,
+              skipped=excluded.skipped
+            """,
+            rows,
+        )
+
+
+def prune_traffic_snapshots(now_ts: int | float | None = None, retention_days: int | None = None) -> int:
+    init_traffic_db()
+    days = TRAFFIC_SNAPSHOT_RETENTION_DAYS if retention_days is None else int(retention_days)
+    if days <= 0:
+        return 0
+    cutoff = int(now_ts if now_ts is not None else time.time()) - days * 86400
+    with traffic_db_session() as conn:
+        cur = conn.execute("DELETE FROM traffic_snapshots WHERE ts < ?", (cutoff,))
+        return int(cur.rowcount or 0)
+
+
+def traffic_snapshot_rows_between(from_ts: int | float, to_ts: int | float) -> list[dict]:
+    init_traffic_db()
+    start = int(from_ts)
+    end = int(to_ts)
+    with traffic_db_session() as conn:
+        rows = conn.execute(
+            """
+            SELECT ts, uuid, COALESCE(NULLIF(name, ''), uuid) AS name, up, down, skipped
+            FROM traffic_snapshots
+            WHERE ts >= (
+                SELECT COALESCE(MAX(ts), ?)
+                FROM traffic_snapshots
+                WHERE ts <= ?
+            )
+            AND ts <= ?
+            ORDER BY ts ASC, uuid ASC
+            """,
+            (start, start, end),
+        ).fetchall()
+    return [
+        {
+            "ts": int(row["ts"] or 0),
+            "uuid": str(row["uuid"]),
+            "name": str(row["name"] or row["uuid"]),
+            "up": int(row["up"] or 0),
+            "down": int(row["down"] or 0),
+            "skipped": _json_loads_list(row["skipped"]),
+        }
+        for row in rows
+    ]
+
+
+def _json_loads_list(text: str) -> list:
+    try:
+        value = json.loads(text or "[]")
+        return value if isinstance(value, list) else []
+    except Exception:
+        return []
+
+
+def snapshots_to_samples(rows: list[dict]) -> list[dict]:
+    samples_by_ts: dict[int, dict] = {}
+    for row in rows:
+        ts = int(row.get("ts", 0) or 0)
+        if ts <= 0:
+            continue
+        sample = samples_by_ts.setdefault(ts, {"ts": ts, "nodes": {}, "skipped": []})
+        uuid = str(row.get("uuid") or "")
+        if uuid:
+            sample["nodes"][uuid] = {
+                "name": row.get("name") or uuid,
+                "up": int(row.get("up", 0) or 0),
+                "down": int(row.get("down", 0) or 0),
+            }
+        sample["skipped"] = list(dict.fromkeys(sample.get("skipped", []) + [str(item) for item in (row.get("skipped") or [])]))
+    return [samples_by_ts[ts] for ts in sorted(samples_by_ts)]
+
+
+def migrate_samples_to_traffic_db() -> int:
+    data = load_samples()
+    samples = data.get("samples", []) if isinstance(data, dict) else []
+    migrated = 0
+    for sample in samples:
+        if not isinstance(sample, dict):
+            continue
+        nodes = sample.get("nodes", {})
+        if not isinstance(nodes, dict):
+            continue
+        try:
+            save_traffic_snapshot(int(sample.get("ts", 0) or 0), nodes, sample.get("skipped", []) or [])
+            migrated += 1
+        except Exception:
+            logging.exception("failed to migrate sample to traffic_snapshots")
+    return migrated
+
+
+def snapshot_range_usage(from_ts: int | float, to_ts: int | float) -> dict:
+    migrate_samples_to_traffic_db()
+    rows = traffic_snapshot_rows_between(from_ts, to_ts)
+    samples = snapshots_to_samples(rows)
+    if len(samples) < 2:
+        return {
+            "from_ts": int(from_ts),
+            "to_ts": int(to_ts),
+            "nodes": {},
+            "skipped": [],
+            "reset_warnings": [],
+            "sample_count": len(samples),
+            "source": "traffic_snapshots",
+        }
+    totals: dict[str, dict] = {}
+    skipped: list[str] = []
+    warnings: list[str] = []
+    prev = samples[0]
+    for cur in samples[1:]:
+        deltas, segment_warnings = compute_strict_sample_delta_from_maps(cur.get("nodes", {}), prev.get("nodes", {}))
+        skipped.extend([str(item) for item in (prev.get("skipped", []) or []) + (cur.get("skipped", []) or [])])
+        warnings.extend(segment_warnings)
+        for uuid, item in deltas.items():
+            entry = totals.setdefault(uuid, {"name": item.get("name") or uuid, "up": 0, "down": 0})
+            entry["name"] = item.get("name") or entry.get("name") or uuid
+            entry["up"] += max(0, int(item.get("up", 0) or 0))
+            entry["down"] += max(0, int(item.get("down", 0) or 0))
+        prev = cur
+    return {
+        "from_ts": int(samples[0].get("ts") or from_ts),
+        "to_ts": int(samples[-1].get("ts") or to_ts),
+        "nodes": totals,
+        "skipped": list(dict.fromkeys(skipped)),
+        "reset_warnings": list(dict.fromkeys(warnings)),
+        "sample_count": len(samples),
+        "source": "traffic_snapshots",
+    }
 
 
 def upsert_daily_usage(day_str: str, deltas: dict, source: str = "history", source_from: str = "", source_to: str = "", reset_warnings: list[str] | None = None, skipped: list[str] | None = None):
@@ -1987,65 +2155,105 @@ def top_lines(deltas: dict, n: int) -> list[str]:
     return rows
 
 
+def build_snapshot_period_struct(from_dt: datetime, to_dt: datetime | None = None, label: str | None = None) -> dict:
+    to_dt = to_dt or now_dt()
+    usage = snapshot_range_usage(int(from_dt.timestamp()), int(to_dt.timestamp()))
+    rows = _traffic_node_rows_from_map(usage.get("nodes", {}))
+    return {
+        "from": from_dt.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "to": to_dt.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "label": label or f"{from_dt.strftime('%Y-%m-%d %H:%M')} → {to_dt.strftime('%Y-%m-%d %H:%M')}",
+        "nodes": rows,
+        "top_nodes": rows[: max(0, int(TOP_N))],
+        "total": _traffic_total_from_rows(rows),
+        "skipped": usage.get("skipped", []),
+        "reset_warnings": usage.get("reset_warnings", []),
+        "sample_count": usage.get("sample_count", 0),
+        "source": usage.get("source", "traffic_snapshots"),
+        "note": "snapshot_window" if int(usage.get("sample_count", 0) or 0) >= 2 else "insufficient_snapshots",
+    }
+
+
+def _merge_usage_maps(target: dict, source: dict):
+    for uuid, item in (source or {}).items():
+        if not isinstance(item, dict):
+            continue
+        entry = target.setdefault(str(uuid), {"name": item.get("name") or str(uuid), "up": 0, "down": 0})
+        entry["name"] = item.get("name") or entry.get("name") or str(uuid)
+        entry["up"] += max(0, int(item.get("up", 0) or 0))
+        entry["down"] += max(0, int(item.get("down", 0) or 0))
+
+
+def build_live_period_struct(from_dt: datetime, to_dt: datetime | None = None, label: str | None = None) -> dict:
+    """
+    Build a current-period view from durable daily rollups plus live snapshots.
+
+    Completed days come from node_daily_usage; the open day comes from adjacent
+    traffic_snapshots deltas. This avoids baseline files while keeping long
+    periods usable even after raw snapshot retention prunes older rows.
+    """
+    to_dt = to_dt or now_dt()
+    if from_dt > to_dt:
+        raise RuntimeError("from_dt must be <= to_dt")
+
+    nodes_map: dict[str, dict] = {}
+    skipped: list[str] = []
+    reset_warnings: list[str] = []
+    sample_count = 0
+    has_rollup = False
+
+    open_day_start = start_of_day(to_dt.date())
+    historical_end = min(to_dt.date() - timedelta(days=1), today_date() - timedelta(days=1))
+    if from_dt.date() <= historical_end:
+        historical = history_sum(from_dt.date(), historical_end)
+        _merge_usage_maps(nodes_map, historical)
+        has_rollup = bool(historical)
+
+    live_start = max(from_dt, open_day_start)
+    if live_start < to_dt:
+        usage = snapshot_range_usage(int(live_start.timestamp()), int(to_dt.timestamp()))
+        _merge_usage_maps(nodes_map, usage.get("nodes", {}))
+        skipped.extend(usage.get("skipped", []))
+        reset_warnings.extend(usage.get("reset_warnings", []))
+        sample_count = int(usage.get("sample_count", 0) or 0)
+
+    rows = _traffic_node_rows_from_map(nodes_map)
+    note = "snapshot_window" if sample_count >= 2 else ("rollup_only" if has_rollup else "insufficient_snapshots")
+    source = "traffic_db+traffic_snapshots" if has_rollup and sample_count else ("traffic_db" if has_rollup else "traffic_snapshots")
+    return {
+        "from": from_dt.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "to": to_dt.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "label": label or f"{from_dt.strftime('%Y-%m-%d %H:%M')} → {to_dt.strftime('%Y-%m-%d %H:%M')}",
+        "nodes": rows,
+        "top_nodes": rows[: max(0, int(TOP_N))],
+        "total": _traffic_total_from_rows(rows),
+        "skipped": list(dict.fromkeys(str(item) for item in skipped)),
+        "reset_warnings": list(dict.fromkeys(str(item) for item in reset_warnings)),
+        "sample_count": sample_count,
+        "source": source,
+        "note": note,
+    }
+
+
 def build_today_delta_struct() -> dict | None:
     """
     返回今天各节点增量统计的结构化数据。
     """
     td = today_date()
-    tag = td.strftime("%Y-%m-%d")
-    baseline_nodes = get_baseline_nodes(tag)
     now = now_dt()
+    start = start_of_day(td)
+    period = build_live_period_struct(start, now, td.strftime("%Y-%m-%d"))
     result = {
-        "date": tag,
+        "date": td.strftime("%Y-%m-%d"),
         "now": now.strftime("%Y-%m-%d %H:%M:%S %Z"),
-        "nodes": [],
-        "skipped": [],
-        "reset_warnings": [],
+        "nodes": period.get("nodes", []),
+        "skipped": period.get("skipped", []),
+        "reset_warnings": period.get("reset_warnings", []),
+        "note": period.get("note", "snapshot_window"),
+        "source": period.get("source", "traffic_snapshots"),
+        "sample_count": period.get("sample_count", 0),
+        "total": period.get("total", _traffic_total_from_rows([])),
     }
-
-    current, skipped = fetch_nodes_and_totals()
-    result["skipped"] = skipped
-
-    if baseline_nodes is None:
-        for n in current:
-            up = int(n.up)
-            down = int(n.down)
-            total = up + down
-            result["nodes"].append(
-                {
-                    "name": n.name,
-                    "up": up,
-                    "down": down,
-                    "total": total,
-                    "up_human": human_bytes(up),
-                    "down_human": human_bytes(down),
-                    "total_human": human_bytes(total),
-                }
-            )
-        result["nodes"].sort(key=lambda x: (x["total"], x["down"], x["up"], x["name"].lower()), reverse=True)
-        result["note"] = "baseline_missing"
-        return result
-
-    deltas, _new_baseline, reset_warnings = compute_delta_from_nodes(current, baseline_nodes)
-    result["reset_warnings"] = reset_warnings
-
-    for v in deltas.values():
-        up = int(v.get("up", 0))
-        down = int(v.get("down", 0))
-        total = up + down
-        result["nodes"].append(
-            {
-                "name": v.get("name", ""),
-                "up": up,
-                "down": down,
-                "total": total,
-                "up_human": human_bytes(up),
-                "down_human": human_bytes(down),
-                "total_human": human_bytes(total),
-            }
-        )
-    result["nodes"].sort(key=lambda x: (x["total"], x["down"], x["up"], x["name"].lower()), reverse=True)
-    result["note"] = "baseline_ok"
     return result
 
 def get_top_last_hours_struct(hours: int, n: int) -> dict | None:
@@ -2900,6 +3108,9 @@ def take_sample_if_due(force: bool = False, record: bool = True, source: str = "
         current, skipped = fetch_nodes_and_totals()
         nodes_map = build_nodes_map_from_current(current)
 
+        save_traffic_snapshot(now_ts, nodes_map, skipped)
+        prune_traffic_snapshots(now_ts)
+
         samples.append({"ts": now_ts, "nodes": nodes_map, "skipped": skipped})
         samples = prune_samples(samples, now_ts)
         save_samples({"samples": samples})
@@ -3186,7 +3397,7 @@ def collect_alert_candidates(state: dict, now_ts: int | None = None) -> list[dic
 
     if ALERT_DAILY_TOTAL_BYTES > 0 or ALERT_DAILY_NODE_BYTES > 0:
         today = build_today_delta_struct()
-        if isinstance(today, dict) and today.get("note") == "baseline_ok":
+        if isinstance(today, dict) and int(today.get("sample_count", 0) or 0) >= 2:
             nodes = today.get("nodes", []) or []
             total_up = sum(int(n.get("up", 0)) for n in nodes)
             total_down = sum(int(n.get("down", 0)) for n in nodes)
@@ -3441,32 +3652,30 @@ def format_alert_status() -> str:
 
 def run_daily_send_yesterday():
     """
-    每天 00:00：发送昨日日报；写入 history；归档；并写入“今日起点 baseline(YYYY-MM-DD)”
+    每天 00:00：发送昨日日报，并把连续快照聚合写入长期 daily rollup。
     """
     ensure_dirs()
-    yday = today_date() - timedelta(days=1)
+    today = today_date()
+    yday = today - timedelta(days=1)
     yday_label = yday.strftime("%Y-%m-%d")
+    start = start_of_day(yday)
+    end = start_of_day(today)
 
-    baseline_nodes = get_baseline_nodes(yday_label)
-    current, skipped = fetch_nodes_and_totals()
-
-    if baseline_nodes is None:
-        save_baseline(yday_label, build_nodes_map_from_current(current))
+    usage = snapshot_range_usage(int(start.timestamp()), int(end.timestamp()))
+    deltas = usage.get("nodes", {})
+    skipped = usage.get("skipped", [])
+    reset_warnings = usage.get("reset_warnings", [])
+    if int(usage.get("sample_count", 0) or 0) < 2:
         telegram_send(
-            f"⚠️ <b>日报基线缺失</b>（{yday_label}）。\n"
-            f"我已把当前累计保存为该日基线。\n"
-            f"从下一次 00:00 开始日报将稳定正常。"
+            f"⚠️ <b>昨日报表采样不足</b>（{telegram_html_escape(yday_label)}）。\n"
+            f"请保持 bot/listen 服务运行，至少产生 2 个采样点后日报会自动恢复。"
         )
         return
 
-    deltas, new_baseline, reset_warnings = compute_delta_from_nodes(current, baseline_nodes)
     telegram_send(format_report("昨日流量日报", yday_label, deltas, reset_warnings, skipped=skipped, include_top=True))
 
     history_append(yday_label, deltas)
     archive_and_prune_history()
-
-    today_label = today_date().strftime("%Y-%m-%d")
-    save_baseline(today_label, new_baseline)
 
 
 def run_weekly_send_last_week():
@@ -3495,18 +3704,16 @@ def run_monthly_send_last_month():
 
 def build_period_report_message(from_dt: datetime, to_dt: datetime, tag: str, top_only: bool = False) -> str:
     ensure_dirs()
-    baseline_nodes = get_baseline_nodes(tag)
-    if baseline_nodes is None:
-        set_baseline_to_current(tag)
-        return (
-            f"⚠️ 当前没有找到 起点快照（{tag}）。\n"
-            f"我已把现在的累计值保存为新的起点。\n"
-            f"请稍后再发一次命令查看稳定统计。"
-        )
-
-    current, skipped = fetch_nodes_and_totals()
-    deltas, _new_base, reset_warnings = compute_delta_from_nodes(current, baseline_nodes)
     period_label = f"{from_dt.strftime('%Y-%m-%d %H:%M')} → {to_dt.strftime('%Y-%m-%d %H:%M')}"
+    period = build_live_period_struct(from_dt, to_dt, period_label)
+    deltas = {str(item.get("uuid") or item.get("name")): item for item in period.get("nodes", [])}
+    skipped = period.get("skipped", [])
+    reset_warnings = period.get("reset_warnings", [])
+    if int(period.get("sample_count", 0) or 0) < 2 and not deltas:
+        return (
+            f"⚠️ 当前采样点不足，无法计算 {telegram_html_escape(period_label)} 的稳定统计。\n"
+            f"请保持 bot/listen 服务运行，至少产生 2 个采样点后再试。"
+        )
 
     if top_only:
         return format_top_only_message(period_label, deltas, reset_warnings, skipped=skipped)

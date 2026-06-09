@@ -418,7 +418,7 @@ function updateStatus(message, good = true) {
 function noteText(period) {
   if (!period?.ok) return friendlyError(period?.error?.message || "不可用");
   const data = period.data;
-  if (data.note === "baseline_missing") return "基线缺失";
+  if (data.note === "insufficient_snapshots") return "采样不足";
   const count = data.node_count ?? data.nodes?.length ?? 0;
   return data.hidden_node_count ? `${count} 个节点 · 展示摘要` : `${count} 个节点`;
 }

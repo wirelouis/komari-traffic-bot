@@ -511,6 +511,70 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(weekly["groups"][0]["key"], "2026-06-01")
         self.assertEqual(weekly["groups"][0]["total"]["total"], 49)
 
+    def test_snapshot_range_usage_aggregates_adjacent_deltas(self):
+        k.save_traffic_snapshot(1000, {
+            "n1": {"name": "Node One", "up": 10, "down": 20},
+            "n2": {"name": "Node Two", "up": 5, "down": 5},
+        })
+        k.save_traffic_snapshot(1300, {
+            "n1": {"name": "Node One", "up": 15, "down": 35},
+            "n2": {"name": "Node Two", "up": 1, "down": 2},
+        })
+        k.save_traffic_snapshot(1600, {
+            "n1": {"name": "Node One", "up": 20, "down": 45},
+            "n2": {"name": "Node Two", "up": 4, "down": 8},
+        })
+
+        usage = k.snapshot_range_usage(1000, 1600)
+
+        self.assertEqual(usage["sample_count"], 3)
+        self.assertEqual(usage["nodes"]["n1"]["up"], 10)
+        self.assertEqual(usage["nodes"]["n1"]["down"], 25)
+        self.assertEqual(usage["nodes"]["n2"]["up"], 3)
+        self.assertEqual(usage["nodes"]["n2"]["down"], 6)
+        self.assertIn("Node Two(counter_reset)", usage["reset_warnings"])
+
+    def test_take_sample_writes_sqlite_snapshots(self):
+        samples = [
+            [k.NodeTotal(uuid="n1", name="Node One", up=10, down=20)],
+            [k.NodeTotal(uuid="n1", name="Node One", up=15, down=35)],
+        ]
+        self.patch_attr("fetch_nodes_and_totals", lambda: (samples.pop(0), []))
+        with patch.object(k.time, "time", return_value=1000):
+            k.take_sample_if_due(force=True, record=False)
+        with patch.object(k.time, "time", return_value=1300):
+            k.take_sample_if_due(force=True, record=False)
+
+        usage = k.snapshot_range_usage(1000, 1300)
+
+        self.assertEqual(usage["nodes"]["n1"]["up"], 5)
+        self.assertEqual(usage["nodes"]["n1"]["down"], 15)
+
+    def test_live_period_combines_daily_rollup_and_open_day_snapshots(self):
+        k.upsert_daily_usage("2026-06-01", {
+            "n1": {"name": "Node One", "up": 10, "down": 20},
+        }, source="test")
+        k.save_traffic_snapshot(1780358400, {
+            "n1": {"name": "Node One", "up": 100, "down": 200},
+            "n2": {"name": "Node Two", "up": 5, "down": 7},
+        })
+        k.save_traffic_snapshot(1780362000, {
+            "n1": {"name": "Node One", "up": 103, "down": 207},
+            "n2": {"name": "Node Two", "up": 8, "down": 11},
+        })
+
+        with patch.object(k, "today_date", return_value=date(2026, 6, 2)):
+            period = k.build_live_period_struct(
+                datetime(2026, 6, 1, tzinfo=k.TZ),
+                datetime(2026, 6, 2, 1, 0, tzinfo=k.TZ),
+            )
+
+        by_uuid = {item["uuid"]: item for item in period["nodes"]}
+        self.assertEqual(period["source"], "traffic_db+traffic_snapshots")
+        self.assertEqual(by_uuid["n1"]["up"], 13)
+        self.assertEqual(by_uuid["n1"]["down"], 27)
+        self.assertEqual(by_uuid["n2"]["total"], 7)
+
     def test_report_schedule_validation_and_due_key(self):
         schedule = k.validate_report_schedule({
             "enabled": True,

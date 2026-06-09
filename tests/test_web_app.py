@@ -3,7 +3,7 @@ import base64
 import tempfile
 import time
 import unittest
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -376,6 +376,26 @@ class WebAppTests(unittest.TestCase):
         self.assertTrue(today["nodes"][-1]["compact_other"])
         self.assertEqual(last_24h["node_count"], 12)
         self.assertNotIn("machines", last_24h)
+
+    def test_period_summary_uses_sqlite_snapshots_without_baseline(self):
+        self.login()
+        now = datetime(2026, 6, 2, 1, 0, tzinfo=k.TZ)
+        with patch.object(k, "today_date", return_value=date(2026, 6, 2)), patch.object(k, "now_dt", return_value=now):
+            start_ts = int(k.start_of_day(date(2026, 6, 2)).timestamp())
+            k.save_traffic_snapshot(start_ts, {
+                "n1": {"name": "Node One", "up": 10, "down": 20},
+            })
+            k.save_traffic_snapshot(start_ts + 3600, {
+                "n1": {"name": "Node One", "up": 16, "down": 35},
+            })
+
+            response = self.client.get("/api/overview")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        today = response.json()["data"]["periods"]["today"]["data"]
+        self.assertEqual(today["note"], "snapshot_window")
+        self.assertEqual(today["total"]["total"], 21)
+        self.assertFalse((self.tmp_path / "baselines.json").exists())
 
     def test_alert_check_dry_run_does_not_persist_state(self):
         self.login()

@@ -1040,66 +1040,21 @@ def period_parts(scope: str):
 
 def build_period_summary(scope: str) -> dict:
     start, now, tag = period_parts(scope)
-    if scope in ("week", "month"):
-        today = k.today_date()
-        historical_end = today - timedelta(days=1)
-        historical = k.history_sum(start.date(), historical_end) if historical_end >= start.date() else {}
-        today_nodes = {}
-        skipped = []
-        reset_warnings = []
-        today_baseline = k.get_baseline_nodes(today.strftime("%Y-%m-%d"))
-        if today_baseline is not None:
-            current, skipped = k.fetch_nodes_and_totals()
-            today_nodes, _new_baseline, reset_warnings = k.compute_delta_from_nodes(current, today_baseline)
-        merged = dict(historical)
-        for uuid, item in today_nodes.items():
-            if uuid not in merged:
-                merged[uuid] = {"name": item.get("name", uuid), "up": 0, "down": 0}
-            merged[uuid]["up"] += int(item.get("up", 0) or 0)
-            merged[uuid]["down"] += int(item.get("down", 0) or 0)
-            merged[uuid]["name"] = item.get("name") or merged[uuid].get("name") or uuid
-        nodes = to_node_rows(merged)
-        return {
-            "scope": scope,
-            "tag": tag,
-            "from": start.strftime("%Y-%m-%d %H:%M:%S %Z"),
-            "to": now.strftime("%Y-%m-%d %H:%M:%S %Z"),
-            "note": "sqlite_rollup" if historical else "sqlite_rollup_empty",
-            "nodes": nodes,
-            "top_nodes": nodes[: max(0, int(k.TOP_N))],
-            "total": total_from_nodes(nodes),
-            "skipped": skipped,
-            "reset_warnings": reset_warnings,
-        }
-
-    baseline = k.get_baseline_nodes(tag)
-    if baseline is None:
-        return {
-            "scope": scope,
-            "tag": tag,
-            "from": start.strftime("%Y-%m-%d %H:%M:%S %Z"),
-            "to": now.strftime("%Y-%m-%d %H:%M:%S %Z"),
-            "note": "baseline_missing",
-            "nodes": [],
-            "top_nodes": [],
-            "total": total_from_nodes([]),
-            "skipped": [],
-            "reset_warnings": [],
-        }
-    current, skipped = k.fetch_nodes_and_totals()
-    deltas, _new_baseline, reset_warnings = k.compute_delta_from_nodes(current, baseline)
-    nodes = to_node_rows(deltas)
+    current_period = k.build_live_period_struct(start, now, tag)
+    nodes = current_period.get("nodes", [])
     return {
         "scope": scope,
         "tag": tag,
         "from": start.strftime("%Y-%m-%d %H:%M:%S %Z"),
         "to": now.strftime("%Y-%m-%d %H:%M:%S %Z"),
-        "note": "baseline_ok",
+        "note": current_period.get("note", "snapshot_window"),
         "nodes": nodes,
         "top_nodes": nodes[: max(0, int(k.TOP_N))],
-        "total": total_from_nodes(nodes),
-        "skipped": skipped,
-        "reset_warnings": reset_warnings,
+        "total": current_period.get("total", total_from_nodes(nodes)),
+        "skipped": current_period.get("skipped", []),
+        "reset_warnings": current_period.get("reset_warnings", []),
+        "sample_count": current_period.get("sample_count", 0),
+        "source": current_period.get("source", "traffic_snapshots"),
     }
 
 
