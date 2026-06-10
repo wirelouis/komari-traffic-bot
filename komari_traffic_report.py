@@ -1713,9 +1713,142 @@ def materialize_latest_traffic_segment(current_ts: int | float | None = None) ->
     }
 
 
-def snapshot_range_usage(from_ts: int | float, to_ts: int | float) -> dict:
+def query_usage(from_ts: int | float, to_ts: int | float, group_by: str = "node") -> dict:
+    """
+    统一流量查询入口：优先使用 traffic_segments，超出覆盖范围时回退到 node_daily_usage rollup。
+
+    group_by:
+      - "node": 返回 nodes map + total（默认）
+      - "day": 返回 daily buckets（未实现，保留扩展）
+      - "hour": 返回 hourly buckets（未实现，保留扩展）
+    """
+    start = int(from_ts)
+    end = int(to_ts)
+    if end <= start:
+        return {
+            "from_ts": start,
+            "to_ts": end,
+            "group_by": group_by,
+            "nodes": {},
+            "skipped": [],
+            "reset_warnings": [],
+            "sample_count": 0,
+            "segment_count": 0,
+            "sample_from_ts": 0,
+            "sample_to_ts": 0,
+            "sample_days": [],
+            "source": "none",
+            "source_parts": [],
+        }
+
     ensure_traffic_segments_backfilled()
-    return _traffic_segment_usage(from_ts, to_ts)
+
+    # 尝试纯 segments 路径
+    segment_usage = _traffic_segment_usage(start, end)
+    sample_from = int(segment_usage.get("sample_from_ts", 0) or 0)
+    sample_to = int(segment_usage.get("sample_to_ts", 0) or 0)
+    segment_coverage_seconds = sample_to - sample_from if sample_to > sample_from else 0
+    requested_seconds = end - start
+
+    # 如果 segments 覆盖充足（>= 90%），直接返回
+    coverage_ratio = segment_coverage_seconds / requested_seconds if requested_seconds > 0 else 0
+    if coverage_ratio >= 0.9:
+        segment_usage["group_by"] = group_by
+        return segment_usage
+
+    # segments 覆盖不足，检查是否可以混合 rollup
+    # 需要：时间戳有效 + 时间戳合理（>= 0，避免1970年之前的测试数据）
+    can_use_rollup = False
+    if start >= 0 and end >= 0:
+        try:
+            from_dt = datetime.fromtimestamp(start, TZ)
+            to_dt = datetime.fromtimestamp(end, TZ)
+            can_use_rollup = True
+        except (OSError, ValueError):
+            pass
+
+    if not can_use_rollup:
+        segment_usage["group_by"] = group_by
+        return segment_usage
+
+    # segments 覆盖不足且日期有效，按天混合 rollup
+    migrate_history_to_traffic_db()
+
+    # 按天分段：segments 覆盖日用 segments，其他日用 rollup
+    from_day = from_dt.date()
+    to_day = to_dt.date()
+
+    total_nodes: dict[str, dict] = {}
+    source_parts: list[str] = []
+    skipped: list[str] = []
+    reset_warnings: list[str] = []
+    sample_count = 0
+    segment_count = 0
+    sample_from_ts = 0
+    sample_to_ts = 0
+    sample_days = set()
+
+    d = from_day
+    while d <= to_day:
+        day_start_ts = int(start_of_day(d).timestamp())
+        day_end_ts = int(start_of_day(d + timedelta(days=1)).timestamp())
+        window_start = max(day_start_ts, start)
+        window_end = min(day_end_ts, end)
+
+        if window_end <= window_start:
+            d += timedelta(days=1)
+            continue
+
+        # 检查该天是否有 segments 覆盖
+        day_usage = _traffic_segment_usage(window_start, window_end)
+        day_sample_from = int(day_usage.get("sample_from_ts", 0) or 0)
+        day_sample_to = int(day_usage.get("sample_to_ts", 0) or 0)
+        day_coverage = day_sample_to - day_sample_from if day_sample_to > day_sample_from else 0
+        day_requested = window_end - window_start
+
+        if day_coverage >= day_requested * 0.5:
+            # 该天用 segments
+            for uuid, item in (day_usage.get("nodes") or {}).items():
+                _add_usage_to_node_map(total_nodes, str(uuid), str(item.get("name") or uuid), int(item.get("up", 0) or 0), int(item.get("down", 0) or 0))
+            source_parts.append("traffic_segments")
+            skipped.extend(day_usage.get("skipped", []))
+            reset_warnings.extend(day_usage.get("reset_warnings", []))
+            sample_count += int(day_usage.get("sample_count", 0) or 0)
+            segment_count += int(day_usage.get("segment_count", 0) or 0)
+            if day_sample_from > 0:
+                sample_from_ts = min([ts for ts in (sample_from_ts, day_sample_from) if ts] or [0])
+            sample_to_ts = max(sample_to_ts, day_sample_to)
+            sample_days.update(str(item) for item in (day_usage.get("sample_days", []) or []))
+        else:
+            # 该天用 rollup
+            rollup = aggregate_daily_usage(d, d)
+            if rollup:
+                for uuid, item in rollup.items():
+                    _add_usage_to_node_map(total_nodes, str(uuid), str(item.get("name") or uuid), int(item.get("up", 0) or 0), int(item.get("down", 0) or 0))
+                source_parts.append("node_daily_usage")
+
+        d += timedelta(days=1)
+
+    return {
+        "from_ts": start,
+        "to_ts": end,
+        "group_by": group_by,
+        "nodes": total_nodes,
+        "skipped": list(dict.fromkeys(skipped)),
+        "reset_warnings": list(dict.fromkeys(reset_warnings)),
+        "sample_count": sample_count,
+        "segment_count": segment_count,
+        "sample_from_ts": sample_from_ts,
+        "sample_to_ts": sample_to_ts,
+        "sample_days": sorted(sample_days),
+        "source": _source_label_from_parts(source_parts),
+        "source_parts": list(dict.fromkeys(source_parts)),
+    }
+
+
+def snapshot_range_usage(from_ts: int | float, to_ts: int | float) -> dict:
+    """兼容旧接口：直接调用 query_usage"""
+    return query_usage(from_ts, to_ts, group_by="node")
 
 
 def upsert_daily_usage(day_str: str, deltas: dict, source: str = "history", source_from: str = "", source_to: str = "", reset_warnings: list[str] | None = None, skipped: list[str] | None = None):

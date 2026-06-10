@@ -939,6 +939,101 @@ class CoreTests(unittest.TestCase):
         m_start, m_end, m_tag = k.scheduled_report_period_parts("monthly")
         self.assertEqual(k.scope_report_period_label("monthly", m_start, m_end, m_tag), "2026-05-01 → 2026-05-31")
 
+    def test_query_usage_falls_back_to_rollup_when_segments_missing(self):
+        # 场景：只有今天的 segments，但请求最近 7 天
+        day7 = date(2026, 6, 7)
+        day8 = date(2026, 6, 8)
+        day9 = date(2026, 6, 9)
+
+        # 历史 rollup 数据（6-7, 6-8）
+        k.upsert_daily_usage("2026-06-07", {
+            "n1": {"name": "Node One", "up": 100, "down": 200},
+        }, source="history_json")
+        k.upsert_daily_usage("2026-06-08", {
+            "n1": {"name": "Node One", "up": 150, "down": 250},
+        }, source="history_json")
+
+        # 今天的 segments（6-9）
+        start_ts = int(k.start_of_day(day9).timestamp())
+        now_ts = start_ts + 12 * 3600
+        k.save_traffic_snapshot(start_ts, {"n1": {"name": "Node One", "up": 1000, "down": 2000}})
+        k.save_traffic_snapshot(now_ts, {"n1": {"name": "Node One", "up": 1050, "down": 2100}})
+
+        with patch.object(k.time, "time", return_value=now_ts):
+            # 请求最近 7 天
+            usage = k.query_usage(start_ts - 2 * 86400, now_ts)
+
+        self.assertIn("node_daily_usage", usage["source_parts"])
+        self.assertIn("traffic_segments", usage["source_parts"])
+        self.assertEqual(usage["nodes"]["n1"]["up"], 100 + 150 + 50)  # rollup + rollup + segment
+        self.assertEqual(usage["nodes"]["n1"]["down"], 200 + 250 + 100)
+
+    def test_query_usage_different_ranges_return_different_results(self):
+        # 场景：segments 只覆盖 1 天，rollup 覆盖更长历史
+        day1 = date(2026, 6, 1)
+        day7 = date(2026, 6, 7)
+
+        for i in range(1, 7):
+            d = date(2026, 6, i)
+            k.upsert_daily_usage(d.strftime("%Y-%m-%d"), {
+                "n1": {"name": "Node One", "up": i * 10, "down": i * 20},
+            }, source="history_json")
+
+        day7_start = int(k.start_of_day(day7).timestamp())
+        now_ts = day7_start + 12 * 3600
+        k.save_traffic_snapshot(day7_start, {"n1": {"name": "Node One", "up": 1000, "down": 2000}})
+        k.save_traffic_snapshot(now_ts, {"n1": {"name": "Node One", "up": 1070, "down": 2140}})
+
+        with patch.object(k.time, "time", return_value=now_ts):
+            usage_24h = k.query_usage(now_ts - 24 * 3600, now_ts)
+            usage_7d = k.query_usage(now_ts - 7 * 86400, now_ts)
+            usage_30d = k.query_usage(now_ts - 30 * 86400, now_ts)
+
+        # 24h：6-6 12:00 → 6-7 12:00，覆盖 6-6 的 rollup(60) + 6-7 的 segment(70)
+        self.assertEqual(usage_24h["nodes"]["n1"]["up"], 60 + 70)
+        self.assertEqual(usage_24h["nodes"]["n1"]["down"], 120 + 140)
+
+        # 7d：6-1 到 6-6 的 rollup（6 天）+ 6-7 的 segment
+        self.assertEqual(usage_7d["nodes"]["n1"]["up"], (10 + 20 + 30 + 40 + 50 + 60) + 70)
+        self.assertEqual(usage_7d["nodes"]["n1"]["down"], (20 + 40 + 60 + 80 + 100 + 120) + 140)
+
+        # 30d：和 7d 相同（只有 6 天历史 + 今天）
+        self.assertEqual(usage_30d["nodes"]["n1"]["up"], usage_7d["nodes"]["n1"]["up"])
+        self.assertEqual(usage_30d["nodes"]["n1"]["down"], usage_7d["nodes"]["n1"]["down"])
+
+        # 关键：24h 和 7d 不同
+        self.assertNotEqual(usage_24h["nodes"]["n1"]["up"] + usage_24h["nodes"]["n1"]["down"],
+                           usage_7d["nodes"]["n1"]["up"] + usage_7d["nodes"]["n1"]["down"])
+
+    def test_query_usage_includes_metadata_fields(self):
+        day = date(2026, 6, 10)
+        now_ts = int(k.start_of_day(day).timestamp()) + 12 * 3600
+        from_ts = now_ts - 24 * 3600
+        k.save_traffic_snapshot(from_ts, {"n1": {"name": "Node One", "up": 100, "down": 200}})
+        k.save_traffic_snapshot(now_ts, {"n1": {"name": "Node One", "up": 150, "down": 300}})
+
+        with patch.object(k.time, "time", return_value=now_ts):
+            usage = k.query_usage(from_ts, now_ts, group_by="node")
+
+        self.assertEqual(usage["from_ts"], from_ts)
+        self.assertEqual(usage["to_ts"], now_ts)
+        self.assertEqual(usage["group_by"], "node")
+        self.assertIn("source", usage)
+        self.assertIn("source_parts", usage)
+        self.assertIsInstance(usage["source_parts"], list)
+
+    def test_counter_reset_does_not_produce_negative_traffic(self):
+        # 已有测试覆盖：test_last_hours_struct_uses_sqlite_snapshots_and_ignores_reset_absolute_value
+        # 验证 reset 标记
+        k.save_traffic_snapshot(1000, {"n1": {"name": "Node One", "up": 100, "down": 200}})
+        k.save_traffic_snapshot(1300, {"n1": {"name": "Node One", "up": 50, "down": 80}})
+
+        usage = k.query_usage(1000, 1300)
+
+        self.assertEqual(usage["nodes"]["n1"]["up"], 0)
+        self.assertEqual(usage["nodes"]["n1"]["down"], 0)
+        self.assertIn("Node One(counter_reset)", usage["reset_warnings"])
+
     def test_report_schedule_validation_and_due_key(self):
         schedule = k.validate_report_schedule({
             "enabled": True,
