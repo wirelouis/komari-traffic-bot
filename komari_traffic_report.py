@@ -3335,19 +3335,6 @@ def save_archive_month(ym: str, data: dict):
             pass
 
 
-def history_append(day_str: str, deltas: dict):
-    hist = load_json(HISTORY_PATH, {"days": {}})
-    hist.setdefault("days", {})
-    hist["days"][day_str] = deltas
-    save_json_atomic(HISTORY_PATH, hist)
-    try:
-        if traffic_segments_exist_for_day(parse_date_yyyy_mm_dd(day_str)):
-            return
-    except Exception:
-        pass
-    upsert_daily_usage(day_str, deltas, source="daily_report")
-
-
 def archive_and_prune_history():
     ensure_dirs()
     hist = load_json(HISTORY_PATH, {"days": {}})
@@ -3990,67 +3977,27 @@ def format_alert_status() -> str:
 
 
 # -------------------- 报表任务 --------------------
+# 报表只读不写：每日汇总（node_daily_usage）由采样器在 take_sample_if_due 中持续物化，
+# 报表任务统一通过 build_scope_report_message 读取上一完整周期并格式化发送。
 
 def run_daily_send_yesterday():
-    """
-    每天 00:00：发送昨日日报，并把连续快照聚合写入长期 daily rollup。
-    """
-    ensure_dirs()
-    today = today_date()
-    yday = today - timedelta(days=1)
-    yday_label = yday.strftime("%Y-%m-%d")
-    start = start_of_day(yday)
-    end = start_of_day(today)
-
-    try:
-        take_sample_if_due(force=True, source="daily-report-boundary")
-    except Exception:
-        logging.exception("failed to capture daily report boundary snapshot")
-
-    usage = snapshot_range_usage(int(start.timestamp()), int(end.timestamp()))
-    deltas = usage.get("nodes", {})
-    skipped = usage.get("skipped", [])
-    reset_warnings = usage.get("reset_warnings", [])
-    if int(usage.get("sample_count", 0) or 0) < 2:
-        telegram_send(
-            f"⚠️ <b>昨日报表采样不足</b>（{telegram_html_escape(yday_label)}）。\n"
-            f"请保持 bot/listen 服务运行，至少产生 2 个采样点后日报会自动恢复。"
-        )
-        return
-
-    telegram_send(format_report("昨日流量日报", yday_label, deltas, reset_warnings, skipped=skipped, include_top=True))
-
-    history_append(yday_label, deltas)
-    archive_and_prune_history()
+    """每天 00:00：发送昨日日报（纯读取）"""
+    telegram_send(build_scope_report_message("daily"))
 
 
 def run_weekly_send_last_week():
-    ensure_dirs()
-    today = today_date()
-    this_week_start = start_of_week(today)
-    last_week_end = this_week_start - timedelta(days=1)
-    last_week_start = last_week_end - timedelta(days=6)
-
-    summed = history_sum(last_week_start, last_week_end)
-    label = f"{last_week_start.strftime('%Y-%m-%d')} → {last_week_end.strftime('%Y-%m-%d')}"
-    telegram_send(format_report("上周流量周报", label, summed, [], skipped=[], include_top=True))
+    """每周一 00:00：发送上周周报（纯读取）"""
+    telegram_send(build_scope_report_message("weekly"))
 
 
 def run_monthly_send_last_month():
+    """每月 1 日 00:00：发送上月月报（纯读取）"""
+    telegram_send(build_scope_report_message("monthly"))
+
+
+def build_period_report_message(from_dt: datetime, to_dt: datetime, tag: str, top_only: bool = False, title: str = "流量统计", period_label: str | None = None) -> str:
     ensure_dirs()
-    today = today_date()
-    this_month_start = start_of_month(today)
-    last_month_end = this_month_start - timedelta(days=1)
-    last_month_start = date(last_month_end.year, last_month_end.month, 1)
-
-    summed = history_sum(last_month_start, last_month_end)
-    label = f"{last_month_start.strftime('%Y-%m-%d')} → {last_month_end.strftime('%Y-%m-%d')}"
-    telegram_send(format_report("上月流量月报", label, summed, [], skipped=[], include_top=True))
-
-
-def build_period_report_message(from_dt: datetime, to_dt: datetime, tag: str, top_only: bool = False) -> str:
-    ensure_dirs()
-    period_label = f"{from_dt.strftime('%Y-%m-%d %H:%M')} → {to_dt.strftime('%Y-%m-%d %H:%M')}"
+    period_label = period_label or f"{from_dt.strftime('%Y-%m-%d %H:%M')} → {to_dt.strftime('%Y-%m-%d %H:%M')}"
     period = build_live_period_struct(from_dt, to_dt, period_label)
     deltas = {str(item.get("uuid") or item.get("name")): item for item in period.get("nodes", [])}
     skipped = period.get("skipped", [])
@@ -4063,7 +4010,7 @@ def build_period_report_message(from_dt: datetime, to_dt: datetime, tag: str, to
 
     if top_only:
         return format_top_only_message(period_label, deltas, reset_warnings, skipped=skipped)
-    return format_report("流量统计", period_label, deltas, reset_warnings, skipped=skipped, include_top=True)
+    return format_report(title, period_label, deltas, reset_warnings, skipped=skipped, include_top=True)
 
 
 def run_period_report(from_dt: datetime, to_dt: datetime, tag: str, top_only: bool = False):
@@ -4072,7 +4019,7 @@ def run_period_report(from_dt: datetime, to_dt: datetime, tag: str, top_only: bo
 
 def scheduled_report_period_parts(scope: str):
     """
-    自定义定时报表统计“上一完整周期”（不含当前未走完的周期）：
+    定时报表统计“上一完整周期”（不含当前未走完的周期）：
     - daily:   昨天 00:00 → 今天 00:00
     - weekly:  上周一 00:00 → 本周一 00:00
     - monthly: 上月 1 日 00:00 → 本月 1 日 00:00
@@ -4092,14 +4039,39 @@ def scheduled_report_period_parts(scope: str):
     raise RuntimeError("scope must be daily, weekly, or monthly")
 
 
+SCOPE_REPORT_TITLES = {"daily": "昨日流量日报", "weekly": "上周流量周报", "monthly": "上月流量月报"}
+
+
+def scope_report_period_label(scope: str, start: datetime, end: datetime, tag: str) -> str:
+    if scope == "daily":
+        return tag
+    last_day = (end - timedelta(days=1)).strftime("%Y-%m-%d")
+    return f"{start.strftime('%Y-%m-%d')} → {last_day}"
+
+
+def build_scope_report_message(scope: str, top_only: bool = False) -> str:
+    """
+    内置日/周/月报与自定义计划共用的唯一报表出口：
+    读取上一完整周期（出报表前强制补一次边界采样），格式化为对应标题的消息。
+    """
+    start, end, tag = scheduled_report_period_parts(scope)
+    try:
+        take_sample_if_due(force=True, source=f"{scope}-report-boundary")
+    except Exception:
+        logging.exception("failed to capture %s report boundary snapshot", scope)
+    return build_period_report_message(
+        start,
+        end,
+        tag,
+        top_only=top_only,
+        title=SCOPE_REPORT_TITLES[scope],
+        period_label=scope_report_period_label(scope, start, end, tag),
+    )
+
+
 def _run_report_schedule_impl(item: dict) -> dict:
     schedule = normalize_report_schedule(item)
-    start, end, tag = scheduled_report_period_parts(schedule["scope"])
-    try:
-        take_sample_if_due(force=True, source="schedule-report-boundary")
-    except Exception:
-        logging.exception("failed to capture schedule report boundary snapshot")
-    message = build_period_report_message(start, end, tag, top_only=(schedule["mode"] == "top"))
+    message = build_scope_report_message(schedule["scope"], top_only=(schedule["mode"] == "top"))
     chat = schedule.get("chat") or TELEGRAM_CHAT_ID
     telegram_send_to_chat(message, chat)
     return {"sent": True, "chat": chat, "schedule": schedule, "label": schedule_label(schedule)}

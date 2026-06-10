@@ -926,7 +926,7 @@ class WebAppTests(unittest.TestCase):
 
     def test_schedule_run_now_writes_task_run_when_core_runs(self):
         self.login()
-        self.patch_attr(k, "build_period_report_message", lambda _start, _now, tag, top_only=False: f"message:{tag}:{top_only}")
+        self.patch_attr(k, "build_period_report_message", lambda _start, _now, tag, top_only=False, **_kwargs: f"message:{tag}:{top_only}")
         send_mock = Mock(return_value={"ok": True})
         self.patch_attr(k, "telegram_send_to_chat", send_mock)
         create_response = self.client.post("/api/schedules", json={

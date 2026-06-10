@@ -914,6 +914,31 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(m_end, datetime(2026, 1, 1, 0, 0, tzinfo=k.TZ))
         self.assertEqual(m_tag, "MONTH-2025-12-01")
 
+    def test_builtin_reports_delegate_to_scope_report_message(self):
+        calls = []
+        self.patch_attr("build_scope_report_message", lambda scope, top_only=False: calls.append((scope, top_only)) or f"msg:{scope}")
+        sent = []
+        self.patch_attr("telegram_send", sent.append)
+
+        k.run_daily_send_yesterday()
+        k.run_weekly_send_last_week()
+        k.run_monthly_send_last_month()
+
+        self.assertEqual(calls, [("daily", False), ("weekly", False), ("monthly", False)])
+        self.assertEqual(sent, ["msg:daily", "msg:weekly", "msg:monthly"])
+
+    def test_scope_report_period_label_formats(self):
+        self.patch_attr("today_date", lambda: date(2026, 6, 10))
+
+        d_start, d_end, d_tag = k.scheduled_report_period_parts("daily")
+        self.assertEqual(k.scope_report_period_label("daily", d_start, d_end, d_tag), "2026-06-09")
+
+        w_start, w_end, w_tag = k.scheduled_report_period_parts("weekly")
+        self.assertEqual(k.scope_report_period_label("weekly", w_start, w_end, w_tag), "2026-06-01 → 2026-06-07")
+
+        m_start, m_end, m_tag = k.scheduled_report_period_parts("monthly")
+        self.assertEqual(k.scope_report_period_label("monthly", m_start, m_end, m_tag), "2026-05-01 → 2026-05-31")
+
     def test_report_schedule_validation_and_due_key(self):
         schedule = k.validate_report_schedule({
             "enabled": True,

@@ -274,7 +274,7 @@ report_schedules (app-managed Web-console delivery schedules)
 
 Upgrades and restarts will not lose data.
 
-Current periods, recent Nh windows, hourly distributions, and alert windows are computed from adjacent deltas in `traffic.db` continuous snapshots. If a node counter rolls back or resets, that negative segment is treated as 0 instead of counting the current absolute value as window traffic. `TRAFFIC_SNAPSHOT_RETENTION_DAYS` controls raw snapshot retention and defaults to `45`; daily reports write durable rollups, so long-term week/month/range analytics do not require keeping every raw snapshot forever.
+Current periods, recent Nh windows, hourly distributions, and alert windows are computed from adjacent deltas in `traffic.db` continuous snapshots. If a node counter rolls back or resets, that negative segment is treated as 0 instead of counting the current absolute value as window traffic. `TRAFFIC_SNAPSHOT_RETENTION_DAYS` controls raw snapshot retention and defaults to `45`; the sampler continuously materializes durable daily rollups on every sample (independent of report delivery), so long-term week/month/range analytics do not require keeping every raw snapshot forever.
 
 `TASK_RUN_RETENTION_DAYS` controls the suggested retention window for Web-console task run history. The default is `90` days; set it to `0` to disable pruning. The System page maintenance actions only prune old `task_runs` rows or run SQLite vacuum; they do not delete daily, weekly, or monthly traffic rollups.
 
