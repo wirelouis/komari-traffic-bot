@@ -873,6 +873,47 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(week["snapshot_days"], 2)
         self.assertEqual(week["missing_days"], [])
 
+    def test_scheduled_report_period_parts_uses_previous_complete_period(self):
+        # 2026-06-10 是周三；上一完整日/周/月分别为 06-09、06-01 起的一周、5 月
+        self.patch_attr("today_date", lambda: date(2026, 6, 10))
+
+        d_start, d_end, d_tag = k.scheduled_report_period_parts("daily")
+        self.assertEqual(d_start, datetime(2026, 6, 9, 0, 0, tzinfo=k.TZ))
+        self.assertEqual(d_end, datetime(2026, 6, 10, 0, 0, tzinfo=k.TZ))
+        self.assertEqual(d_tag, "2026-06-09")
+
+        w_start, w_end, w_tag = k.scheduled_report_period_parts("weekly")
+        self.assertEqual(w_start, datetime(2026, 6, 1, 0, 0, tzinfo=k.TZ))
+        self.assertEqual(w_end, datetime(2026, 6, 8, 0, 0, tzinfo=k.TZ))
+        self.assertEqual(w_tag, "WEEK-2026-06-01")
+
+        m_start, m_end, m_tag = k.scheduled_report_period_parts("monthly")
+        self.assertEqual(m_start, datetime(2026, 5, 1, 0, 0, tzinfo=k.TZ))
+        self.assertEqual(m_end, datetime(2026, 6, 1, 0, 0, tzinfo=k.TZ))
+        self.assertEqual(m_tag, "MONTH-2026-05-01")
+
+        with self.assertRaises(RuntimeError):
+            k.scheduled_report_period_parts("hourly")
+
+    def test_scheduled_report_period_parts_crosses_year_and_month_boundaries(self):
+        # 2026-01-01 是周四；上一日/周/月均落在 2025 年
+        self.patch_attr("today_date", lambda: date(2026, 1, 1))
+
+        d_start, d_end, d_tag = k.scheduled_report_period_parts("daily")
+        self.assertEqual(d_start, datetime(2025, 12, 31, 0, 0, tzinfo=k.TZ))
+        self.assertEqual(d_end, datetime(2026, 1, 1, 0, 0, tzinfo=k.TZ))
+        self.assertEqual(d_tag, "2025-12-31")
+
+        w_start, w_end, w_tag = k.scheduled_report_period_parts("weekly")
+        self.assertEqual(w_start, datetime(2025, 12, 22, 0, 0, tzinfo=k.TZ))
+        self.assertEqual(w_end, datetime(2025, 12, 29, 0, 0, tzinfo=k.TZ))
+        self.assertEqual(w_tag, "WEEK-2025-12-22")
+
+        m_start, m_end, m_tag = k.scheduled_report_period_parts("monthly")
+        self.assertEqual(m_start, datetime(2025, 12, 1, 0, 0, tzinfo=k.TZ))
+        self.assertEqual(m_end, datetime(2026, 1, 1, 0, 0, tzinfo=k.TZ))
+        self.assertEqual(m_tag, "MONTH-2025-12-01")
+
     def test_report_schedule_validation_and_due_key(self):
         schedule = k.validate_report_schedule({
             "enabled": True,

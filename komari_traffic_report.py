@@ -4071,23 +4071,35 @@ def run_period_report(from_dt: datetime, to_dt: datetime, tag: str, top_only: bo
 
 
 def scheduled_report_period_parts(scope: str):
+    """
+    自定义定时报表统计“上一完整周期”（不含当前未走完的周期）：
+    - daily:   昨天 00:00 → 今天 00:00
+    - weekly:  上周一 00:00 → 本周一 00:00
+    - monthly: 上月 1 日 00:00 → 本月 1 日 00:00
+    """
     td = today_date()
-    now = now_dt()
     if scope == "daily":
-        return start_of_day(td), now, td.strftime("%Y-%m-%d")
+        prev_day = td - timedelta(days=1)
+        return start_of_day(prev_day), start_of_day(td), prev_day.strftime("%Y-%m-%d")
     if scope == "weekly":
-        ws = start_of_week(td)
-        return start_of_day(ws), now, f"WEEK-{ws.strftime('%Y-%m-%d')}"
+        this_week_start = start_of_week(td)
+        prev_week_start = this_week_start - timedelta(days=7)
+        return start_of_day(prev_week_start), start_of_day(this_week_start), f"WEEK-{prev_week_start.strftime('%Y-%m-%d')}"
     if scope == "monthly":
-        ms = start_of_month(td)
-        return start_of_day(ms), now, f"MONTH-{ms.strftime('%Y-%m-%d')}"
+        this_month_start = start_of_month(td)
+        prev_month_start = start_of_month(this_month_start - timedelta(days=1))
+        return start_of_day(prev_month_start), start_of_day(this_month_start), f"MONTH-{prev_month_start.strftime('%Y-%m-%d')}"
     raise RuntimeError("scope must be daily, weekly, or monthly")
 
 
 def _run_report_schedule_impl(item: dict) -> dict:
     schedule = normalize_report_schedule(item)
-    start, now, tag = scheduled_report_period_parts(schedule["scope"])
-    message = build_period_report_message(start, now, tag, top_only=(schedule["mode"] == "top"))
+    start, end, tag = scheduled_report_period_parts(schedule["scope"])
+    try:
+        take_sample_if_due(force=True, source="schedule-report-boundary")
+    except Exception:
+        logging.exception("failed to capture schedule report boundary snapshot")
+    message = build_period_report_message(start, end, tag, top_only=(schedule["mode"] == "top"))
     chat = schedule.get("chat") or TELEGRAM_CHAT_ID
     telegram_send_to_chat(message, chat)
     return {"sent": True, "chat": chat, "schedule": schedule, "label": schedule_label(schedule)}
