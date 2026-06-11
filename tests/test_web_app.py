@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 os.environ.setdefault("WEB_USERNAME", "admin")
 os.environ.setdefault("WEB_PASSWORD", "test-password")
 os.environ.setdefault("WEB_SESSION_SECRET", "test-session-secret")
+os.environ.setdefault("WEB_TRUST_PROXY", "1")
 os.environ.setdefault("STAT_TZ", "UTC")
 
 from fastapi.testclient import TestClient  # noqa: E402

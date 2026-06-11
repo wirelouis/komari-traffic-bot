@@ -4826,7 +4826,8 @@ def listen_commands():
         except Exception as e:
             if should_alert("listen", 300):
                 alert_exception("listen_loop", "listen", e)
-            logging.exception("listen loop error")
+            redacted_msg = redact_sensitive_data(str(e))
+            logging.error("listen loop error: %s", redacted_msg)
             time.sleep(3)
 
 # -------------------- main --------------------

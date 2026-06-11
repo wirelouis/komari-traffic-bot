@@ -36,6 +36,7 @@ LOGIN_RATE_LIMIT_MAX_KEYS = 1000
 UNSAFE_HTTP_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 OVERVIEW_NODE_LIMIT = 8
 ANALYTICS_NODE_LIMIT = 10
+WEB_TRUST_PROXY = bool(int(os.environ.get("WEB_TRUST_PROXY", "0")))
 WEB_SESSION_SECRET = os.environ.get("WEB_SESSION_SECRET", "").strip() or secrets.token_urlsafe(32)
 WEB_SESSION_SECRET_TEMPORARY = not bool(os.environ.get("WEB_SESSION_SECRET", "").strip())
 LOGIN_FAILURES: dict[str, dict[str, float | int]] = {}
@@ -171,6 +172,10 @@ def add_security_headers(response: Response) -> Response:
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+    )
     return response
 
 
@@ -179,8 +184,12 @@ def forwarded_header_value(request: Request, name: str) -> str:
 
 
 def request_public_origin(request: Request) -> str:
-    scheme = forwarded_header_value(request, "x-forwarded-proto").lower() or request.url.scheme
-    host = forwarded_header_value(request, "x-forwarded-host") or request.headers.get("host", "") or request.url.netloc
+    if WEB_TRUST_PROXY:
+        scheme = forwarded_header_value(request, "x-forwarded-proto").lower() or request.url.scheme
+        host = forwarded_header_value(request, "x-forwarded-host") or request.headers.get("host", "") or request.url.netloc
+    else:
+        scheme = request.url.scheme
+        host = request.headers.get("host", "") or request.url.netloc
     return f"{scheme}://{host}".lower()
 
 
@@ -219,14 +228,18 @@ def web_password_configured() -> bool:
 
 
 def request_is_https(request: Request) -> bool:
-    forwarded_proto = forwarded_header_value(request, "x-forwarded-proto").lower()
-    return request.url.scheme == "https" or forwarded_proto == "https"
+    if WEB_TRUST_PROXY:
+        forwarded_proto = forwarded_header_value(request, "x-forwarded-proto").lower()
+        return request.url.scheme == "https" or forwarded_proto == "https"
+    return request.url.scheme == "https"
 
 
 def login_rate_key(request: Request) -> str:
-    forwarded_for = forwarded_header_value(request, "x-forwarded-for")
     host = request.client.host if request.client else ""
-    return forwarded_for or host or "unknown"
+    if WEB_TRUST_PROXY:
+        forwarded_for = forwarded_header_value(request, "x-forwarded-for")
+        return forwarded_for or host or "unknown"
+    return host or "unknown"
 
 
 def prune_login_failures(now_ts: float | None = None):
@@ -280,7 +293,9 @@ def clear_login_failures(key: str):
 
 
 def _sign_session(body: str) -> str:
-    return hmac.new(WEB_SESSION_SECRET.encode("utf-8"), body.encode("utf-8"), hashlib.sha256).hexdigest()
+    password_hash = hashlib.sha256(web_password().encode("utf-8")).hexdigest()
+    key = f"{WEB_SESSION_SECRET}|{password_hash}".encode("utf-8")
+    return hmac.new(key, body.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def create_session_token(username: str, max_age_seconds: int = SESSION_BROWSER_SECONDS) -> str:
@@ -1147,7 +1162,7 @@ async def login(req: LoginRequest, request: Request):
         return api_error("登录失败次数过多，请稍后再试。", status_code=429, code="login_rate_limited")
     if not web_password_configured():
         return api_error("WEB_PASSWORD is not configured", status_code=503, code="web_password_missing")
-    if req.username != web_username() or not hmac.compare_digest(req.password, web_password()):
+    if not secrets.compare_digest(req.username, web_username()) or not secrets.compare_digest(req.password, web_password()):
         record_login_failure(rate_key)
         return api_error("invalid username or password", status_code=401, code="invalid_login")
     clear_login_failures(rate_key)
