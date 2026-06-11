@@ -1141,6 +1141,11 @@ def safe_records_summary(hours: int, enrich: bool = True) -> dict:
     return enrich_records_summary(summary) if enrich else summary
 
 
+@app.get("/api/health")
+def health():
+    return {"status": "ok"}
+
+
 @app.get("/")
 @app.get("/nodes")
 @app.get("/alerts")

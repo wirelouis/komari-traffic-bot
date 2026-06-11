@@ -26,4 +26,9 @@ services:
     ports:
       - "${WEB_PORT:-8080}:8080"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     command: ["uvicorn", "web_app:app", "--host", "0.0.0.0", "--port", "8080"]
