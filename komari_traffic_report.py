@@ -987,7 +987,18 @@ def traffic_db_healthcheck() -> dict:
         quick = conn.execute("PRAGMA quick_check").fetchone()
         quick_result = str(quick[0] if quick else "")
         if quick_result.lower() != "ok":
-            raise RuntimeError(f"SQLite quick_check failed: {quick_result}")
+            logging.error("SQLite quick_check failed: %s, attempting integrity_check", quick_result)
+            try:
+                integrity = conn.execute("PRAGMA integrity_check").fetchall()
+                integrity_lines = [str(row[0]) for row in integrity]
+                if len(integrity_lines) == 1 and integrity_lines[0].lower() == "ok":
+                    logging.warning("integrity_check passed despite quick_check failure")
+                else:
+                    logging.error("integrity_check issues: %s", "; ".join(integrity_lines[:5]))
+                    raise RuntimeError(f"SQLite corrupted: {'; '.join(integrity_lines[:3])}")
+            except Exception as e:
+                logging.exception("integrity_check failed")
+                raise RuntimeError(f"SQLite quick_check failed: {quick_result}")
     counts = traffic_db_table_counts()
     size = os.path.getsize(TRAFFIC_DB_PATH) if os.path.exists(TRAFFIC_DB_PATH) else 0
     return {
@@ -2392,9 +2403,16 @@ def schedule_next_run_at(item: dict, now: datetime | None = None, horizon_days: 
 
 
 def get_json(url: str):
-    r = HTTP_SESSION.get(url, timeout=TIMEOUT, headers=build_komari_headers())
-    r.raise_for_status()
-    return r.json()
+    try:
+        r = HTTP_SESSION.get(url, timeout=TIMEOUT, headers=build_komari_headers())
+        r.raise_for_status()
+        return r.json()
+    except requests.exceptions.Timeout:
+        logging.warning("get_json timeout: %s", url)
+        raise
+    except requests.exceptions.RequestException as e:
+        logging.warning("get_json failed: %s - %s", url, e)
+        raise
 
 
 def post_json(url: str, payload: dict, retries: int = 3):
@@ -2475,10 +2493,11 @@ def ai_chat(messages: list[dict]) -> str:
         "messages": messages,
         "temperature": 0.3,
         "max_tokens": 1000,
+        "stream": False,
     }
 
     try:
-        r = requests.post(url, headers=headers, json=payload, timeout=60)
+        r = requests.post(url, headers=headers, json=payload, timeout=90)
         r.raise_for_status()
         data = r.json()
         choices = data.get("choices") or []
@@ -2486,6 +2505,9 @@ def ai_chat(messages: list[dict]) -> str:
             return "⚠️ AI 没有返回内容，请稍后重试。"
         content = (choices[0].get("message") or {}).get("content") or ""
         return content.strip() or "⚠️ AI 返回了空结果，请稍后重试。"
+    except requests.exceptions.Timeout:
+        logging.warning("ai_chat timeout after 90s")
+        return "⚠️ AI 响应超时，请稍后重试。"
     except Exception as e:
         logging.exception("ai_chat error")
         return f"⚠️ 调用 AI 失败：{type(e).__name__}: {redact_sensitive_text(e)}"
@@ -4400,6 +4422,16 @@ def scheduler_worker_loop():
             data = load_report_schedules()
             changed = False
             now = now_dt()
+
+            # Clean stale last_runs entries
+            active_ids = {item["id"] for item in data.get("schedules", [])}
+            stale_keys = [k for k in data["last_runs"].keys() if k not in active_ids]
+            if stale_keys:
+                for k in stale_keys:
+                    del data["last_runs"][k]
+                changed = True
+                logging.info("cleaned %d stale last_runs entries", len(stale_keys))
+
             for item in data.get("schedules", []):
                 if not item.get("enabled"):
                     continue
