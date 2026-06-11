@@ -939,14 +939,14 @@ function bindNodeJumpButtons() {
 }
 
 async function loadOverview() {
-  const overview = await api("/api/overview");
-  renderOverview(overview);
-  try {
-    const system = await api("/api/system/status");
-    renderOverviewHealth(system);
-  } catch (_error) {
-    renderOverviewHealth(null);
+  const [overviewResult, systemResult] = await Promise.allSettled([
+    api("/api/overview"),
+    api("/api/system/status")
+  ]);
+  if (overviewResult.status === "fulfilled") {
+    renderOverview(overviewResult.value);
   }
+  renderOverviewHealth(systemResult.status === "fulfilled" ? systemResult.value : null);
 }
 
 function renderNodesTable() {
@@ -1410,8 +1410,12 @@ async function loadTelegramStatus() {
   setSkel("telegram-summary", skelCards(4));
   setSkel("telegram-schedules", skelRows(2));
   try {
-    const status = await api("/api/telegram/status");
-    const schedules = await api("/api/schedules");
+    const [statusResult, schedulesResult] = await Promise.allSettled([
+      api("/api/telegram/status"),
+      api("/api/schedules")
+    ]);
+    const status = statusResult.status === "fulfilled" ? statusResult.value : {};
+    const schedules = schedulesResult.status === "fulfilled" ? schedulesResult.value : {};
     renderTelegramStatus({
       ...status,
       schedules: schedules.schedules || [],

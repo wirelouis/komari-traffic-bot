@@ -215,6 +215,9 @@ SAMPLE_STOP_EVENT = threading.Event()
 SCHEDULER_THREAD: threading.Thread | None = None
 SCHEDULER_STOP_EVENT = threading.Event()
 
+_TRAFFIC_DB_INITIALIZED = False
+_SAMPLES_MIGRATED = False
+
 
 def ai_enabled() -> bool:
     return bool(AI_API_BASE and AI_API_KEY and AI_MODEL)
@@ -884,15 +887,23 @@ def safe_record_task_run(*args, **kwargs) -> dict | None:
         return None
 
 
-def list_task_runs(limit: int = 50, task_type: str | None = None) -> list[dict]:
+def list_task_runs(limit: int = 50, task_type: str | None = None, source_prefix: str | None = None, metadata_key: str | None = None, metadata_value=None) -> list[dict]:
     init_traffic_db()
     limit = min(200, max(1, int(limit or 50)))
     task_type = str(task_type or "").strip().lower()
     params: list = []
-    where = ""
+    where_clauses = []
     if task_type:
-        where = "WHERE type = ?"
+        where_clauses.append("type = ?")
         params.append(task_type)
+    if source_prefix:
+        where_clauses.append("source LIKE ? || '%'")
+        params.append(source_prefix)
+    if metadata_key:
+        where_clauses.append("json_extract(metadata, ?) = ?")
+        params.append(f"$.{metadata_key}")
+        params.append(str(metadata_value))
+    where = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
     params.append(limit)
     with traffic_db_session() as conn:
         rows = conn.execute(
@@ -1061,15 +1072,8 @@ def vacuum_traffic_db() -> dict:
 
 
 def latest_task_run(task_type: str | None = None, source_prefix: str | None = None, metadata_key: str | None = None, metadata_value=None) -> dict | None:
-    runs = list_task_runs(limit=200, task_type=task_type)
-    for run in runs:
-        if source_prefix and not str(run.get("source", "")).startswith(source_prefix):
-            continue
-        if metadata_key:
-            if str((run.get("metadata") or {}).get(metadata_key, "")) != str(metadata_value):
-                continue
-        return run
-    return None
+    runs = list_task_runs(limit=1, task_type=task_type, source_prefix=source_prefix, metadata_key=metadata_key, metadata_value=metadata_value)
+    return runs[0] if runs else None
 
 
 def run_with_task_record(task_type: str, source: str, func, summary_func=None, metadata: dict | None = None):
@@ -1494,6 +1498,9 @@ def snapshot_delta_segments(from_ts: int | float, to_ts: int | float) -> tuple[l
 
 
 def migrate_samples_to_traffic_db() -> int:
+    global _SAMPLES_MIGRATED
+    if _SAMPLES_MIGRATED:
+        return 0
     data = load_samples()
     samples = data.get("samples", []) if isinstance(data, dict) else []
     migrated = 0
@@ -1508,6 +1515,7 @@ def migrate_samples_to_traffic_db() -> int:
             migrated += 1
         except Exception:
             logging.exception("failed to migrate sample to traffic_snapshots")
+    _SAMPLES_MIGRATED = True
     return migrated
 
 
@@ -3353,7 +3361,7 @@ def build_last_24h_hourly_summary() -> dict:
     用于回答“小时级峰谷”问题。
     """
     ensure_dirs()
-    take_sample_if_due(force=True)
+    take_sample_if_due(force=False)
 
     now_ts = int(time.time())
     from_ts = now_ts - 24 * 3600
@@ -3361,6 +3369,8 @@ def build_last_24h_hourly_summary() -> dict:
     if result.get("error") == "insufficient_samples":
         result["message"] = "采样点不足，无法计算最近 24 小时小时级分布。"
     return result
+
+
 def build_yesterday_hourly_by_node_summary() -> dict:
     """
     基于 traffic_snapshots 统计“昨天 00:00~24:00”各节点小时级走势。

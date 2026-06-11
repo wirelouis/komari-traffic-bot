@@ -1205,7 +1205,7 @@ async def session(request: Request):
 
 
 @app.get("/api/overview")
-async def overview(_user: str = Depends(current_user)):
+def overview(_user: str = Depends(current_user)):
     today = compact_result_nodes(safe_call(build_period_summary, "today"), OVERVIEW_NODE_LIMIT)
     week = compact_result_nodes(safe_call(build_period_summary, "week"), OVERVIEW_NODE_LIMIT)
     month = compact_result_nodes(safe_call(build_period_summary, "month"), OVERVIEW_NODE_LIMIT)
@@ -1297,7 +1297,7 @@ async def save_node_binding(req: NodeBindingRequest, _user: str = Depends(curren
 
 
 @app.get("/api/nodes/{uuid}")
-async def node_detail(uuid: str, hours: int = 24, _user: str = Depends(current_user)):
+def node_detail(uuid: str, hours: int = 24, _user: str = Depends(current_user)):
     summary = safe_call(safe_records_summary, hours)
     if not summary["ok"]:
         return api_error(summary["error"]["message"], status_code=502, code=summary["error"]["code"], data=summary)
@@ -1313,7 +1313,7 @@ async def node_detail(uuid: str, hours: int = 24, _user: str = Depends(current_u
 
 
 @app.get("/api/traffic/range")
-async def traffic_range(
+def traffic_range(
     from_day: str = Query(..., alias="from"),
     to_day: str = Query(..., alias="to"),
     group: str = "daily",
@@ -1332,7 +1332,7 @@ async def traffic_range(
 
 
 @app.get("/api/traffic/range/export.csv")
-async def traffic_range_export_csv(
+def traffic_range_export_csv(
     from_day: str = Query(..., alias="from"),
     to_day: str = Query(..., alias="to"),
     group: str = "daily",
@@ -1468,7 +1468,7 @@ async def alerts(_user: str = Depends(current_user)):
 
 
 @app.post("/api/alerts/check")
-async def alerts_check(req: AlertCheckRequest, _user: str = Depends(current_user)):
+def alerts_check(req: AlertCheckRequest, _user: str = Depends(current_user)):
     result = k.run_alert_check(dry_run=not req.notify, notify=req.notify, force_sample=True, source="web:alerts-check")
     result["summary"] = summarize_alert_check_result(result, notify=req.notify)
     return api_ok(result)
@@ -1649,7 +1649,7 @@ async def ai_refresh(_user: str = Depends(current_user)):
 
 
 @app.post("/api/ai/ask")
-async def ai_ask(req: AiAskRequest, _user: str = Depends(current_user)):
+def ai_ask(req: AiAskRequest, _user: str = Depends(current_user)):
     question = req.question.strip()
     if not question:
         return api_error("question is required", status_code=400, code="empty_question")
