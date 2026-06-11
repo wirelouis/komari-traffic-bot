@@ -27,6 +27,30 @@ import sqlite3
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
+
+
+@contextmanager
+def file_lock(path: str):
+    """Cross-process file lock for JSON state files"""
+    lock_path = f"{path}.lock"
+    lock_file = open(lock_path, "a")
+    try:
+        if sys.platform == "win32":
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        if sys.platform == "win32":
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        lock_file.close()
+
 
 def parse_bool_value(value, default: bool = False) -> bool:
     if value is None:
@@ -365,7 +389,17 @@ def load_json(path: str, default):
             return json.load(f)
     except FileNotFoundError:
         return default
-    except Exception:
+    except Exception as e:
+        logging.warning(f"Failed to load JSON from {path}: {e}")
+        # Backup corrupted files for alerts_state and schedules
+        if "alerts_state" in path or "schedules" in path:
+            try:
+                backup_path = f"{path}.corrupt-{int(time.time())}"
+                if os.path.exists(path):
+                    os.rename(path, backup_path)
+                    logging.warning(f"Backed up corrupted file to {backup_path}")
+            except Exception:
+                pass
         return default
 
 
@@ -385,18 +419,14 @@ def unique_temp_path(path: str) -> str:
 
 def save_json_atomic(path: str, data):
     path = str(path)
-    tmp = unique_temp_path(path)
+    parent_dir = os.path.dirname(path) or "."
+    tmp = os.path.join(parent_dir, f".tmp.{os.path.basename(path)}.{os.getpid()}.{int(time.time()*1000)}")
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        try:
-            os.replace(tmp, path)
-        except OSError as e:
-            if e.errno != errno.EXDEV:
-                raise
-            with open(path, "w", encoding="utf-8") as dst, open(tmp, "r", encoding="utf-8") as src:
-                dst.write(src.read())
-            os.unlink(tmp)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
     finally:
         try:
             if os.path.exists(tmp):
@@ -407,18 +437,14 @@ def save_json_atomic(path: str, data):
 
 def save_text_atomic(path: str, text: str):
     path = str(path)
-    tmp = unique_temp_path(path)
+    parent_dir = os.path.dirname(path) or "."
+    tmp = os.path.join(parent_dir, f".tmp.{os.path.basename(path)}.{os.getpid()}.{int(time.time()*1000)}")
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(str(text))
-        try:
-            os.replace(tmp, path)
-        except OSError as e:
-            if e.errno != errno.EXDEV:
-                raise
-            with open(path, "w", encoding="utf-8") as dst, open(tmp, "r", encoding="utf-8") as src:
-                dst.write(src.read())
-            os.unlink(tmp)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
     finally:
         try:
             if os.path.exists(tmp):
@@ -624,14 +650,16 @@ try:
     stored_runtime = load_json(runtime_config_path(), {})
     if isinstance(stored_runtime, dict) and isinstance(stored_runtime.get("config"), dict):
         apply_runtime_config(stored_runtime.get("config", {}))
-except Exception:
-    pass
+except Exception as e:
+    logging.warning(f"Failed to load/apply runtime config at startup: {e}")
 
 
 def traffic_db_connect():
     ensure_dirs()
-    conn = sqlite3.connect(TRAFFIC_DB_PATH)
+    conn = sqlite3.connect(TRAFFIC_DB_PATH, timeout=5.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -648,7 +676,15 @@ def traffic_db_session():
         conn.close()
 
 
+_db_initialized = False
+
 def init_traffic_db():
+    global _db_initialized
+    # Reset flag if database doesn't exist (for tests)
+    if not os.path.exists(TRAFFIC_DB_PATH):
+        _db_initialized = False
+    if _db_initialized:
+        return
     with traffic_db_session() as conn:
         conn.execute(
             """
@@ -747,6 +783,7 @@ def init_traffic_db():
         conn.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(2, ?)", (now_dt().isoformat(),))
         conn.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(3, ?)", (now_dt().isoformat(),))
         conn.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(4, ?)", (now_dt().isoformat(),))
+    _db_initialized = True
 
 
 def _json_dumps_compact(data) -> str:
@@ -2288,28 +2325,30 @@ def validate_report_schedule(item: dict) -> dict:
 
 
 def load_report_schedules() -> dict:
-    data = load_json(REPORT_SCHEDULES_PATH, default_report_schedules())
-    schedules = data.get("schedules", []) if isinstance(data, dict) else []
-    last_runs = data.get("last_runs", {}) if isinstance(data, dict) else {}
-    if not isinstance(schedules, list):
-        schedules = []
-    if not isinstance(last_runs, dict):
-        last_runs = {}
-    return {
-        "version": 1,
-        "schedules": [normalize_report_schedule(item) for item in schedules if isinstance(item, dict)],
-        "last_runs": last_runs,
-    }
+    with file_lock(REPORT_SCHEDULES_PATH):
+        data = load_json(REPORT_SCHEDULES_PATH, default_report_schedules())
+        schedules = data.get("schedules", []) if isinstance(data, dict) else []
+        last_runs = data.get("last_runs", {}) if isinstance(data, dict) else {}
+        if not isinstance(schedules, list):
+            schedules = []
+        if not isinstance(last_runs, dict):
+            last_runs = {}
+        return {
+            "version": 1,
+            "schedules": [normalize_report_schedule(item) for item in schedules if isinstance(item, dict)],
+            "last_runs": last_runs,
+        }
 
 
 def save_report_schedules(data: dict):
     ensure_dirs()
-    payload = {
-        "version": 1,
-        "schedules": [normalize_report_schedule(item) for item in data.get("schedules", []) if isinstance(item, dict)],
-        "last_runs": data.get("last_runs", {}) if isinstance(data.get("last_runs", {}), dict) else {},
-    }
-    save_json_atomic(REPORT_SCHEDULES_PATH, payload)
+    with file_lock(REPORT_SCHEDULES_PATH):
+        payload = {
+            "version": 1,
+            "schedules": [normalize_report_schedule(item) for item in data.get("schedules", []) if isinstance(item, dict)],
+            "last_runs": data.get("last_runs", {}) if isinstance(data.get("last_runs", {}), dict) else {},
+        }
+        save_json_atomic(REPORT_SCHEDULES_PATH, payload)
 
 
 def schedule_label(item: dict) -> str:
@@ -2358,8 +2397,19 @@ def get_json(url: str):
     return r.json()
 
 
-def post_json(url: str, payload: dict):
-    r = requests.post(url, json=payload, timeout=TIMEOUT)
+def post_json(url: str, payload: dict, retries: int = 3):
+    retry_strategy = Retry(
+        total=retries,
+        backoff_factor=1,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["POST"],
+        respect_retry_after_header=True,
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session = requests.Session()
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    r = session.post(url, json=payload, timeout=TIMEOUT)
     r.raise_for_status()
     return r.json()
 
@@ -3792,18 +3842,20 @@ def is_in_silence_window(now: datetime | None = None, windows_text: str | None =
 
 
 def load_alerts_state() -> dict:
-    data = load_json(ALERTS_STATE_PATH, {})
-    if not isinstance(data, dict):
-        data = {}
-    data.setdefault("version", 1)
-    data.setdefault("active", {})
-    data.setdefault("node_skips", {})
-    data.setdefault("muted_until", 0)
-    return data
+    with file_lock(ALERTS_STATE_PATH):
+        data = load_json(ALERTS_STATE_PATH, {})
+        if not isinstance(data, dict):
+            data = {}
+        data.setdefault("version", 1)
+        data.setdefault("active", {})
+        data.setdefault("node_skips", {})
+        data.setdefault("muted_until", 0)
+        return data
 
 
 def save_alerts_state(data: dict):
-    save_json_atomic(ALERTS_STATE_PATH, data)
+    with file_lock(ALERTS_STATE_PATH):
+        save_json_atomic(ALERTS_STATE_PATH, data)
 
 
 def alerts_muted_until_dt(state: dict) -> datetime | None:
@@ -4065,9 +4117,8 @@ def apply_alert_candidates(state: dict, candidates: list[dict], now_ts: int, dry
                 "message": format_alert_message(candidate, now_ts, repeated=repeated),
                 "suppressed": muted,
                 "reason": "muted" if muted else "",
+                "rec": rec,
             })
-            if not dry_run and not muted:
-                rec["last_sent"] = now_ts
 
     for key, rec in list(active.items()):
         if key in candidate_keys:
@@ -4102,18 +4153,25 @@ def _run_alert_check_impl(dry_run: bool = False, notify: bool = True, force_samp
     events = apply_alert_candidates(work_state, candidates, now_ts=now_ts, dry_run=dry_run)
 
     if not dry_run:
-        save_alerts_state(work_state)
+        sent_keys = []
         if notify:
             for event in events:
                 if event.get("suppressed"):
                     continue
                 try:
                     telegram_send_alert(event["message"])
+                    if event["kind"] == "alert" and "rec" in event:
+                        event["rec"]["last_sent"] = now_ts
+                        sent_keys.append(event["key"])
                 except requests.exceptions.HTTPError as e:
                     if e.response is not None and e.response.status_code == 400:
                         telegram_send_to_chat(re.sub(r"</?[^>]+>", "", event["message"]), telegram_alert_chat_id(), parse_mode=None)
+                        if event["kind"] == "alert" and "rec" in event:
+                            event["rec"]["last_sent"] = now_ts
+                            sent_keys.append(event["key"])
                     else:
-                        raise
+                        logging.warning(f"Failed to send alert {event.get('key')}: {e}")
+        save_alerts_state(work_state)
 
     return {
         "enabled": True,
@@ -4557,12 +4615,29 @@ def listen_commands():
     offset = load_offset()
     start_report_scheduler()
 
+    _last_config_mtime = None
     while True:
         if SHUTTING_DOWN:
             logging.warning("shutdown flag set, exiting listen loop")
             stop_sample_worker()
             stop_report_scheduler()
             return
+
+        # Check for runtime config changes
+        try:
+            config_path = runtime_config_path()
+            if os.path.exists(config_path):
+                current_mtime = os.path.getmtime(config_path)
+                if _last_config_mtime is None:
+                    _last_config_mtime = current_mtime
+                elif current_mtime != _last_config_mtime:
+                    logging.info("runtime_config.json changed, reloading")
+                    config = load_runtime_config()
+                    apply_runtime_config(config)
+                    _last_config_mtime = current_mtime
+        except Exception:
+            logging.exception("failed to check/reload runtime config")
+
         try:
             data = get_updates(offset)
             if not data.get("ok"):
