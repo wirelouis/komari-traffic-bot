@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Komari Traffic Console</title>
-  <link rel="icon" type="image/svg+xml" href="/static/komari-traffic-icon.svg?v=20260611-ux">
-  <link rel="stylesheet" href="/static/styles.css?v=20260611-ux">
+  <link rel="icon" type="image/svg+xml" href="/static/komari-traffic-icon.svg?v=20260611-stage2">
+  <link rel="stylesheet" href="/static/styles.css?v=20260611-stage2">
 </head>
 <body>
   <div id="route-progress" class="route-progress" aria-hidden="true"></div>
@@ -13,7 +13,7 @@
     <section class="login-panel">
       <div class="login-brand">
         <span class="brand-mark">
-          <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260611-ux" alt="">
+          <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260611-stage2" alt="">
           <span class="brand-fallback" hidden>K</span>
         </span>
         <div>
@@ -134,7 +134,7 @@
           <p id="topbar-subtitle" class="topbar-subtitle muted">查看探针流量、节点排行和服务状态。</p>
         </div>
         <div class="top-actions">
-          <div class="segmented theme-switch" id="theme-switch" aria-label="主题">
+          <div class="segmented theme-switch" id="theme-switch" role="group" aria-label="主题">
             <button type="button" data-theme="auto" class="active" aria-label="跟随系统" title="跟随系统">
               <svg class="theme-icon" viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M5 5h14v10H5z"></path>
@@ -157,7 +157,7 @@
               <span class="sr-only">夜晚</span>
             </button>
           </div>
-          <span id="status-pill" class="status-pill">加载中</span>
+          <span id="status-pill" class="status-pill" aria-live="polite">加载中</span>
           <button id="refresh-btn" class="ghost-btn">刷新</button>
           <button id="logout-btn" class="ghost-btn">退出</button>
         </div>
@@ -237,11 +237,11 @@
             <table>
               <thead>
                 <tr>
-                  <th>节点</th>
-                  <th>流量</th>
-                  <th>健康</th>
-                  <th>绑定</th>
-                  <th>操作</th>
+                  <th scope="col">节点</th>
+                  <th scope="col">流量</th>
+                  <th scope="col">健康</th>
+                  <th scope="col">绑定</th>
+                  <th scope="col">操作</th>
                 </tr>
               </thead>
               <tbody id="nodes-table"></tbody>
@@ -277,7 +277,7 @@
               <div class="inline-form">
                 <button id="save-alert-config-btn" class="primary-btn">保存告警配置</button>
               </div>
-              <div id="alert-config-result" class="result-box muted">可直接调整阈值、静默窗口和冷却时间。</div>
+              <div id="alert-config-result" class="result-box muted" aria-live="polite">可直接调整阈值、静默窗口和冷却时间。</div>
             </article>
           </div>
           <div class="action-band">
@@ -291,7 +291,7 @@
               <button class="ghost-btn quick-mute" data-hours="24">24h</button>
               <button id="unmute-btn" class="ghost-btn">解除静默</button>
             </div>
-            <div id="alert-result" class="result-box muted">暂无结果。</div>
+            <div id="alert-result" class="result-box muted" aria-live="polite">暂无结果。</div>
           </div>
         </section>
       </section>
@@ -386,7 +386,7 @@
               <div class="inline-form">
                 <button id="tg-test-btn" class="ghost-btn">测试发送</button>
               </div>
-              <p id="telegram-result" class="result-box muted">暂无结果。</p>
+              <p id="telegram-result" class="result-box muted" aria-live="polite">暂无结果。</p>
             </article>
           </div>
           <article class="sub-panel">
@@ -493,7 +493,7 @@
               <div class="inline-form">
                 <button id="save-config-btn" class="primary-btn">保存配置</button>
               </div>
-              <div id="config-result" class="result-box muted">仅开放不含 token 的运行配置。</div>
+              <div id="config-result" class="result-box muted" aria-live="polite">仅开放不含 token 的运行配置。</div>
             </article>
             <article class="sub-panel">
               <div class="panel-head">
@@ -524,7 +524,7 @@
               <button id="prune-task-runs-btn" class="ghost-btn">清理旧运行记录</button>
               <button id="vacuum-db-btn" class="ghost-btn">压缩 SQLite</button>
             </div>
-            <div id="maintenance-result" class="result-box muted">暂无操作结果。</div>
+            <div id="maintenance-result" class="result-box muted" aria-live="polite">暂无操作结果。</div>
           </article>
         </section>
       </section>
@@ -533,6 +533,6 @@
 
   <div id="toast-container"></div>
 
-  <script src="/static/app.js?v=20260611-ux"></script>
+  <script src="/static/app.js?v=20260611-stage2"></script>
 </body>
 </html>

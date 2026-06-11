@@ -154,7 +154,6 @@ body {
   background:
     var(--body-sheen),
     var(--bg);
-  background-attachment: fixed;
   font-family: var(--font-sans);
   font-size: 15px;
   font-weight: 400;
@@ -749,20 +748,6 @@ nav {
 .pill.warn {
   color: var(--warn);
   border-color: var(--warn-border);
-}
-
-.status-row.good {
-  border-color: var(--good-border);
-}
-
-.status-row.warn {
-  border-color: var(--warn-border);
-  background: color-mix(in srgb, var(--paper-soft) 82%, var(--warn) 18%);
-}
-
-.status-row.bad {
-  border-color: var(--bad-border);
-  background: color-mix(in srgb, var(--paper-soft) 84%, var(--red) 16%);
 }
 
 .fix-text {
@@ -1380,8 +1365,7 @@ tbody tr:last-child td {
   padding-top: 10px;
 }
 
-.advanced-bind summary,
-.debug-box summary {
+.advanced-bind summary {
   color: var(--accent-dark);
   cursor: pointer;
   font-size: 13px;
@@ -1474,7 +1458,6 @@ tbody tr:last-child td {
 }
 
 .source-row,
-.status-row,
 .alert-row,
 .schedule-row,
 .task-run-row {
@@ -1489,7 +1472,6 @@ tbody tr:last-child td {
 }
 
 .source-row > span,
-.status-row > span,
 .alert-row > span,
 .schedule-row > span,
 .task-run-row > span {
@@ -1497,7 +1479,6 @@ tbody tr:last-child td {
 }
 
 .source-row strong,
-.status-row strong,
 .alert-row strong,
 .schedule-row strong,
 .task-run-row strong {
@@ -1538,10 +1519,6 @@ tbody tr:last-child td {
   font-weight: 400;
 }
 
-.bad-text {
-  color: var(--red);
-}
-
 .range-controls {
   flex-wrap: wrap;
   margin: 12px 0;
@@ -1557,13 +1534,6 @@ tbody tr:last-child td {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
-}
-
-.range-columns {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-  margin-top: 12px;
 }
 
 .analytics-grid {
@@ -1860,22 +1830,6 @@ tbody tr:last-child td {
   gap: 6px;
 }
 
-.debug-box {
-  margin-top: 10px;
-  padding-top: 8px;
-  border-top: 1px solid var(--line);
-}
-
-.debug-box pre {
-  max-height: 220px;
-  overflow: auto;
-  margin: 8px 0 0;
-  color: var(--ink-soft);
-  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
-  font-size: 12px;
-  white-space: pre-wrap;
-}
-
 .tiny {
   color: var(--muted);
   font-size: 12px;
@@ -1884,8 +1838,7 @@ tbody tr:last-child td {
 @media (max-width: 1100px) {
   .mini-grid,
   .detail-grid,
-  .range-summary,
-  .range-columns {
+  .range-summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -2392,14 +2345,6 @@ tbody tr:last-child td {
 
 .kt-skel-line {
   height: 12px;
-}
-
-.kt-skel-line.sm {
-  width: 38%;
-}
-
-.kt-skel-line.md {
-  width: 62%;
 }
 
 .kt-skel-line.lg {

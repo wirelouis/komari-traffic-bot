@@ -59,6 +59,7 @@ const state = {
   system: null,
   routeToken: 0,
   requestToken: 0,
+  exportSuccessTimer: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -135,7 +136,8 @@ function escapeHtml(value) {
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 function stripHtml(value) {
@@ -175,7 +177,9 @@ function applyThemeMode() {
   document.documentElement.dataset.theme = state.themeMode;
   document.documentElement.style.colorScheme = state.themeMode === "dark" ? "dark" : (state.themeMode === "light" ? "light" : "light dark");
   document.querySelectorAll("#theme-switch [data-theme]").forEach((button) => {
-    button.classList.toggle("active", button.dataset.theme === state.themeMode);
+    const isActive = button.dataset.theme === state.themeMode;
+    button.classList.toggle("active", isActive);
+    button.setAttribute("aria-pressed", String(isActive));
   });
 }
 
@@ -453,7 +457,13 @@ function showRoute(route) {
     view.classList.toggle("hidden", view.dataset.route !== nextRoute);
   });
   document.querySelectorAll(".nav-link[data-route], .brand[data-route]").forEach((link) => {
-    link.classList.toggle("active", link.dataset.route === nextRoute);
+    const isActive = link.dataset.route === nextRoute;
+    link.classList.toggle("active", isActive);
+    if (isActive) {
+      link.setAttribute("aria-current", "page");
+    } else {
+      link.removeAttribute("aria-current");
+    }
   });
   updateTopbar(nextRoute);
 }
@@ -468,7 +478,7 @@ async function navigateRoute(target, options = {}) {
     window.history.pushState({ route: nextRoute }, "", nextUrl);
   }
   showRoute(nextRoute);
-  if (options.scroll !== false) window.scrollTo(0, 0);
+  if (options.scroll !== false) window.scrollTo({ top: 0, behavior: "instant" });
   if (options.load !== false && state.authenticated) {
     await loadCurrentRoute(Boolean(options.forceOverview));
   }
@@ -1859,7 +1869,8 @@ async function exportTrafficRangeCsv() {
     );
     downloadBlob(blob, filename);
     setInlineBadge("analytics-status-pill", "已导出");
-    window.setTimeout(() => setInlineBadge("analytics-status-pill"), 1800);
+    window.clearTimeout(state.exportSuccessTimer);
+    state.exportSuccessTimer = window.setTimeout(() => setInlineBadge("analytics-status-pill"), 1800);
   } catch (error) {
     const message = friendlyError(error.message);
     setInlineBadge("analytics-status-pill", "导出失败", "bad");
@@ -1936,6 +1947,8 @@ async function checkSession() {
 
 async function doLogin(event) {
   event.preventDefault();
+  const button = event.target.querySelector('button[type="submit"]');
+  if (button) button.disabled = true;
   unlockLoginFields();
   $("login-error").textContent = "";
   try {
@@ -1954,6 +1967,8 @@ async function doLogin(event) {
     await loadCurrentRoute(true);
   } catch (error) {
     $("login-error").textContent = friendlyError(error.message);
+  } finally {
+    if (button) button.disabled = false;
   }
 }
 
