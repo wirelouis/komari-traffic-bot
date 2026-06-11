@@ -292,9 +292,12 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("analyticsNodes: 10", app_js)
         self.assertIn("compactTrafficRows", app_js)
         self.assertIn("a.compact_other ? 1 : -1", app_js)
+        self.assertIn("function byteValue", app_js)
+        self.assertIn("svgStackedBar", app_js)
         self.assertIn("/api/traffic/range/export.csv", app_js)
         self.assertIn("$('analytics-status-pill').title = message", app_js.replace('"', "'"))
         self.assertIn("console.warn(message);", app_js)
+        self.assertNotIn('style="width:${percentOf', app_js)
         self.assertNotIn("<h3>节点明细</h3>", app_js)
         self.assertNotIn("调试详情", app_js)
 
@@ -555,7 +558,7 @@ class WebAppTests(unittest.TestCase):
         self.patch_attr(k, "get_json", lambda _url: {
             "status": "success",
             "data": [
-                {"uuid": "machine-1", "name": "Probe One", "region": "SG"},
+                {"uuid": "machine-1", "name": "Probe One", "region": "SG", "cpu": 12.5, "ram": {"used": 512, "total": 1024}, "disk": {"percent": 80}},
                 {"uuid": "auto-node", "name": "Auto Probe"},
             ],
         })
@@ -568,9 +571,13 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(by_uuid["traffic-node"]["binding"]["mode"], "manual")
         self.assertEqual(by_uuid["traffic-node"]["komari"]["machine"]["name"], "Probe One")
         self.assertEqual(by_uuid["traffic-node"]["komari"]["web_url"], "https://komari.example/instance/machine-1")
+        self.assertEqual(by_uuid["traffic-node"]["cpu"]["avg"], 12.5)
+        self.assertEqual(by_uuid["traffic-node"]["ram"]["avg"], 50)
+        self.assertEqual(by_uuid["traffic-node"]["disk"]["avg"], 80)
         self.assertEqual(by_uuid["auto-node"]["binding"]["mode"], "auto")
         self.assertEqual(by_uuid["auto-node"]["komari"]["web_url"], "https://komari.example/instance/auto-node")
         self.assertEqual(response.json()["data"]["top_nodes"][0]["komari"]["web_url"], "https://komari.example/instance/machine-1")
+        self.assertEqual(response.json()["data"]["top_nodes"][0]["komari"]["machine"]["ram"]["avg"], 50)
 
     def test_telegram_preview_does_not_send(self):
         self.login()

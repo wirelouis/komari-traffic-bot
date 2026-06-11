@@ -980,24 +980,15 @@ nav {
 }
 
 .axis-ticks {
-  position: relative;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
   min-height: 18px;
   border-bottom: 1px solid var(--line);
 }
 
 .axis-ticks span {
-  position: absolute;
-  bottom: -2px;
-  transform: translateX(-50%);
   white-space: nowrap;
-}
-
-.axis-ticks span:first-child {
-  transform: translateX(0);
-}
-
-.axis-ticks span:last-child {
-  transform: translateX(-100%);
 }
 
 .traffic-chart-rows {
@@ -1064,6 +1055,33 @@ nav {
   background:
     linear-gradient(to right, var(--chart-grid) 1px, transparent 1px) 0 0 / 25% 100%,
     transparent;
+}
+
+.bar-svg {
+  display: block;
+  width: 100%;
+  height: 8px;
+  overflow: visible;
+}
+
+.bar-fill {
+  transform-origin: left center;
+  transform-box: fill-box;
+  animation: kt-grow-x 620ms var(--ease-out) both;
+}
+
+.bar-fill.day,
+.bar-fill.total,
+.bar-fill.down {
+  fill: var(--accent);
+}
+
+.bar-fill.week {
+  fill: var(--slate);
+}
+
+.bar-fill.up {
+  fill: var(--fill-up);
 }
 
 .traffic-bar {
@@ -1611,6 +1629,12 @@ tbody tr:last-child td {
   border: 1px solid var(--track-border);
   border-radius: 999px;
   background: var(--paper-wash);
+}
+
+.analytics-track .bar-svg {
+  position: absolute;
+  inset: 0;
+  height: 100%;
 }
 
 .analytics-fill {
@@ -2232,7 +2256,8 @@ tbody tr:last-child td {
 }
 
 /* --- Chart bars grow from the left (works regardless of inline width) --- */
-.traffic-bar {
+.traffic-bar,
+.bar-fill {
   transform-origin: left center;
   animation: kt-grow-x 620ms var(--ease-out) both;
 }

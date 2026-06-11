@@ -585,13 +585,74 @@ function formatBytes(value) {
 }
 
 function percentOf(value, max) {
-  const n = Number(value || 0);
-  const m = Math.max(1, Number(max || 0));
+  const n = finiteNumber(value);
+  const m = Math.max(1, finiteNumber(max));
   return Math.max(0, Math.min(100, (n / m) * 100));
 }
 
+function finiteNumber(value) {
+  const n = Number(value ?? 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function byteValue(row, key = "total") {
+  if (!row || typeof row !== "object") return 0;
+  const aliases = {
+    total: ["total", "total_bytes", "bytes", "value"],
+    up: ["up", "up_bytes", "upload", "upload_bytes"],
+    down: ["down", "down_bytes", "download", "download_bytes"],
+  }[key] || [key, `${key}_bytes`];
+  for (const alias of aliases) {
+    const value = row[alias];
+    if (value && typeof value === "object") {
+      const nested = byteValue(value, key);
+      if (nested > 0) return nested;
+    } else {
+      const n = finiteNumber(value);
+      if (n > 0) return n;
+    }
+  }
+  return 0;
+}
+
+function byteText(row, key = "total") {
+  if (!row || typeof row !== "object") return "--";
+  const aliases = {
+    total: ["total_human", "totalHuman", "bytes_human", "value_human"],
+    up: ["up_human", "upHuman", "upload_human"],
+    down: ["down_human", "downHuman", "download_human"],
+  }[key] || [`${key}_human`];
+  for (const alias of aliases) {
+    if (row[alias]) return String(row[alias]);
+  }
+  return formatBytes(byteValue(row, key));
+}
+
+function barPercent(value, max) {
+  const pct = percentOf(value, max);
+  return (finiteNumber(value) > 0 && pct < 0.4 ? 0.4 : pct).toFixed(2);
+}
+
+function svgBar(className, value, max, height = 8) {
+  const width = barPercent(value, max);
+  return `
+    <svg class="bar-svg" viewBox="0 0 100 ${height}" preserveAspectRatio="none" aria-hidden="true">
+      <rect class="bar-fill ${escapeHtml(className)}" x="0" y="0" width="${width}" height="${height}" rx="${height / 2}"></rect>
+    </svg>`;
+}
+
+function svgStackedBar(down, up, max) {
+  const downWidth = barPercent(down, max);
+  const upWidth = barPercent(up, max);
+  return `
+    <svg class="bar-svg" viewBox="0 0 100 12" preserveAspectRatio="none" aria-hidden="true">
+      <rect class="bar-fill down" x="0" y="0" width="${downWidth}" height="12" rx="6"></rect>
+      <rect class="bar-fill up" x="${downWidth}" y="0" width="${upWidth}" height="12" rx="6"></rect>
+    </svg>`;
+}
+
 function sumBy(rows, key) {
-  return (rows || []).reduce((total, row) => total + Number(row?.[key] || 0), 0);
+  return (rows || []).reduce((total, row) => total + byteValue(row, key), 0);
 }
 
 function compactTrafficRows(rows, limit, label = "其他节点") {
@@ -869,8 +930,8 @@ function renderChart(data) {
       const row = byId.get(uuid) || { uuid, name: node.name || uuid, last24: 0, last7d: 0, compact_other: Boolean(node.compact_other) };
       row.name = node.name || row.name;
       row.compact_other = row.compact_other || Boolean(node.compact_other);
-      row[key] = Number(node.total || 0);
-      row[`${key}_human`] = node.total_human || formatBytes(node.total);
+      row[key] = byteValue(node, "total");
+      row[`${key}_human`] = byteText(node, "total");
       byId.set(uuid, row);
     });
   };
@@ -910,7 +971,7 @@ function renderChart(data) {
       </div>
       <div class="traffic-axis">
         <span></span>
-        <div class="axis-ticks">${ticks.map((tick) => `<span style="left:${tick.ratio * 100}%">${escapeHtml(tick.label)}</span>`).join("")}</div>
+        <div class="axis-ticks">${ticks.map((tick) => `<span>${escapeHtml(tick.label)}</span>`).join("")}</div>
       </div>
       <div class="traffic-chart-rows">
         ${nodes.map((n) => `
@@ -918,11 +979,11 @@ function renderChart(data) {
             <span class="traffic-y-label">${escapeHtml(n.name)}</span>
             <span class="traffic-bars">
               <span class="traffic-bar-line">
-                <span class="traffic-bar day" style="width:${percentOf(n.last24, max).toFixed(2)}%"></span>
+                ${svgBar("day", n.last24, max)}
                 <span class="traffic-value">${escapeHtml(n.last24_human || formatBytes(n.last24))}</span>
               </span>
               <span class="traffic-bar-line">
-                <span class="traffic-bar week" style="width:${percentOf(n.last7d, max).toFixed(2)}%"></span>
+                ${svgBar("week", n.last7d, max)}
                 <span class="traffic-value">${escapeHtml(n.last7d_human || formatBytes(n.last7d))}</span>
               </span>
             </span>
@@ -1774,13 +1835,13 @@ function renderTrafficRange(data) {
     ? { rows: nodes, hidden: Number(data.hidden_node_count || 0), hiddenTotal: 0 }
     : compactTrafficRows(nodes, DISPLAY_LIMITS.analyticsNodes);
   const topNodes = compactNodes.rows;
-  const maxNode = Math.max(...topNodes.map((node) => Number(node.total || 0)), 1);
-  const maxGroup = Math.max(...visibleGroups.map((group) => Number(group.total?.total || 0)), 1);
+  const maxNode = Math.max(...topNodes.map((node) => byteValue(node, "total")), 1);
+  const maxGroup = Math.max(...visibleGroups.map((group) => byteValue(group.total, "total")), 1);
   setInlineBadge("analytics-status-pill");
   $("traffic-range-result").innerHTML = `
     <div class="range-summary">
-      ${miniCard("区间合计", data.total?.total_human || "--", `${escapeHtml(data.from)} -> ${escapeHtml(data.to)}`)}
-      ${miniCard("下行 / 上行", `${data.total?.down_human || "--"} / ${data.total?.up_human || "--"}`, "区间累计")}
+      ${miniCard("区间合计", byteText(data.total, "total"), `${escapeHtml(data.from)} -> ${escapeHtml(data.to)}`)}
+      ${miniCard("下行 / 上行", `${byteText(data.total, "down")} / ${byteText(data.total, "up")}`, "区间累计")}
       ${miniCard("节点展示", `${Math.min(data.node_count ?? nodes.length, DISPLAY_LIMITS.analyticsNodes)}/${data.node_count ?? nodes.length}`, compactNodes.hidden ? `其余 ${compactNodes.hidden} 个已汇总` : "全部展示")}
       ${miniCard("趋势分组", `${visibleGroups.length}/${groups.length}`, `${data.day_count || 0} 天 · ${data.group || "daily"}`)}
     </div>
@@ -1802,9 +1863,9 @@ function renderTrafficRange(data) {
             <div class="analytics-group-row">
               <span class="analytics-label" title="${escapeHtml(group.label)}">${escapeHtml(group.label)}</span>
               <span class="analytics-track">
-                <span class="analytics-fill total" style="width:${percentOf(group.total?.total, maxGroup).toFixed(2)}%"></span>
+                ${svgBar("total", byteValue(group.total, "total"), maxGroup, 12)}
               </span>
-              <span class="analytics-value">${escapeHtml(group.total?.total_human || "--")}</span>
+              <span class="analytics-value">${escapeHtml(byteText(group.total, "total"))}</span>
             </div>`).join("") : `<div class="empty-state">暂无分组数据。</div>`}
           ${groups.length > visibleGroups.length ? `<div class="compact-note">较早的 ${groups.length - visibleGroups.length} 组已隐藏，调整日期范围可查看。</div>` : ""}
         </div>
@@ -1823,12 +1884,11 @@ function renderTrafficRange(data) {
               <span class="analytics-node-main">
                 <span class="analytics-node-title">${escapeHtml(node.name)}</span>
                 <span class="analytics-track">
-                  <span class="analytics-fill down" style="width:${percentOf(node.down, maxNode).toFixed(2)}%"></span>
-                  <span class="analytics-fill up" style="left:${percentOf(node.down, maxNode).toFixed(2)}%;width:${percentOf(node.up, maxNode).toFixed(2)}%"></span>
+                  ${svgStackedBar(byteValue(node, "down"), byteValue(node, "up"), maxNode)}
                 </span>
-                <span class="tiny">下行 ${escapeHtml(node.down_human)} / 上行 ${escapeHtml(node.up_human)}</span>
+                <span class="tiny">下行 ${escapeHtml(byteText(node, "down"))} / 上行 ${escapeHtml(byteText(node, "up"))}</span>
               </span>
-              <span class="analytics-value">${escapeHtml(node.total_human)}</span>
+              <span class="analytics-value">${escapeHtml(byteText(node, "total"))}</span>
             </${node.compact_other ? "div" : "button"}>`).join("") : `<div class="empty-state">这个区间暂无节点汇总。</div>`}
         </div>
       </article>

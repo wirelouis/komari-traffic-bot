@@ -388,6 +388,63 @@ def komari_instance_url(uuid: str) -> str:
     return f"{base}/instance/{quote(str(uuid), safe='')}"
 
 
+EMPTY_METRIC_STATS = {"avg": None, "max": None, "min": None}
+
+
+def nested_dict_values(node: dict, keys: tuple[str, ...]) -> list[dict]:
+    values = []
+    for key in keys:
+        value = node.get(key)
+        if isinstance(value, dict):
+            values.append(value)
+    return values
+
+
+def first_present_value(sources: list[dict], keys: tuple[str, ...]):
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in keys:
+            if key in source and source.get(key) not in (None, ""):
+                return source.get(key)
+    return None
+
+
+def machine_metric_stats(node: dict, metric: str) -> dict:
+    nested_sources = nested_dict_values(node, ("status", "state", "metrics", "latest", "system"))
+    sources = [node, *nested_sources]
+    aliases = {
+        "cpu": ("cpu", "CPU", "cpu_percent", "cpu_usage", "cpu_usage_percent"),
+        "ram": ("ram", "RAM", "mem", "memory", "ram_percent", "mem_percent", "memory_percent"),
+        "disk": ("disk", "Disk", "hdd", "storage", "disk_percent", "hdd_percent", "storage_percent"),
+    }
+    total_aliases = {
+        "cpu": ("cpu_total", "cpuTotal"),
+        "ram": ("ram_total", "ramTotal", "mem_total", "memTotal", "memory_total", "memoryTotal"),
+        "disk": ("disk_total", "diskTotal", "hdd_total", "hddTotal", "storage_total", "storageTotal"),
+    }
+    value = first_present_value(sources, aliases.get(metric, (metric,)))
+    total = first_present_value(sources, total_aliases.get(metric, (f"{metric}_total",)))
+    percent = k.normalize_percent_metric(value, total)
+    if percent is None:
+        return dict(EMPTY_METRIC_STATS)
+    return {"avg": percent, "max": percent, "min": percent}
+
+
+def metric_stats_has_value(stats: dict | None) -> bool:
+    if not isinstance(stats, dict):
+        return False
+    return any(stats.get(key) is not None for key in ("avg", "max", "min"))
+
+
+def attach_machine_health(item: dict, machine: dict | None):
+    if not machine:
+        return
+    for metric in ("cpu", "ram", "disk"):
+        if not metric_stats_has_value(item.get(metric)) and metric_stats_has_value(machine.get(metric)):
+            item[metric] = dict(machine[metric])
+
+
 def normalize_machine(node: dict) -> dict:
     uuid = str(node.get("uuid") or "")
     name = str(node.get("name") or uuid or "unknown")
@@ -401,6 +458,9 @@ def normalize_machine(node: dict) -> dict:
         "version": node.get("version") or "",
         "tags": node.get("tags") if isinstance(node.get("tags"), list) else [],
         "web_url": komari_instance_url(uuid),
+        "cpu": machine_metric_stats(node, "cpu"),
+        "ram": machine_metric_stats(node, "ram"),
+        "disk": machine_metric_stats(node, "disk"),
     }
     return machine
 
@@ -467,6 +527,7 @@ def enrich_nodes_with_komari(nodes: list[dict], machines: list[dict] | None = No
             "machine": machine,
             "web_url": machine.get("web_url", "") if machine else "",
         }
+        attach_machine_health(item, machine)
         enriched.append(item)
     return enriched, machines
 
