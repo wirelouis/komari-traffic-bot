@@ -53,6 +53,8 @@ const state = {
   themeMode: "auto",
   aiAsking: false,
   system: null,
+  routeToken: 0,
+  requestToken: 0,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -302,22 +304,39 @@ function clearRouteSkeleton() {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
-    credentials: "same-origin",
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(options.headers || {}),
-    },
-  });
-  const data = await response.json().catch(() => ({ ok: false, error: { message: "响应无法解析" } }));
-  if (!response.ok || data.ok === false) {
-    const error = new Error(friendlyError(data.error?.message || "请求失败"));
-    error.payload = data;
-    error.status = response.status;
-    throw error;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
+  const callToken = options.token;
+
+  try {
+    const response = await fetch(path, {
+      credentials: "same-origin",
+      signal: controller.signal,
+      ...options,
+      headers: {
+        "Content-Type": "application/json",
+        ...(options.headers || {}),
+      },
+    });
+
+    if (callToken !== undefined && callToken !== state.requestToken) {
+      return null;
+    }
+
+    const data = await response.json().catch(() => ({ ok: false, error: { message: "响应无法解析" } }));
+    if (!response.ok || data.ok === false) {
+      const error = new Error(friendlyError(data.error?.message || "请求失败"));
+      error.payload = data;
+      error.status = response.status;
+      if (error.status === 401) {
+        showLoginView();
+      }
+      throw error;
+    }
+    return data.data;
+  } finally {
+    clearTimeout(timeoutId);
   }
-  return data.data;
 }
 
 async function postJson(path, body = {}) {
@@ -353,6 +372,23 @@ function downloadBlob(blob, filename) {
   link.click();
   link.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function runAction({ resultId, busyText, button, fn }) {
+  const resultEl = resultId ? $(resultId) : null;
+  const originalDisabled = button?.disabled;
+  try {
+    if (resultEl) resultEl.textContent = busyText || "处理中...";
+    if (button) button.disabled = true;
+    const result = await fn();
+    return result;
+  } catch (error) {
+    if (resultEl) resultEl.textContent = friendlyError(error.message);
+    updateStatus(friendlyError(error.message), false);
+    throw error;
+  } finally {
+    if (button) button.disabled = originalDisabled || false;
+  }
 }
 
 function normalizeRoute(value) {
@@ -721,11 +757,6 @@ async function jumpToNode(uuid) {
   await navigateRoute(`/nodes?node=${encodeURIComponent(uuid)}`, { push: true });
 }
 
-function bindNodeJumpButtons() {
-  document.querySelectorAll("[data-jump-node]").forEach((button) => {
-    button.addEventListener("click", () => jumpToNode(button.dataset.jumpNode));
-  });
-}
 
 function renderOverviewHealth(system) {
   const target = $("overview-health");
@@ -790,7 +821,6 @@ function renderOverview(data) {
     : `<li class="muted">暂无 Top 数据</li>`;
 
   renderChart(data);
-  bindNodeJumpButtons();
 }
 
 function renderChart(data) {
@@ -913,28 +943,15 @@ function renderNodesTable() {
         </tr>`;
     }).join("")
     : `<tr><td colspan="5">暂无节点数据</td></tr>`;
-
-  document.querySelectorAll("#nodes-table tr[data-uuid]").forEach((row) => {
-    row.addEventListener("click", async (event) => {
-      if (event.target.closest("button,a,select")) return;
-      await selectNode(row.dataset.uuid, { scroll: false });
-    });
-  });
-  document.querySelectorAll("[data-node-action]").forEach((button) => {
-    button.addEventListener("click", async (event) => {
-      event.stopPropagation();
-      const uuid = button.dataset.uuid;
-      const action = button.dataset.nodeAction;
-      if (action === "open") openKomariNode(uuid);
-      if (action === "detail") await selectNode(uuid, { scroll: true });
-    });
-  });
 }
 
 async function loadNodes(hours = state.nodesHours) {
   state.nodesHours = hours;
+  const token = ++state.requestToken;
   try {
-    const data = await api(`/api/nodes?hours=${hours}`);
+    const data = await api(`/api/nodes?hours=${hours}`, { token });
+    if (token !== state.requestToken) return;
+    if (!data) return;
     state.nodes = data.nodes || [];
     state.machines = data.machines || state.machines || [];
     renderNodesTable();
@@ -945,6 +962,7 @@ async function loadNodes(hours = state.nodesHours) {
       $("node-detail").textContent = "选择节点查看详情；点击打开按钮进入 Komari 机器。";
     }
   } catch (error) {
+    if (token !== state.requestToken) return;
     $("nodes-table").innerHTML = `<tr><td colspan="5">${escapeHtml(friendlyError(error.message))}</td></tr>`;
   }
 }
@@ -1141,16 +1159,18 @@ async function loadAlerts() {
 }
 
 async function runAlertCheck(notify) {
-  $("alert-result").textContent = "检查中...";
-  try {
-    const data = await postJson("/api/alerts/check", { notify });
-    renderAlertCheckResult(data);
-    updateStatus(notify ? "告警已检查并推送" : "告警已检查", true);
-    await loadAlerts();
-  } catch (error) {
-    $("alert-result").textContent = friendlyError(error.message);
-    updateStatus(error.message, false);
-  }
+  const button = event?.target;
+  await runAction({
+    resultId: "alert-result",
+    busyText: "检查中...",
+    button,
+    fn: async () => {
+      const data = await postJson("/api/alerts/check", { notify });
+      renderAlertCheckResult(data);
+      updateStatus(notify ? "告警已检查并推送" : "告警已检查", true);
+      await loadAlerts();
+    },
+  });
 }
 
 function renderAlertCheckResult(data) {
@@ -1272,18 +1292,6 @@ async function runScheduleNow(id) {
   }
 }
 
-function bindScheduleActions() {
-  document.querySelectorAll("[data-schedule-action]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const id = button.dataset.scheduleId;
-      const action = button.dataset.scheduleAction;
-      if (action === "edit") editSchedule(id);
-      if (action === "delete") deleteSchedule(id);
-      if (action === "run") runScheduleNow(id);
-    });
-  });
-}
-
 function renderTelegramStatus(data) {
   setInlineBadge("telegram-status-pill", data.configured ? "" : "未配置", data.configured ? "" : "bad");
   const schedules = data.schedules || [];
@@ -1312,7 +1320,6 @@ function renderTelegramStatus(data) {
       </div>`).join("")
     : `<div class="empty-state">还没有应用内计划，可用下方表单新增每日、每周或每月推送。</div>`;
   $("telegram-schedules").innerHTML = appRows;
-  bindScheduleActions();
 }
 
 async function loadTelegramStatus() {
@@ -1734,17 +1741,20 @@ function renderTrafficRange(data) {
         </div>
       </article>
     </div>`;
-  bindNodeJumpButtons();
 }
 
 async function loadTrafficRange() {
   setDefaultRangeDates();
   $("traffic-range-result").innerHTML = `<div class="range-summary">${skelCards(4)}</div><div class="kt-skeleton kt-skel-chart"></div>`;
   setInlineBadge("analytics-status-pill", "查询中");
+  const token = ++state.requestToken;
   try {
     const query = trafficRangeQuery();
-    renderTrafficRange(await api(`/api/traffic/range?${query.toString()}`));
+    const data = await api(`/api/traffic/range?${query.toString()}`, { token });
+    if (token !== state.requestToken || !data) return;
+    renderTrafficRange(data);
   } catch (error) {
+    if (token !== state.requestToken) return;
     setInlineBadge("analytics-status-pill", "异常", "bad");
     $("traffic-range-result").innerHTML = `<div class="empty-state">${escapeHtml(friendlyError(error.message))}</div>`;
   }
@@ -1798,6 +1808,7 @@ async function loadSystemPage() {
 }
 
 async function loadCurrentRoute(forceOverview = false) {
+  const routeToken = ++state.routeToken;
   updateStatus("加载中", true);
   startRouteProgress();
   showRouteSkeleton(state.route);
@@ -1809,16 +1820,20 @@ async function loadCurrentRoute(forceOverview = false) {
     if (state.route === "/ai") await loadAiStatus();
     if (state.route === "/analytics") await loadAnalyticsPage();
     if (state.route === "/system") await loadSystemPage();
+    if (routeToken !== state.routeToken) return;
     updateStatus("已同步", true);
   } catch (error) {
+    if (routeToken !== state.routeToken) return;
     if (error.status === 401) {
       showLoginView();
       return;
     }
     updateStatus(friendlyError(error.message), false);
   } finally {
-    clearRouteSkeleton();
-    stopRouteProgress();
+    if (routeToken === state.routeToken) {
+      clearRouteSkeleton();
+      stopRouteProgress();
+    }
   }
 }
 
@@ -1897,6 +1912,44 @@ function bindIconFallbacks() {
 }
 
 function bindEvents() {
+  // Global event delegation
+  document.addEventListener("click", (e) => {
+    const jumpBtn = e.target.closest("[data-jump-node]");
+    if (jumpBtn) {
+      jumpToNode(jumpBtn.dataset.jumpNode);
+      return;
+    }
+
+    // Node table row clicks
+    const nodeRow = e.target.closest("#nodes-table tr[data-uuid]");
+    if (nodeRow && !e.target.closest("button,a,select")) {
+      selectNode(nodeRow.dataset.uuid, { scroll: false });
+      return;
+    }
+
+    // Node action buttons
+    const nodeActionBtn = e.target.closest("[data-node-action]");
+    if (nodeActionBtn) {
+      e.stopPropagation();
+      const uuid = nodeActionBtn.dataset.uuid;
+      const action = nodeActionBtn.dataset.nodeAction;
+      if (action === "open") openKomariNode(uuid);
+      if (action === "detail") selectNode(uuid, { scroll: true });
+      return;
+    }
+
+    // Schedule action buttons
+    const scheduleActionBtn = e.target.closest("[data-schedule-action]");
+    if (scheduleActionBtn) {
+      const id = scheduleActionBtn.dataset.scheduleId;
+      const action = scheduleActionBtn.dataset.scheduleAction;
+      if (action === "edit") editSchedule(id);
+      if (action === "delete") deleteSchedule(id);
+      if (action === "run") runScheduleNow(id);
+      return;
+    }
+  });
+
   $("login-form").addEventListener("submit", doLogin);
   $("login-remember").addEventListener("change", handleLoginRememberChange);
   loginFields().forEach((input) => {
