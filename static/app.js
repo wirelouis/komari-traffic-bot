@@ -21,6 +21,10 @@ const routeConfig = {
     title: "告警控制",
     subtitle: "查看告警状态、阈值、静默窗口，并执行检查或推送。",
   },
+  "/alert-history": {
+    title: "告警历史",
+    subtitle: "查看告警检查运行记录、事件数量和推送状态。",
+  },
   "/telegram": {
     title: "推送控制",
     subtitle: "预览周期报表、测试 Telegram，并查看计划任务。",
@@ -334,6 +338,13 @@ async function api(path, options = {}) {
       throw error;
     }
     return data.data;
+  } catch (error) {
+    if (error.name === "AbortError") {
+      const timeoutError = new Error("请求超时，请检查网络连接或稍后重试。");
+      timeoutError.isTimeout = true;
+      throw timeoutError;
+    }
+    throw error;
   } finally {
     clearTimeout(timeoutId);
   }
@@ -377,6 +388,7 @@ function downloadBlob(blob, filename) {
 async function runAction({ resultId, busyText, button, fn }) {
   const resultEl = resultId ? $(resultId) : null;
   const originalDisabled = button?.disabled;
+  if (button) button.classList.add("loading");
   try {
     if (resultEl) resultEl.textContent = busyText || "处理中...";
     if (button) button.disabled = true;
@@ -387,8 +399,23 @@ async function runAction({ resultId, busyText, button, fn }) {
     updateStatus(friendlyError(error.message), false);
     throw error;
   } finally {
-    if (button) button.disabled = originalDisabled || false;
+    if (button) {
+      button.classList.remove("loading");
+      button.disabled = originalDisabled || false;
+    }
   }
+}
+
+function showToast(message, type = "info", duration = 3000) {
+  const container = $("toast-container") || document.body.appendChild(Object.assign(document.createElement("div"), { id: "toast-container" }));
+  const toast = document.createElement("div");
+  toast.className = `toast ${type}`;
+  toast.textContent = message;
+  container.appendChild(toast);
+  setTimeout(() => {
+    toast.classList.add("toast-exit");
+    setTimeout(() => toast.remove(), 250);
+  }, duration);
 }
 
 function normalizeRoute(value) {
@@ -895,6 +922,12 @@ function renderChart(data) {
   bindNodeJumpButtons();
 }
 
+function bindNodeJumpButtons() {
+  document.querySelectorAll("[data-jump-node]").forEach((button) => {
+    button.style.cursor = "pointer";
+  });
+}
+
 async function loadOverview() {
   const overview = await api("/api/overview");
   renderOverview(overview);
@@ -948,6 +981,7 @@ function renderNodesTable() {
 async function loadNodes(hours = state.nodesHours) {
   state.nodesHours = hours;
   const token = ++state.requestToken;
+  setSkel("nodes-table", skelTableRows(6, 5));
   try {
     const data = await api(`/api/nodes?hours=${hours}`, { token });
     if (token !== state.requestToken) return;
@@ -1145,6 +1179,9 @@ function renderAlerts(data) {
 }
 
 async function loadAlerts() {
+  setSkel("alerts-summary", skelCards(4));
+  setSkel("alerts-body", skelRows(2));
+  setSkel("alert-thresholds", skelRows(5));
   try {
     const [alerts, config] = await Promise.all([
       api("/api/alerts"),
@@ -1153,7 +1190,7 @@ async function loadAlerts() {
     renderAlerts(alerts);
     renderAlertConfig(config);
   } catch (error) {
-    $("alerts-body").textContent = friendlyError(error.message);
+    $("alerts-body").innerHTML = `<div class="empty-state">${escapeHtml(friendlyError(error.message))}</div>`;
     $("alert-config-form").innerHTML = `<div class="empty-state">${escapeHtml(friendlyError(error.message))}</div>`;
   }
 }
@@ -1202,6 +1239,43 @@ async function muteAlerts(hours) {
     await loadAlerts();
   } catch (error) {
     $("alert-result").textContent = friendlyError(error.message);
+  }
+}
+
+function renderAlertHistory(data) {
+  const runs = data.runs || [];
+  const target = $("alert-history-list");
+  if (!runs.length) {
+    target.innerHTML = `<div class="empty-state">暂无告警历史记录。</div>`;
+    return;
+  }
+  target.innerHTML = runs.map((run) => {
+    const meta = run.metadata || {};
+    const events = meta.events || 0;
+    const activeCount = meta.active_count || 0;
+    const notified = meta.notify ? "已推送" : "未推送";
+    return `
+      <div class="task-run-row ${run.status === "failed" ? "failed" : ""}">
+        <span>
+          <strong>${escapeHtml(run.started_at_text || "未记录时间")}</strong>
+          <span class="pill ${runStatusClass(run.status)}">${escapeHtml(runStatusText(run.status))}</span>
+          <br>
+          <span class="tiny">事件 ${events} 个 · Active ${activeCount} 个 · ${notified}</span>
+          ${run.summary ? `<br><span class="tiny">${escapeHtml(run.summary)}</span>` : ""}
+          ${run.error ? `<br><span class="tiny error-text">${escapeHtml(run.error)}</span>` : ""}
+        </span>
+        <span class="tiny">${escapeHtml(run.duration_text || "--")}</span>
+      </div>`;
+  }).join("");
+}
+
+async function loadAlertHistory() {
+  setSkel("alert-history-list", skelRows(6));
+  try {
+    const data = await api("/api/alerts/history?limit=50");
+    renderAlertHistory(data);
+  } catch (error) {
+    $("alert-history-list").innerHTML = `<div class="empty-state">${escapeHtml(friendlyError(error.message))}</div>`;
   }
 }
 
@@ -1323,6 +1397,8 @@ function renderTelegramStatus(data) {
 }
 
 async function loadTelegramStatus() {
+  setSkel("telegram-summary", skelCards(4));
+  setSkel("telegram-schedules", skelRows(2));
   try {
     const status = await api("/api/telegram/status");
     const schedules = await api("/api/schedules");
@@ -1393,6 +1469,8 @@ function renderAiStatus(data) {
 }
 
 async function loadAiStatus() {
+  setSkel("ai-summary", skelCards(4));
+  setSkel("ai-sources", skelRows(3));
   try {
     renderAiStatus(await api("/api/ai/status"));
   } catch (error) {
@@ -1798,13 +1876,19 @@ async function loadAnalyticsPage() {
 }
 
 async function loadSystemPage() {
-  const [system, config] = await Promise.all([
-    api("/api/system/status"),
-    api("/api/system/config"),
-  ]);
-  renderSystemStatus(system);
-  renderSystemConfig(config);
-  await loadTaskRuns("system-task-runs", $("task-run-filter").value, DISPLAY_LIMITS.taskRuns);
+  setSkel("system-summary", skelCards(4));
+  setSkel("system-services", skelRows(3));
+  try {
+    const [system, config] = await Promise.all([
+      api("/api/system/status"),
+      api("/api/system/config"),
+    ]);
+    renderSystemStatus(system);
+    renderSystemConfig(config);
+    await loadTaskRuns("system-task-runs", $("task-run-filter").value, DISPLAY_LIMITS.taskRuns);
+  } catch (error) {
+    $("system-summary").innerHTML = `<div class="empty-state">${escapeHtml(friendlyError(error.message))}</div>`;
+  }
 }
 
 async function loadCurrentRoute(forceOverview = false) {
@@ -1814,6 +1898,7 @@ async function loadCurrentRoute(forceOverview = false) {
   showRouteSkeleton(state.route);
   try {
     if (forceOverview || state.route === "/") await loadOverview();
+    if (state.route === "/alert-history") await loadAlertHistory();
     if (state.route === "/nodes") await loadNodes(state.nodesHours);
     if (state.route === "/alerts") await loadAlerts();
     if (state.route === "/telegram") await loadTelegramStatus();

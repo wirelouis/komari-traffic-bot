@@ -396,6 +396,42 @@ textarea {
   place-items: center;
 }
 
+/* Button loading state */
+.primary-btn.loading,
+.ghost-btn.loading,
+.text-btn.loading {
+  position: relative;
+  color: transparent;
+  pointer-events: none;
+}
+
+.primary-btn.loading::after,
+.ghost-btn.loading::after,
+.text-btn.loading::after {
+  content: "";
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  top: 50%;
+  left: 50%;
+  margin-left: -8px;
+  margin-top: -8px;
+  border: 2px solid transparent;
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: kt-spinner 0.6s linear infinite;
+}
+
+.primary-btn.loading::after {
+  border-top-color: var(--on-accent);
+  opacity: 0.9;
+}
+
+.ghost-btn.loading::after,
+.text-btn.loading::after {
+  border-top-color: var(--ink-soft);
+}
+
 .app-shell {
   display: grid;
   min-height: 100vh;
@@ -2407,5 +2443,85 @@ tbody tr:last-child td {
 
   .kt-skeleton::after {
     display: none;
+  }
+}
+
+/* --- Toast notifications --- */
+#toast-container {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  pointer-events: none;
+}
+
+.toast {
+  min-width: 280px;
+  max-width: 420px;
+  padding: 14px 16px;
+  background: var(--panel-bg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: var(--shadow-lg);
+  color: var(--ink);
+  font-size: 14px;
+  pointer-events: auto;
+  opacity: 0;
+  transform: translateX(24px);
+  animation: toast-enter 0.3s var(--ease-out) forwards;
+}
+
+.toast.toast-exit {
+  animation: toast-exit 0.25s var(--ease) forwards;
+}
+
+.toast.success {
+  border-color: var(--good-border);
+  background: color-mix(in srgb, var(--panel-bg) 92%, var(--green) 8%);
+}
+
+.toast.error {
+  border-color: var(--bad-border);
+  background: color-mix(in srgb, var(--panel-bg) 92%, var(--red) 8%);
+}
+
+.toast.warn {
+  border-color: var(--warn-border);
+  background: color-mix(in srgb, var(--panel-bg) 92%, var(--warn) 8%);
+}
+
+@keyframes toast-enter {
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes toast-exit {
+  to {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+}
+
+@keyframes kt-spinner {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 520px) {
+  #toast-container {
+    top: 10px;
+    right: 10px;
+    left: 10px;
+  }
+
+  .toast {
+    min-width: 0;
+    max-width: 100%;
   }
 }
