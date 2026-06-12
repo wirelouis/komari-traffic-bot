@@ -618,6 +618,60 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(node["disk"]["avg"], 70)
         self.assertEqual(node["komari"]["machine"]["disk"]["avg"], 70)
 
+    def test_nodes_api_compact_omits_hourly_distribution_until_detail(self):
+        self.login()
+        self.patch_attr(w, "safe_records_summary", lambda _hours, _enrich=True: {
+            "hours": 24,
+            "from_ts": 1000,
+            "to_ts": 3700,
+            "nodes": [
+                {
+                    "uuid": "node-1",
+                    "name": "Node One",
+                    "up": 4,
+                    "down": 6,
+                    "total": 10,
+                    "total_human": "10 B",
+                    "hourly_distribution": {"heavy": True},
+                },
+            ],
+            "top_nodes": [
+                {
+                    "uuid": "node-1",
+                    "name": "Node One",
+                    "up": 4,
+                    "down": 6,
+                    "total": 10,
+                    "total_human": "10 B",
+                    "hourly_distribution": {"heavy": True},
+                },
+            ],
+        })
+        self.patch_attr(k, "build_snapshot_hourly_by_node_summary", lambda _from, _to: {
+            "nodes": [
+                {
+                    "uuid": "node-1",
+                    "hours": [{"hour": "1970-01-01 01:00", "total": 10, "total_human": "10 B"}],
+                    "peak_hour": {"hour": "1970-01-01 01:00", "total": 10, "total_human": "10 B"},
+                    "valley_hour": {"hour": "1970-01-01 01:00", "total": 10, "total_human": "10 B"},
+                }
+            ],
+            "sample_count": 2,
+            "segment_count": 1,
+            "source": "traffic_snapshots",
+        })
+
+        compact_response = self.client.get("/api/nodes?hours=24&compact=true")
+        full_response = self.client.get("/api/nodes?hours=24")
+        detail_response = self.client.get("/api/nodes/node-1?hours=24")
+
+        self.assertEqual(compact_response.status_code, 200, compact_response.text)
+        self.assertNotIn("hourly_distribution", compact_response.json()["data"]["nodes"][0])
+        self.assertIn("hourly_distribution", full_response.json()["data"]["nodes"][0])
+        detail_hourly = detail_response.json()["data"]["node"]["hourly_distribution"]
+        self.assertEqual(detail_hourly["hours"][0]["total"], 10)
+        self.assertEqual(detail_hourly["peak_hour"]["total_human"], "10 B")
+
     def test_telegram_preview_does_not_send(self):
         self.login()
         self.patch_attr(k, "build_period_report_message", lambda _start, _now, tag, top_only=False: f"preview:{tag}:{top_only}")

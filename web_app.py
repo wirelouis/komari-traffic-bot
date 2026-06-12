@@ -700,6 +700,23 @@ def compact_result_nodes(result: dict, limit: int) -> dict:
     return compacted
 
 
+def compact_nodes_payload(data: dict) -> dict:
+    payload = dict(data or {})
+    heavy_keys = {"hourly_distribution"}
+    for key in heavy_keys:
+        payload.pop(key, None)
+    for list_key in ("nodes", "top_nodes"):
+        rows = payload.get(list_key)
+        if isinstance(rows, list):
+            payload[list_key] = [
+                {k: v for k, v in dict(row).items() if k not in heavy_keys}
+                if isinstance(row, dict) else row
+                for row in rows
+            ]
+    payload["compact"] = True
+    return payload
+
+
 def compact_traffic_range_payload(data: dict, node_limit: int = ANALYTICS_NODE_LIMIT) -> dict:
     payload = compact_summary_nodes(data, node_limit)
     groups = []
@@ -1388,11 +1405,11 @@ def overview(_user: str = Depends(current_user)):
 
 
 @app.get("/api/nodes")
-async def nodes(hours: int = 24, _user: str = Depends(current_user)):
+async def nodes(hours: int = 24, compact: bool = False, _user: str = Depends(current_user)):
     result = safe_call(safe_records_summary, hours)
     if not result["ok"]:
         return api_error(result["error"]["message"], status_code=502, code=result["error"]["code"], data=result)
-    return api_ok(result["data"])
+    return api_ok(compact_nodes_payload(result["data"]) if compact else result["data"])
 
 
 @app.get("/api/komari/machines")
@@ -1472,8 +1489,30 @@ def node_detail(uuid: str, hours: int = 24, _user: str = Depends(current_user)):
         matched = next((n for n in nodes_data if str(n.get("name")) == safe_uuid), None)
     if matched is None:
         return api_error("node not found in selected range", status_code=404, code="node_not_found")
-    hourly = safe_call(k.build_last_24h_hourly_summary) if hours == 24 else {"ok": True, "data": None}
-    return api_ok({"node": matched, "range": summary["data"], "hourly": hourly})
+    hourly = safe_call(k.build_snapshot_hourly_by_node_summary, summary["data"].get("from_ts", 0), summary["data"].get("to_ts", 0)) if hours == 24 else {"ok": True, "data": None}
+    node_payload = dict(matched)
+    if hourly.get("ok") and isinstance(hourly.get("data"), dict):
+        hourly_nodes = hourly["data"].get("nodes") or []
+        node_hourly = next((item for item in hourly_nodes if str(item.get("uuid")) == str(matched.get("uuid"))), None)
+        if node_hourly:
+            node_payload["hourly_distribution"] = {
+                "hours": node_hourly.get("hours", []),
+                "peak_hour": node_hourly.get("peak_hour"),
+                "valley_hour": node_hourly.get("valley_hour"),
+                "sample_count": hourly["data"].get("sample_count", 0),
+                "segment_count": hourly["data"].get("segment_count", 0),
+                "source": hourly["data"].get("source", "traffic_snapshots"),
+            }
+        else:
+            node_payload["hourly_distribution"] = {
+                "hours": [],
+                "sample_count": hourly["data"].get("sample_count", 0),
+                "segment_count": hourly["data"].get("segment_count", 0),
+                "source": hourly["data"].get("source", "traffic_snapshots"),
+            }
+    elif not hourly.get("ok"):
+        node_payload["hourly_distribution"] = {"error": hourly.get("error", {}).get("message", "failed")}
+    return api_ok({"node": node_payload, "range": summary["data"], "hourly": hourly})
 
 
 @app.get("/api/traffic/range")

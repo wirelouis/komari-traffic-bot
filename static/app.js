@@ -1243,7 +1243,7 @@ async function loadNodes(hours = state.nodesHours) {
   const token = ++state.requestToken;
   setSkel("nodes-table", skelTableRows(6, 5));
   try {
-    const data = await api(`/api/nodes?hours=${hours}`, { token });
+    const data = await api(`/api/nodes?hours=${hours}&compact=true`, { token });
     if (token !== state.requestToken) return;
     if (!data) return;
     state.nodes = data.nodes || [];
@@ -1275,6 +1275,12 @@ function renderNodeDetail(node) {
   const bindSelectDisabled = state.machines.length ? "" : "disabled";
   const saveDisabled = state.machines.length ? "" : "disabled";
   const autoDisabled = binding.mode === "manual" ? "" : "disabled";
+  const hourly = node.hourly_distribution || {};
+  const hourlyCount = Array.isArray(hourly.hours) ? hourly.hours.length : 0;
+  const peakHour = hourly.peak_hour;
+  const hourlyNote = hourly.error
+    ? hourly.error
+    : (peakHour ? `${peakHour.hour || ""} 峰值 ${peakHour.total_human || formatBytes(peakHour.total || 0)}` : `${hourlyCount} 个小时分桶`);
   $("node-detail").innerHTML = `
       <div class="detail-drawer">
       <div class="detail-main">
@@ -1297,6 +1303,7 @@ function renderNodeDetail(node) {
         <div class="detail-item"><span>RAM 平均</span><strong>${metric(node.ram, "avg")}</strong><small>峰值 ${metric(node.ram, "max")}</small></div>
         <div class="detail-item"><span>Disk 平均</span><strong>${metric(node.disk, "avg")}</strong><small>峰值 ${metric(node.disk, "max")}</small></div>
         <div class="detail-item"><span>记录数</span><strong>${escapeHtml(node.record_count || "--")}</strong><small>${escapeHtml(node.from || "")} ${node.to ? `→ ${escapeHtml(node.to)}` : ""}</small></div>
+        <div class="detail-item"><span>小时分布</span><strong>${escapeHtml(hourlyCount ? `${hourlyCount} 组` : "--")}</strong><small>${escapeHtml(hourlyNote)}</small></div>
       </div>
       <div class="node-binding-editor">
         <div class="binding-current">
