@@ -294,6 +294,7 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("a.compact_other ? 1 : -1", app_js)
         self.assertIn("function byteValue", app_js)
         self.assertIn("svgStackedBar", app_js)
+        self.assertIn("bar-track-line", app_js)
         self.assertIn("/api/traffic/range/export.csv", app_js)
         self.assertIn("$('analytics-status-pill').title = message", app_js.replace('"', "'"))
         self.assertIn("console.warn(message);", app_js)
@@ -562,6 +563,7 @@ class WebAppTests(unittest.TestCase):
                 {"uuid": "auto-node", "name": "Auto Probe"},
             ],
         })
+        self.patch_attr(k, "fetch_node_records", lambda *_args, **_kwargs: [])
 
         response = self.client.get("/api/nodes?hours=24")
 
@@ -578,6 +580,37 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(by_uuid["auto-node"]["komari"]["web_url"], "https://komari.example/instance/auto-node")
         self.assertEqual(response.json()["data"]["top_nodes"][0]["komari"]["web_url"], "https://komari.example/instance/machine-1")
         self.assertEqual(response.json()["data"]["top_nodes"][0]["komari"]["machine"]["ram"]["avg"], 50)
+
+    def test_nodes_api_falls_back_to_records_for_health_metrics(self):
+        self.login()
+        self.patch_attr(k, "build_records_summary", lambda _hours: {
+            "hours": 24,
+            "from": "from",
+            "to": "to",
+            "nodes": [
+                {"uuid": "auto-node", "name": "Auto Node", "up": 4, "down": 5, "total": 9, "total_human": "9 B"},
+            ],
+            "top_nodes": [
+                {"uuid": "auto-node", "name": "Auto Node", "up": 4, "down": 5, "total": 9, "total_human": "9 B"},
+            ],
+        })
+        self.patch_attr(k, "get_json", lambda _url: {
+            "status": "success",
+            "data": [{"uuid": "auto-node", "name": "Auto Probe"}],
+        })
+        self.patch_attr(k, "fetch_node_records", lambda uuid, hours: [
+            {"time": "2026-06-06T00:00:00Z", "net_total_up": 0, "net_total_down": 0, "cpu": 10, "ram": {"used": 1, "total": 4}, "disk": {"percent": 80}},
+            {"time": "2026-06-06T01:00:00Z", "net_total_up": 4, "net_total_down": 5, "cpu": 20, "ram": {"used": 2, "total": 4}, "disk": {"percent": 60}},
+        ])
+
+        response = self.client.get("/api/nodes?hours=24")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        node = response.json()["data"]["nodes"][0]
+        self.assertEqual(node["cpu"]["avg"], 15)
+        self.assertEqual(node["ram"]["avg"], 37.5)
+        self.assertEqual(node["disk"]["avg"], 70)
+        self.assertEqual(node["komari"]["machine"]["disk"]["avg"], 70)
 
     def test_telegram_preview_does_not_send(self):
         self.login()

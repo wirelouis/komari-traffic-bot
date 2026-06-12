@@ -1060,28 +1060,48 @@ nav {
 .bar-svg {
   display: block;
   width: 100%;
-  height: 8px;
+  height: 10px;
   overflow: visible;
 }
 
-.bar-fill {
+.bar-track-line,
+.bar-fill-line {
+  fill: none;
+  stroke-linecap: round;
+  stroke-width: 7;
+  vector-effect: non-scaling-stroke;
+}
+
+.bar-track-line {
+  stroke: var(--paper-wash);
+}
+
+.bar-fill-line {
   transform-origin: left center;
-  transform-box: fill-box;
+  transform-box: view-box;
   animation: kt-grow-x 620ms var(--ease-out) both;
 }
 
-.bar-fill.day,
-.bar-fill.total,
-.bar-fill.down {
-  fill: var(--accent);
+.bar-fill-line.day,
+.bar-fill-line.total,
+.bar-fill-line.down {
+  stroke: var(--accent);
 }
 
-.bar-fill.week {
-  fill: var(--slate);
+.bar-fill-line.week {
+  stroke: var(--slate);
 }
 
-.bar-fill.up {
-  fill: var(--fill-up);
+.bar-fill-line.up {
+  stroke: var(--fill-up);
+}
+
+.bar-fill-line.stacked-segment {
+  stroke-width: 8;
+}
+
+.traffic-bar-line .bar-svg {
+  height: 10px;
 }
 
 .traffic-bar {
@@ -1624,11 +1644,11 @@ tbody tr:last-child td {
 .analytics-track {
   position: relative;
   display: block;
-  height: 12px;
-  overflow: hidden;
-  border: 1px solid var(--track-border);
+  height: 14px;
+  overflow: visible;
+  border: 0;
   border-radius: 999px;
-  background: var(--paper-wash);
+  background: transparent;
 }
 
 .analytics-track .bar-svg {
@@ -2257,7 +2277,8 @@ tbody tr:last-child td {
 
 /* --- Chart bars grow from the left (works regardless of inline width) --- */
 .traffic-bar,
-.bar-fill {
+.bar-fill,
+.bar-fill-line {
   transform-origin: left center;
   animation: kt-grow-x 620ms var(--ease-out) both;
 }

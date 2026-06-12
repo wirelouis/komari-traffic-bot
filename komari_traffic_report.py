@@ -2800,7 +2800,7 @@ def normalize_percent_metric(value, total=None) -> float | None:
                     return round(pct, 2) if 0 <= pct <= 100 else None
             except Exception:
                 return None
-        for key in ("percent", "percentage", "usage", "value"):
+        for key in ("percent", "percentage", "usage", "used_percent", "usedPercent", "usage_percent", "usagePercent", "value"):
             if key in value:
                 return normalize_percent_metric(value.get(key), total=total)
         return None
@@ -2819,6 +2819,25 @@ def normalize_percent_metric(value, total=None) -> float | None:
                 return round(pct, 2) if 0 <= pct <= 100 else None
         except Exception:
             return None
+    return None
+
+
+def _metric_sources(record: dict) -> list[dict]:
+    if not isinstance(record, dict):
+        return []
+    sources = [record]
+    for key in ("status", "state", "metrics", "latest", "system"):
+        value = record.get(key)
+        if isinstance(value, dict):
+            sources.append(value)
+    return sources
+
+
+def _first_metric_value(record: dict, keys: tuple[str, ...]):
+    for source in _metric_sources(record):
+        for key in keys:
+            if key in source and source.get(key) not in (None, ""):
+                return source.get(key)
     return None
 
 
@@ -2856,9 +2875,18 @@ def compute_traffic_from_records(records: list[dict]) -> dict:
     ram_values = []
     disk_values = []
     for rec in records:
-        cpu = _to_float_safe(rec.get("cpu"))
-        ram = normalize_percent_metric(rec.get("ram"), rec.get("ram_total"))
-        disk = normalize_percent_metric(rec.get("disk"), rec.get("disk_total"))
+        cpu = normalize_percent_metric(
+            _first_metric_value(rec, ("cpu", "CPU", "cpu_percent", "cpu_usage", "cpu_usage_percent")),
+            _first_metric_value(rec, ("cpu_total", "cpuTotal")),
+        )
+        ram = normalize_percent_metric(
+            _first_metric_value(rec, ("ram", "RAM", "mem", "memory", "ram_percent", "mem_percent", "memory_percent")),
+            _first_metric_value(rec, ("ram_total", "ramTotal", "mem_total", "memTotal", "memory_total", "memoryTotal")),
+        )
+        disk = normalize_percent_metric(
+            _first_metric_value(rec, ("disk", "Disk", "hdd", "storage", "disk_percent", "hdd_percent", "storage_percent")),
+            _first_metric_value(rec, ("disk_total", "diskTotal", "hdd_total", "hddTotal", "storage_total", "storageTotal")),
+        )
         if cpu is not None:
             cpu_values.append(cpu)
         if ram is not None:

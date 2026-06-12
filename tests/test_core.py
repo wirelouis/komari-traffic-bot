@@ -700,6 +700,35 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(result["total"]["total"], 220)
         self.assertEqual(result["note"], "snapshot_window")
 
+    def test_compute_traffic_from_records_accepts_metric_aliases(self):
+        result = k.compute_traffic_from_records([
+            {
+                "time": "2026-06-06T00:00:00Z",
+                "net_total_up": 0,
+                "net_total_down": 0,
+                "metrics": {
+                    "cpu_usage_percent": 10,
+                    "memory": {"used": 1, "total": 4},
+                    "hdd": {"usedPercent": 80},
+                },
+            },
+            {
+                "time": "2026-06-06T01:00:00Z",
+                "net_total_up": 4,
+                "net_total_down": 5,
+                "status": {
+                    "cpu": {"usagePercent": 20},
+                    "mem_percent": 50,
+                    "storage_percent": 60,
+                },
+            },
+        ])
+
+        self.assertEqual(result["total"], 9)
+        self.assertEqual(result["cpu"]["avg"], 15)
+        self.assertEqual(result["ram"]["avg"], 37.5)
+        self.assertEqual(result["disk"]["avg"], 70)
+
     def test_hourly_by_node_summary_uses_sqlite_snapshots(self):
         k.save_traffic_snapshot(1000, {
             "n1": {"name": "Node One", "up": 10, "down": 20},

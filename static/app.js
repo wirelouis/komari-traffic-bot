@@ -633,21 +633,37 @@ function barPercent(value, max) {
   return (finiteNumber(value) > 0 && pct < 0.4 ? 0.4 : pct).toFixed(2);
 }
 
+function barEnd(percent) {
+  return (2 + (Number(percent) / 100) * 96).toFixed(2);
+}
+
 function svgBar(className, value, max, height = 8) {
-  const width = barPercent(value, max);
+  const end = barEnd(barPercent(value, max));
+  const y = height / 2;
+  const fillLine = finiteNumber(value) > 0
+    ? `<line class="bar-fill-line ${escapeHtml(className)}" x1="2" y1="${y}" x2="${end}" y2="${y}"></line>`
+    : "";
   return `
-    <svg class="bar-svg" viewBox="0 0 100 ${height}" preserveAspectRatio="none" aria-hidden="true">
-      <rect class="bar-fill ${escapeHtml(className)}" x="0" y="0" width="${width}" height="${height}" rx="${height / 2}"></rect>
+    <svg class="bar-svg bar-svg-single" viewBox="0 0 100 ${height}" preserveAspectRatio="none" aria-hidden="true">
+      <line class="bar-track-line" x1="2" y1="${y}" x2="98" y2="${y}"></line>
+      ${fillLine}
     </svg>`;
 }
 
 function svgStackedBar(down, up, max) {
-  const downWidth = barPercent(down, max);
-  const upWidth = barPercent(up, max);
+  const downEnd = Number(barEnd(barPercent(down, max)));
+  const upEnd = Number((downEnd + (Number(barPercent(up, max)) / 100) * 96).toFixed(2));
+  const downLine = finiteNumber(down) > 0
+    ? `<line class="bar-fill-line down stacked-segment" x1="2" y1="6" x2="${downEnd.toFixed(2)}" y2="6"></line>`
+    : "";
+  const upLine = finiteNumber(up) > 0
+    ? `<line class="bar-fill-line up stacked-segment" x1="${downEnd.toFixed(2)}" y1="6" x2="${Math.min(98, upEnd).toFixed(2)}" y2="6"></line>`
+    : "";
   return `
-    <svg class="bar-svg" viewBox="0 0 100 12" preserveAspectRatio="none" aria-hidden="true">
-      <rect class="bar-fill down" x="0" y="0" width="${downWidth}" height="12" rx="6"></rect>
-      <rect class="bar-fill up" x="${downWidth}" y="0" width="${upWidth}" height="12" rx="6"></rect>
+    <svg class="bar-svg bar-svg-stacked" viewBox="0 0 100 12" preserveAspectRatio="none" aria-hidden="true">
+      <line class="bar-track-line" x1="2" y1="6" x2="98" y2="6"></line>
+      ${downLine}
+      ${upLine}
     </svg>`;
 }
 

@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import base64
+import concurrent.futures
 import csv
 import hashlib
 import hmac
@@ -36,6 +37,7 @@ LOGIN_RATE_LIMIT_MAX_KEYS = 1000
 UNSAFE_HTTP_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 OVERVIEW_NODE_LIMIT = 8
 ANALYTICS_NODE_LIMIT = 10
+WEB_HEALTH_FETCH_LIMIT = max(0, int(os.environ.get("WEB_HEALTH_FETCH_LIMIT", "64")))
 WEB_TRUST_PROXY = bool(int(os.environ.get("WEB_TRUST_PROXY", "0")))
 WEB_SESSION_SECRET = os.environ.get("WEB_SESSION_SECRET", "").strip() or secrets.token_urlsafe(32)
 WEB_SESSION_SECRET_TEMPORARY = not bool(os.environ.get("WEB_SESSION_SECRET", "").strip())
@@ -437,12 +439,84 @@ def metric_stats_has_value(stats: dict | None) -> bool:
     return any(stats.get(key) is not None for key in ("avg", "max", "min"))
 
 
+def health_stats_complete(item: dict | None) -> bool:
+    if not isinstance(item, dict):
+        return False
+    return all(metric_stats_has_value(item.get(metric)) for metric in ("cpu", "ram", "disk"))
+
+
 def attach_machine_health(item: dict, machine: dict | None):
     if not machine:
         return
     for metric in ("cpu", "ram", "disk"):
         if not metric_stats_has_value(item.get(metric)) and metric_stats_has_value(machine.get(metric)):
             item[metric] = dict(machine[metric])
+
+
+def health_target_uuid(item: dict) -> str:
+    binding_uuid = str(((item.get("binding") or {}).get("komari_uuid")) or "")
+    if binding_uuid:
+        return binding_uuid
+    return str(item.get("uuid") or "")
+
+
+def records_health_stats(uuid: str, hours: int) -> dict | None:
+    try:
+        records = k.fetch_node_records(uuid, hours)
+        summary = k.compute_traffic_from_records(records)
+    except Exception:
+        return None
+    health = {
+        metric: summary.get(metric, dict(EMPTY_METRIC_STATS))
+        for metric in ("cpu", "ram", "disk")
+    }
+    return health if any(metric_stats_has_value(health.get(metric)) for metric in health) else None
+
+
+def records_health_map(items: list[dict], hours: int) -> dict[str, dict]:
+    if not k.KOMARI_BASE_URL or WEB_HEALTH_FETCH_LIMIT <= 0:
+        return {}
+    targets = []
+    seen = set()
+    for item in items or []:
+        if health_stats_complete(item):
+            continue
+        uuid = health_target_uuid(item)
+        if not uuid or uuid in seen:
+            continue
+        seen.add(uuid)
+        targets.append(uuid)
+        if len(targets) >= WEB_HEALTH_FETCH_LIMIT:
+            break
+    if not targets:
+        return {}
+    max_workers = max(1, min(len(targets), int(getattr(k, "KOMARI_FETCH_WORKERS", 4) or 4), 8))
+    health: dict[str, dict] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_map = {executor.submit(records_health_stats, uuid, hours): uuid for uuid in targets}
+        for future in concurrent.futures.as_completed(future_map):
+            uuid = future_map[future]
+            try:
+                stats = future.result()
+            except Exception:
+                stats = None
+            if stats:
+                health[uuid] = stats
+    return health
+
+
+def attach_records_health(item: dict, health_map: dict[str, dict]):
+    stats = health_map.get(health_target_uuid(item))
+    if not stats:
+        return
+    for metric in ("cpu", "ram", "disk"):
+        if not metric_stats_has_value(item.get(metric)) and metric_stats_has_value(stats.get(metric)):
+            item[metric] = dict(stats[metric])
+    machine = (item.get("komari") or {}).get("machine")
+    if isinstance(machine, dict):
+        for metric in ("cpu", "ram", "disk"):
+            if not metric_stats_has_value(machine.get(metric)) and metric_stats_has_value(stats.get(metric)):
+                machine[metric] = dict(stats[metric])
 
 
 def normalize_machine(node: dict) -> dict:
@@ -541,6 +615,10 @@ def enrich_records_summary(summary: dict) -> dict:
     bindings_data = load_node_bindings()
     nodes, machines = enrich_nodes_with_komari(payload.get("nodes", []), machines, bindings_data)
     top_nodes, _machines = enrich_nodes_with_komari(payload.get("top_nodes", []), machines, bindings_data)
+    hours = int(payload.get("hours") or 24)
+    health_map = records_health_map([*nodes, *top_nodes], hours) if machines else {}
+    for item in [*nodes, *top_nodes]:
+        attach_records_health(item, health_map)
     payload["nodes"] = nodes
     payload["top_nodes"] = top_nodes
     payload["machines"] = machines
