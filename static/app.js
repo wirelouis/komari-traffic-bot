@@ -56,6 +56,7 @@ const state = {
   sidebarCollapsed: false,
   themeMode: "auto",
   aiAsking: false,
+  aiAutoRefreshed: false,
   system: null,
   routeToken: 0,
   requestToken: 0,
@@ -516,6 +517,7 @@ function markRouteLoaded(route) {
 function showRoute(route) {
   const nextRoute = normalizeRoute(route);
   state.route = nextRoute;
+  state.aiAutoRefreshed = false; // Reset auto-refresh flag on route change
   document.querySelectorAll(".route-view").forEach((view) => {
     view.classList.toggle("hidden", view.dataset.route !== nextRoute);
   });
@@ -1751,7 +1753,21 @@ async function loadAiStatus() {
   setSkel("ai-summary", skelCards(4));
   setSkel("ai-sources", skelRows(3));
   try {
-    renderAiStatus(await api("/api/ai/status"));
+    const status = await api("/api/ai/status");
+    renderAiStatus(status);
+    // Auto-refresh the data pack if it's expired and we haven't already refreshed
+    // this turn (avoid double-refresh on manual refresh button click).
+    if (!status.cache_valid && !state.aiAutoRefreshed) {
+      state.aiAutoRefreshed = true;
+      $("ai-answer").textContent = "数据包已过期,自动刷新中...";
+      try {
+        const refreshed = await postJson("/api/ai/refresh", {});
+        renderAiStatus(refreshed);
+        $("ai-answer").textContent = "数据包已自动刷新。";
+      } catch (error) {
+        $("ai-answer").textContent = `自动刷新失败: ${friendlyError(error.message)}`;
+      }
+    }
   } catch (error) {
     $("ai-sources").innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
   }
@@ -1759,6 +1775,7 @@ async function loadAiStatus() {
 
 async function refreshAiPack() {
   if (state.aiAsking) return;
+  state.aiAutoRefreshed = true; // Mark as refreshed to avoid auto-refresh after manual refresh
   $("ai-answer").textContent = "刷新数据包中...";
   try {
     const data = await postJson("/api/ai/refresh", {});
