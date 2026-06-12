@@ -674,7 +674,7 @@ nav {
 .top-actions,
 .inline-form,
 .ai-box,
-.binding-controls {
+.binding-editor-actions {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -1219,27 +1219,6 @@ nav {
   stroke-linejoin: round;
 }
 
-.binding-panel {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 14px;
-  align-items: center;
-  margin-top: 14px;
-  padding: 14px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--paper-soft);
-}
-
-.binding-controls {
-  flex-wrap: wrap;
-  justify-content: flex-end;
-}
-
-.binding-controls select {
-  width: min(320px, 100%);
-}
-
 .table-wrap {
   width: 100%;
   max-width: 100%;
@@ -1398,24 +1377,50 @@ tbody tr:last-child td {
   font-size: 12px;
 }
 
-.advanced-bind {
+.node-binding-editor {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.8fr) minmax(220px, 1.4fr) auto;
+  gap: 12px;
+  align-items: end;
+  padding-top: 12px;
   border-top: 1px solid var(--line);
-  padding-top: 10px;
 }
 
-.advanced-bind summary {
-  color: var(--accent-dark);
-  cursor: pointer;
-  font-size: 13px;
+.binding-current {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
 }
 
-.advanced-bind-body {
-  display: flex;
+.binding-current span,
+.binding-select span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.binding-current strong {
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-weight: 400;
+}
+
+.binding-current small {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.binding-select {
+  min-width: 0;
+}
+
+.binding-select select {
+  width: 100%;
+}
+
+.binding-editor-actions {
   flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin-top: 8px;
+  justify-content: flex-end;
 }
 
 .inline-form {
@@ -1457,6 +1462,20 @@ tbody tr:last-child td {
 .check-row input {
   width: auto;
   min-height: 0;
+}
+
+.check-row input[type="checkbox"] {
+  accent-color: var(--accent);
+  transition: none;
+}
+
+.check-row input[type="checkbox"]:focus {
+  border-color: var(--line);
+  box-shadow: none;
+}
+
+.check-row input[type="checkbox"]:focus-visible {
+  box-shadow: 0 0 0 3px var(--focus-ring);
 }
 
 .action-band {
@@ -1955,7 +1974,7 @@ tbody tr:last-child td {
   .panel-head,
   .ai-box,
   .detail-main,
-  .binding-panel {
+  .node-binding-editor {
     align-items: flex-start;
     grid-template-columns: 1fr;
     flex-direction: column;
@@ -1973,7 +1992,7 @@ tbody tr:last-child td {
 
   .top-actions,
   .detail-actions,
-  .binding-controls {
+  .binding-editor-actions {
     flex-wrap: wrap;
     justify-content: flex-start;
   }

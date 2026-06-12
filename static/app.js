@@ -52,13 +52,15 @@ const state = {
   machines: [],
   schedules: [],
   selectedNodeUuid: "",
-  bindingSourceId: "",
   sidebarCollapsed: false,
   themeMode: "auto",
   aiAsking: false,
   system: null,
   routeToken: 0,
   requestToken: 0,
+  nodeDetailToken: 0,
+  routeLoaded: {},
+  nodeDetail: null,
   exportSuccessTimer: null,
 };
 
@@ -188,17 +190,38 @@ const prefersReducedMotion = () =>
   Boolean(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
 
 let progressHideTimer = null;
-function startRouteProgress() {
+let progressStartTimer = null;
+function cancelRouteProgress() {
   const bar = $("route-progress");
   if (!bar) return;
   window.clearTimeout(progressHideTimer);
-  bar.classList.remove("done");
-  void bar.offsetWidth; // restart the slide cleanly on rapid navigation
-  bar.classList.add("loading");
+  window.clearTimeout(progressStartTimer);
+  bar.classList.remove("loading", "done");
+}
+function startRouteProgress({ delay = 160 } = {}) {
+  const bar = $("route-progress");
+  if (!bar) return;
+  window.clearTimeout(progressHideTimer);
+  window.clearTimeout(progressStartTimer);
+  const show = () => {
+    bar.classList.remove("done");
+    void bar.offsetWidth; // restart the slide cleanly on rapid navigation
+    bar.classList.add("loading");
+  };
+  if (delay > 0) {
+    progressStartTimer = window.setTimeout(show, delay);
+  } else {
+    show();
+  }
 }
 function stopRouteProgress() {
   const bar = $("route-progress");
   if (!bar) return;
+  window.clearTimeout(progressStartTimer);
+  if (!bar.classList.contains("loading")) {
+    bar.classList.remove("done");
+    return;
+  }
   bar.classList.remove("loading");
   bar.classList.add("done");
   progressHideTimer = window.setTimeout(() => bar.classList.remove("done"), 360);
@@ -480,7 +503,7 @@ async function navigateRoute(target, options = {}) {
   showRoute(nextRoute);
   if (options.scroll !== false) window.scrollTo({ top: 0, behavior: "instant" });
   if (options.load !== false && state.authenticated) {
-    await loadCurrentRoute(Boolean(options.forceOverview));
+    await loadCurrentRoute({ includeOverview: Boolean(options.forceOverview), manual: Boolean(options.manual) });
   }
 }
 
@@ -852,7 +875,20 @@ async function loadTaskRuns(targetId, type = "", limit = DISPLAY_LIMITS.taskRuns
 }
 
 function nodeByUuid(uuid) {
-  return state.nodes.find((node) => String(node.uuid) === String(uuid));
+  const target = String(uuid || "");
+  return state.nodes.find((node) => String(node.uuid) === target)
+    || (String(state.nodeDetail?.uuid || "") === target ? state.nodeDetail : null);
+}
+
+function mergeNodeDetail(node) {
+  if (!node?.uuid) return;
+  const index = state.nodes.findIndex((item) => String(item.uuid) === String(node.uuid));
+  if (index >= 0) {
+    state.nodes[index] = { ...state.nodes[index], ...node };
+  } else {
+    state.nodes.push(node);
+  }
+  state.nodeDetail = node;
 }
 
 function bindingLabel(binding) {
@@ -862,8 +898,89 @@ function bindingLabel(binding) {
   return "未绑定";
 }
 
+function bindingPillClass(binding) {
+  if (!binding || binding.stale || binding.mode === "missing") return "bad";
+  if (binding.mode === "manual") return "warn";
+  return "good";
+}
+
+function machineByUuid(uuid) {
+  const target = String(uuid || "");
+  return state.machines.find((machine) => String(machine.uuid) === target) || null;
+}
+
+function bindingSelectValue(node) {
+  return node?.binding?.mode === "manual" ? String(node.binding.komari_uuid || "") : "";
+}
+
+function machineOptionText(machine) {
+  const note = [machine?.region, machine?.group].filter(Boolean).join(" · ");
+  return `${machine?.name || machine?.uuid || "未命名机器"}${note ? ` · ${note}` : ""} · ${machine?.uuid || ""}`;
+}
+
+function renderBindingOptions(node) {
+  const current = bindingSelectValue(node);
+  const options = [`<option value="">自动绑定（节点 uuid）</option>`];
+  if (current && !machineByUuid(current)) {
+    options.push(`<option value="${escapeHtml(current)}">当前手动绑定不可用 · ${escapeHtml(current)}</option>`);
+  }
+  state.machines.forEach((machine) => {
+    options.push(`<option value="${escapeHtml(machine.uuid)}">${escapeHtml(machineOptionText(machine))}</option>`);
+  });
+  return options.join("");
+}
+
+function applyBindingResult(sourceId, payload = {}) {
+  if (Array.isArray(payload.machines)) state.machines = payload.machines;
+  const node = nodeByUuid(sourceId);
+  if (!node) return null;
+  node.binding = payload.binding || node.binding || {};
+  node.komari = {
+    ...(node.komari || {}),
+    machine: payload.machine || null,
+    web_url: payload.web_url || "",
+  };
+  if (String(state.nodeDetail?.uuid || "") === String(sourceId)) {
+    state.nodeDetail = { ...state.nodeDetail, binding: node.binding, komari: node.komari };
+  }
+  return node;
+}
+
 function nodeWebUrl(node) {
   return node?.komari?.web_url || "";
+}
+
+function defaultNodeDetailText() {
+  return "选择节点查看详情；点击打开按钮进入 Komari 机器。";
+}
+
+function updateNodeSelectionUi(uuid = state.selectedNodeUuid) {
+  const activeUuid = String(uuid || "");
+  document.querySelectorAll("#nodes-table tr[data-uuid]").forEach((row) => {
+    row.classList.toggle("selected", activeUuid && row.dataset.uuid === activeUuid);
+  });
+  document.querySelectorAll('[data-node-action="detail"]').forEach((button) => {
+    const selected = activeUuid && button.dataset.uuid === activeUuid;
+    button.textContent = selected ? "收起" : "详情";
+    button.setAttribute("aria-expanded", String(Boolean(selected)));
+  });
+}
+
+function clearNodeRouteParam() {
+  if (state.route !== "/nodes" || !routeSearch().has("node")) return;
+  const url = new URL(window.location.href);
+  url.searchParams.delete("node");
+  const nextUrl = `${url.pathname}${url.search}`;
+  window.history.replaceState({ route: "/nodes" }, "", nextUrl || "/nodes");
+}
+
+function collapseNodeDetail({ updateUrl = true } = {}) {
+  state.selectedNodeUuid = "";
+  state.nodeDetail = null;
+  state.nodeDetailToken += 1;
+  updateNodeSelectionUi("");
+  $("node-detail").textContent = defaultNodeDetailText();
+  if (updateUrl) clearNodeRouteParam();
 }
 
 async function jumpToNode(uuid) {
@@ -1033,6 +1150,7 @@ function renderNodesTable() {
       const binding = n.binding || {};
       const stale = Boolean(binding.stale);
       const url = nodeWebUrl(n);
+      const selected = String(n.uuid) === String(state.selectedNodeUuid);
       return `
         <tr data-uuid="${escapeHtml(n.uuid)}">
           <td><span class="node-name">${escapeHtml(n.name)}</span><div class="tiny">${escapeHtml(n.uuid)}</div></td>
@@ -1056,13 +1174,14 @@ function renderNodesTable() {
           </td>
           <td>
             <span class="node-actions">
-              <button class="text-btn" data-node-action="detail" data-uuid="${escapeHtml(n.uuid)}">详情</button>
+              <button class="text-btn" data-node-action="detail" data-uuid="${escapeHtml(n.uuid)}" aria-expanded="${selected ? "true" : "false"}">${selected ? "收起" : "详情"}</button>
               <button class="text-btn" data-node-action="open" data-uuid="${escapeHtml(n.uuid)}" ${url ? "" : "disabled"}>打开</button>
             </span>
           </td>
         </tr>`;
     }).join("")
     : `<tr><td colspan="5">暂无节点数据</td></tr>`;
+  updateNodeSelectionUi();
 }
 
 async function loadNodes(hours = state.nodesHours) {
@@ -1080,7 +1199,7 @@ async function loadNodes(hours = state.nodesHours) {
     if (target && nodeByUuid(target)) {
       await selectNode(target, { scroll: Boolean(routeSearch().get("node")) });
     } else {
-      $("node-detail").textContent = "选择节点查看详情；点击打开按钮进入 Komari 机器。";
+      collapseNodeDetail();
     }
   } catch (error) {
     if (token !== state.requestToken) return;
@@ -1089,10 +1208,9 @@ async function loadNodes(hours = state.nodesHours) {
 }
 
 async function selectNode(uuid, options = {}) {
+  if (!nodeByUuid(uuid)) return;
   state.selectedNodeUuid = uuid;
-  document.querySelectorAll("#nodes-table tr[data-uuid]").forEach((row) => {
-    row.classList.toggle("selected", row.dataset.uuid === uuid);
-  });
+  updateNodeSelectionUi(uuid);
   const row = document.querySelector(`#nodes-table tr[data-uuid="${CSS.escape(uuid)}"]`);
   if (options.scroll && row) row.scrollIntoView({ block: "center", behavior: "smooth" });
   await loadNodeDetail(uuid);
@@ -1101,10 +1219,13 @@ async function selectNode(uuid, options = {}) {
 function renderNodeDetail(node) {
   const machine = node.komari?.machine;
   const binding = node.binding || {};
-  const bindingNeedsAttention = binding.mode !== "auto" || Boolean(binding.stale);
   const machineNote = machine
     ? [machine.uuid, machine.region, machine.group].filter(Boolean).join(" · ")
     : (binding.stale ? "绑定目标不存在或 Komari 暂不可达" : "暂无可打开的 Komari 机器");
+  const currentMachineText = machine?.name || (binding.komari_uuid ? binding.komari_uuid : "未绑定");
+  const bindSelectDisabled = state.machines.length ? "" : "disabled";
+  const saveDisabled = state.machines.length ? "" : "disabled";
+  const autoDisabled = binding.mode === "manual" ? "" : "disabled";
   $("node-detail").innerHTML = `
       <div class="detail-drawer">
       <div class="detail-main">
@@ -1113,9 +1234,9 @@ function renderNodeDetail(node) {
           <p class="tiny">${escapeHtml(node.uuid)}</p>
         </div>
         <div class="detail-actions">
-          <span class="pill ${binding.stale ? "bad" : "good"}">${escapeHtml(bindingLabel(binding))}</span>
+          <span class="pill ${bindingPillClass(binding)}">${escapeHtml(bindingLabel(binding))}</span>
           <span class="soft-label">${escapeHtml(hoursLabel(state.nodesHours))}</span>
-          <button class="primary-btn" id="detail-open-node" ${nodeWebUrl(node) ? "" : "disabled"}>打开 Komari 机器</button>
+          <button class="primary-btn" id="detail-open-node" data-detail-action="open" data-uuid="${escapeHtml(node.uuid)}" ${nodeWebUrl(node) ? "" : "disabled"}>打开 Komari 机器</button>
         </div>
       </div>
       <div class="detail-grid">
@@ -1128,24 +1249,38 @@ function renderNodeDetail(node) {
         <div class="detail-item"><span>Disk 平均</span><strong>${metric(node.disk, "avg")}</strong><small>峰值 ${metric(node.disk, "max")}</small></div>
         <div class="detail-item"><span>记录数</span><strong>${escapeHtml(node.record_count || "--")}</strong><small>${escapeHtml(node.from || "")} ${node.to ? `→ ${escapeHtml(node.to)}` : ""}</small></div>
       </div>
-      <details class="advanced-bind" ${bindingNeedsAttention ? "open" : ""}>
-        <summary>${bindingNeedsAttention ? "绑定设置需要确认" : "绑定设置"}</summary>
-        <div class="advanced-bind-body">
-          <span class="tiny">默认按节点 uuid 自动绑定；只有自动匹配不准时再手动覆盖。</span>
-          <button class="ghost-btn" id="detail-bind-node">修改绑定</button>
+      <div class="node-binding-editor">
+        <div class="binding-current">
+          <span>机器绑定</span>
+          <strong>${escapeHtml(currentMachineText)}</strong>
+          <small>${escapeHtml(bindingLabel(binding))}${machineNote ? ` · ${escapeHtml(machineNote)}` : ""}</small>
         </div>
-      </details>
+        <label class="binding-select">
+          <span>绑定到</span>
+          <select id="node-binding-select" data-uuid="${escapeHtml(node.uuid)}" ${bindSelectDisabled}>
+            ${renderBindingOptions(node)}
+          </select>
+        </label>
+        <div class="binding-editor-actions">
+          <button class="primary-btn" data-binding-action="save" data-uuid="${escapeHtml(node.uuid)}" ${saveDisabled}>保存绑定</button>
+          <button class="ghost-btn" data-binding-action="auto" data-uuid="${escapeHtml(node.uuid)}" ${autoDisabled}>恢复自动</button>
+        </div>
+      </div>
     </div>`;
-  $("detail-open-node").addEventListener("click", () => openKomariNode(node.uuid));
-  $("detail-bind-node").addEventListener("click", () => openBindingPanel(node.uuid));
+  const select = $("node-binding-select");
+  if (select) select.value = bindingSelectValue(node);
 }
 
 async function loadNodeDetail(uuid) {
+  const token = ++state.nodeDetailToken;
   $("node-detail").textContent = "加载节点详情...";
   try {
     const data = await api(`/api/nodes/${encodeURIComponent(uuid)}?hours=${state.nodesHours}`);
+    if (token !== state.nodeDetailToken || String(state.selectedNodeUuid) !== String(uuid)) return;
+    mergeNodeDetail(data.node);
     renderNodeDetail(data.node);
   } catch (error) {
+    if (token !== state.nodeDetailToken || String(state.selectedNodeUuid) !== String(uuid)) return;
     $("node-detail").textContent = friendlyError(error.message);
   }
 }
@@ -1161,31 +1296,30 @@ function openKomariNode(uuid) {
   window.open(url, "_blank", "noopener");
 }
 
-function openBindingPanel(uuid) {
+async function saveNodeBinding(uuid, { clear = false, button = null } = {}) {
   const node = nodeByUuid(uuid);
-  if (!node) return;
-  state.bindingSourceId = uuid;
-  $("bind-node-name").textContent = `绑定：${node.name}`;
-  $("bind-node-note").textContent = `当前 ${bindingLabel(node.binding)}，默认使用同 uuid 自动绑定。`;
-  const current = node.binding?.mode === "manual" ? node.binding.komari_uuid : "";
-  $("bind-machine-select").innerHTML = [
-    `<option value="">自动绑定（按节点 uuid）</option>`,
-    ...state.machines.map((machine) => `<option value="${escapeHtml(machine.uuid)}">${escapeHtml(machine.name)} · ${escapeHtml(machine.uuid)}</option>`),
-  ].join("");
-  $("bind-machine-select").value = current;
-  $("node-bind-panel").classList.remove("hidden");
-}
-
-async function saveBinding(clear = false) {
-  if (!state.bindingSourceId) return;
-  const komariUuid = clear ? "" : $("bind-machine-select").value;
-  await postJson("/api/node-bindings", {
-    source_id: state.bindingSourceId,
-    komari_uuid: komariUuid,
-  });
-  updateStatus(clear ? "绑定覆盖已清除" : "绑定已保存", true);
-  await loadNodes(state.nodesHours);
-  openBindingPanel(state.bindingSourceId);
+  if (!node) {
+    updateStatus("节点数据还未同步，请稍后重试", false);
+    return;
+  }
+  const select = $("node-binding-select");
+  const komariUuid = clear ? "" : (select?.value || "");
+  await runAction({
+    button,
+    fn: async () => {
+      const payload = await postJson("/api/node-bindings", {
+        source_id: uuid,
+        komari_uuid: komariUuid,
+      });
+      const updatedNode = applyBindingResult(uuid, payload);
+      if (updatedNode) {
+        renderNodesTable();
+        renderNodeDetail(updatedNode);
+      }
+      updateStatus(clear ? "已恢复自动绑定" : "绑定已保存", true);
+      return payload;
+    },
+  }).catch(() => null);
 }
 
 function renderAlerts(data) {
@@ -1982,21 +2116,36 @@ async function loadSystemPage() {
   }
 }
 
-async function loadCurrentRoute(forceOverview = false) {
+function normalizeLoadOptions(options = {}) {
+  if (typeof options === "boolean") return { includeOverview: options };
+  return options || {};
+}
+
+async function loadCurrentRoute(options = {}) {
+  const loadOptions = normalizeLoadOptions(options);
+  const route = state.route;
   const routeToken = ++state.routeToken;
-  updateStatus("加载中", true);
-  startRouteProgress();
-  showRouteSkeleton(state.route);
+  const hasLoaded = Boolean(state.routeLoaded[route]);
+  const manual = Boolean(loadOptions.manual);
+  const showProgress = manual || !hasLoaded;
+  updateStatus(hasLoaded ? "同步中" : "加载中", true);
+  if (showProgress) {
+    startRouteProgress({ delay: manual ? 80 : 160 });
+  } else {
+    cancelRouteProgress();
+  }
+  if (!hasLoaded) showRouteSkeleton(route);
   try {
-    if (forceOverview || state.route === "/") await loadOverview();
-    if (state.route === "/alert-history") await loadAlertHistory();
-    if (state.route === "/nodes") await loadNodes(state.nodesHours);
-    if (state.route === "/alerts") await loadAlerts();
-    if (state.route === "/telegram") await loadTelegramStatus();
-    if (state.route === "/ai") await loadAiStatus();
-    if (state.route === "/analytics") await loadAnalyticsPage();
-    if (state.route === "/system") await loadSystemPage();
+    if (route === "/" || loadOptions.includeOverview) await loadOverview();
+    if (route === "/alert-history") await loadAlertHistory();
+    if (route === "/nodes") await loadNodes(state.nodesHours);
+    if (route === "/alerts") await loadAlerts();
+    if (route === "/telegram") await loadTelegramStatus();
+    if (route === "/ai") await loadAiStatus();
+    if (route === "/analytics") await loadAnalyticsPage();
+    if (route === "/system") await loadSystemPage();
     if (routeToken !== state.routeToken) return;
+    state.routeLoaded[route] = true;
     updateStatus("已同步", true);
   } catch (error) {
     if (routeToken !== state.routeToken) return;
@@ -2008,7 +2157,7 @@ async function loadCurrentRoute(forceOverview = false) {
   } finally {
     if (routeToken === state.routeToken) {
       clearRouteSkeleton();
-      stopRouteProgress();
+      if (showProgress) stopRouteProgress();
     }
   }
 }
@@ -2019,7 +2168,7 @@ async function checkSession() {
   if (state.authenticated) {
     setVisible("login-view", false);
     setVisible("app-view", true);
-    await loadCurrentRoute(true);
+    await loadCurrentRoute();
   } else {
     showLoginView();
   }
@@ -2044,7 +2193,7 @@ async function doLogin(event) {
     lockAndClearLoginFields();
     setVisible("login-view", false);
     setVisible("app-view", true);
-    await loadCurrentRoute(true);
+    await loadCurrentRoute();
   } catch (error) {
     $("login-error").textContent = friendlyError(error.message);
   } finally {
@@ -2100,9 +2249,31 @@ function bindEvents() {
       return;
     }
 
+    const detailActionBtn = e.target.closest("[data-detail-action]");
+    if (detailActionBtn) {
+      e.stopPropagation();
+      const uuid = detailActionBtn.dataset.uuid;
+      const action = detailActionBtn.dataset.detailAction;
+      if (action === "open") openKomariNode(uuid);
+      return;
+    }
+
+    const bindingActionBtn = e.target.closest("[data-binding-action]");
+    if (bindingActionBtn) {
+      e.stopPropagation();
+      const uuid = bindingActionBtn.dataset.uuid;
+      const action = bindingActionBtn.dataset.bindingAction;
+      saveNodeBinding(uuid, { clear: action === "auto", button: bindingActionBtn });
+      return;
+    }
+
     // Node table row clicks
     const nodeRow = e.target.closest("#nodes-table tr[data-uuid]");
     if (nodeRow && !e.target.closest("button,a,select")) {
+      if (String(state.selectedNodeUuid) === String(nodeRow.dataset.uuid)) {
+        collapseNodeDetail();
+        return;
+      }
       selectNode(nodeRow.dataset.uuid, { scroll: false });
       return;
     }
@@ -2114,7 +2285,13 @@ function bindEvents() {
       const uuid = nodeActionBtn.dataset.uuid;
       const action = nodeActionBtn.dataset.nodeAction;
       if (action === "open") openKomariNode(uuid);
-      if (action === "detail") selectNode(uuid, { scroll: true });
+      if (action === "detail") {
+        if (String(state.selectedNodeUuid) === String(uuid)) {
+          collapseNodeDetail();
+        } else {
+          selectNode(uuid, { scroll: true });
+        }
+      }
       return;
     }
 
@@ -2137,7 +2314,7 @@ function bindEvents() {
     input.addEventListener("focus", unlockLoginFields);
     input.addEventListener("keydown", unlockLoginFields);
   });
-  $("refresh-btn").addEventListener("click", () => loadCurrentRoute(true));
+  $("refresh-btn").addEventListener("click", () => loadCurrentRoute({ manual: true }));
   $("logout-btn").addEventListener("click", async () => {
     await postJson("/api/auth/logout", {}).catch(() => null);
     showLoginView();
@@ -2169,9 +2346,6 @@ function bindEvents() {
       loadNodes(Number(button.dataset.hours));
     });
   });
-  $("save-binding-btn").addEventListener("click", () => saveBinding(false));
-  $("clear-binding-btn").addEventListener("click", () => saveBinding(true));
-  $("close-binding-btn").addEventListener("click", () => $("node-bind-panel").classList.add("hidden"));
   $("check-alerts-btn").addEventListener("click", () => runAlertCheck(false));
   $("notify-alerts-btn").addEventListener("click", () => runAlertCheck(true));
   $("mute-btn").addEventListener("click", () => muteAlerts(Number($("mute-hours").value || 1)));

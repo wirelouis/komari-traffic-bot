@@ -510,7 +510,10 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(save_response.status_code, 200, save_response.text)
         saved = k.load_json(str(self.tmp_path / "node_bindings.json"), {})
         self.assertEqual(saved["bindings"]["traffic-node"]["komari_uuid"], "machine-1")
-        self.assertEqual(save_response.json()["data"]["binding"]["mode"], "manual")
+        save_payload = save_response.json()["data"]
+        self.assertEqual(save_payload["binding"]["mode"], "manual")
+        self.assertEqual(save_payload["machine"]["name"], "Probe One")
+        self.assertEqual(save_payload["web_url"], "https://komari.example/instance/machine-1")
 
         clear_response = self.client.post(
             "/api/node-bindings",
@@ -518,6 +521,8 @@ class WebAppTests(unittest.TestCase):
         )
 
         self.assertEqual(clear_response.status_code, 200, clear_response.text)
+        self.assertTrue(clear_response.json()["data"]["cleared"])
+        self.assertIsNone(clear_response.json()["data"]["machine"])
         cleared = k.load_json(str(self.tmp_path / "node_bindings.json"), {})
         self.assertNotIn("traffic-node", cleared["bindings"])
 

@@ -581,6 +581,22 @@ def resolve_node_binding(source_id: str, machine_index: dict[str, dict], binding
     }
 
 
+def node_binding_payload(source_id: str, bindings: dict, machines: list[dict], machine_error: str = "") -> dict:
+    machine_index = {str(machine.get("uuid")): machine for machine in machines}
+    binding = resolve_node_binding(source_id, machine_index, bindings)
+    machine = machine_index.get(binding.get("komari_uuid", ""))
+    return {
+        "source_id": source_id,
+        "configured": bool(k.KOMARI_BASE_URL),
+        "base_url": k.KOMARI_BASE_URL,
+        "binding": binding,
+        "machine": machine,
+        "web_url": machine.get("web_url", "") if machine else "",
+        "machines": machines,
+        "machine_error": machine_error,
+    }
+
+
 def enrich_nodes_with_komari(nodes: list[dict], machines: list[dict] | None = None, bindings_data: dict | None = None) -> tuple[list[dict], list[dict]]:
     if machines is None:
         try:
@@ -1419,25 +1435,29 @@ async def save_node_binding(req: NodeBindingRequest, _user: str = Depends(curren
         return api_error("source_id is required", status_code=400, code="missing_source_id")
     bindings_data = load_node_bindings()
     bindings = bindings_data.get("bindings", {})
-    if not komari_uuid:
-        bindings.pop(source_id, None)
-        save_node_bindings({"bindings": bindings})
-        return api_ok({"source_id": source_id, "cleared": True})
     machines_result = safe_call(fetch_komari_machines)
-    if not machines_result["ok"]:
-        return api_error(machines_result["error"]["message"], status_code=502, code=machines_result["error"]["code"], data=machines_result)
-    machine_index = {str(machine.get("uuid")): machine for machine in machines_result["data"]}
-    if komari_uuid not in machine_index:
-        return api_error("komari_uuid not found", status_code=404, code="komari_uuid_not_found")
-    bindings[source_id] = {
-        "komari_uuid": komari_uuid,
-        "updated_at": int(time.time()),
-    }
+    machines = machines_result["data"] if machines_result["ok"] else []
+    machine_error = "" if machines_result["ok"] else machines_result["error"]["message"]
+    machine_index = {str(machine.get("uuid")): machine for machine in machines}
+    # Binding to the same uuid is equivalent to the automatic path; keep the
+    # override file focused on real manual exceptions.
+    if komari_uuid == source_id:
+        komari_uuid = ""
+    if komari_uuid:
+        if not machines_result["ok"]:
+            return api_error(machine_error, status_code=502, code=machines_result["error"]["code"], data=machines_result)
+        if komari_uuid not in machine_index:
+            return api_error("komari_uuid not found", status_code=404, code="komari_uuid_not_found")
+        bindings[source_id] = {
+            "komari_uuid": komari_uuid,
+            "updated_at": int(time.time()),
+        }
+    else:
+        bindings.pop(source_id, None)
     save_node_bindings({"bindings": bindings})
-    return api_ok({
-        "source_id": source_id,
-        "binding": resolve_node_binding(source_id, machine_index, bindings),
-    })
+    payload = node_binding_payload(source_id, bindings, machines, machine_error)
+    payload["cleared"] = not bool(komari_uuid)
+    return api_ok(payload)
 
 
 @app.get("/api/nodes/{uuid}")
