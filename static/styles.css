@@ -776,6 +776,15 @@ nav {
 
 .compact-grid {
   grid-template-columns: minmax(0, 1fr) minmax(320px, 0.8fr);
+  align-items: start;
+}
+
+/* A vertical stack of sub-panels inside one grid column (e.g. 当前告警 +
+   检查历史 stacked in the alerts view's left column). */
+.stack-column {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
 }
 
 .mini-grid {

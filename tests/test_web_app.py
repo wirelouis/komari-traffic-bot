@@ -835,6 +835,32 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(runs[0]["summary"], "sent")
         self.assertIn("started_at_text", runs[0])
 
+    def test_alerts_history_returns_alert_runs(self):
+        self.login()
+        k.record_task_run("report", "web:composer", "success", started_at=1000, finished_at=1001, summary="sent")
+        k.record_task_run(
+            "alert",
+            "web:alerts-check",
+            "success",
+            started_at=2000,
+            finished_at=2002,
+            summary="检查完成",
+            metadata={"events": 2, "active_count": 1, "notify": True},
+        )
+
+        response = self.client.get("/api/alerts/history?limit=50")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        runs = response.json()["data"]["runs"]
+        # Only the alert run is returned, not the report run.
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]["type"], "alert")
+        self.assertEqual(runs[0]["summary"], "检查完成")
+        self.assertEqual(runs[0]["metadata"]["events"], 2)
+        self.assertEqual(runs[0]["metadata"]["active_count"], 1)
+        self.assertTrue(runs[0]["metadata"]["notify"])
+        self.assertIn("started_at_text", runs[0])
+
     def test_system_status_is_masked_and_reports_db(self):
         self.login()
         self.patch_attr(k, "APP_VERSION", "test-version")

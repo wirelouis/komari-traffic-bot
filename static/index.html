@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Komari Traffic Console</title>
-  <link rel="icon" type="image/svg+xml" href="/static/komari-traffic-icon.svg?v=20260612-swr-refresh">
-  <link rel="stylesheet" href="/static/styles.css?v=20260612-swr-refresh">
+  <link rel="icon" type="image/svg+xml" href="/static/komari-traffic-icon.svg?v=20260612-alerts-merge">
+  <link rel="stylesheet" href="/static/styles.css?v=20260612-alerts-merge">
 </head>
 <body>
   <div id="route-progress" class="route-progress" aria-hidden="true"></div>
@@ -13,7 +13,7 @@
     <section class="login-panel">
       <div class="login-brand">
         <span class="brand-mark">
-          <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260612-swr-refresh" alt="">
+          <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260612-alerts-merge" alt="">
           <span class="brand-fallback" hidden>K</span>
         </span>
         <div>
@@ -46,7 +46,7 @@
       <div class="sidebar-head">
         <a class="brand" href="/" data-route="/" aria-label="Komari Traffic 总览">
           <span class="brand-mark">
-            <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260612-swr-refresh" alt="">
+            <img class="brand-icon" src="/static/komari-traffic-icon.svg?v=20260612-alerts-merge" alt="">
             <span class="brand-fallback" hidden>K</span>
           </span>
           <span class="brand-copy">
@@ -83,13 +83,6 @@
             <path d="M12 3v1.5"></path>
           </svg>
           <span class="nav-text">告警</span>
-        </a>
-        <a href="/alert-history" class="nav-link" data-route="/alert-history" title="告警历史">
-          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="12" cy="12" r="9"></circle>
-            <polyline points="12 6 12 12 16 14"></polyline>
-          </svg>
-          <span class="nav-text">历史</span>
         </a>
         <a href="/telegram" class="nav-link" data-route="/telegram" title="推送">
           <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -246,14 +239,24 @@
           </div>
           <div id="alerts-summary" class="notice-list"></div>
           <div class="content-grid compact-grid">
-            <article class="sub-panel">
-              <div class="panel-head">
-                <div>
-                  <h3>当前告警</h3>
+            <div class="stack-column">
+              <article class="sub-panel">
+                <div class="panel-head">
+                  <div>
+                    <h3>当前告警</h3>
+                  </div>
                 </div>
-              </div>
-              <div id="alerts-body" class="stacked"></div>
-            </article>
+                <div id="alerts-body" class="stacked"></div>
+              </article>
+              <article class="sub-panel">
+                <div class="panel-head">
+                  <div>
+                    <h3>检查历史</h3>
+                  </div>
+                </div>
+                <div id="alert-history-list" class="stacked"></div>
+              </article>
+            </div>
             <article class="sub-panel">
               <div class="panel-head">
                 <div>
@@ -281,12 +284,6 @@
             </div>
             <div id="alert-result" class="result-box muted" aria-live="polite">暂无结果。</div>
           </div>
-        </section>
-      </section>
-
-      <section class="route-view hidden" data-route="/alert-history">
-        <section id="alert-history" class="panel">
-          <div id="alert-history-list" class="stacked"></div>
         </section>
       </section>
 
@@ -521,6 +518,6 @@
 
   <div id="toast-container"></div>
 
-  <script src="/static/app.js?v=20260612-swr-refresh"></script>
+  <script src="/static/app.js?v=20260612-alerts-merge"></script>
 </body>
 </html>

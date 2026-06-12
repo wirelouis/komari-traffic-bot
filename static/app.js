@@ -24,11 +24,7 @@ const routeConfig = {
   },
   "/alerts": {
     title: "告警控制",
-    subtitle: "查看告警状态、阈值、静默窗口，并执行检查或推送。",
-  },
-  "/alert-history": {
-    title: "告警历史",
-    subtitle: "查看告警检查运行记录、事件数量和推送状态。",
+    subtitle: "查看告警状态、规则、检查历史，并执行检查或推送。",
   },
   "/telegram": {
     title: "推送控制",
@@ -318,6 +314,7 @@ function showRouteSkeleton(route) {
     case "/alerts":
       setSkel("alerts-summary", skelCards(4));
       setSkel("alerts-body", skelRows(2));
+      setSkel("alert-history-list", skelRows(4));
       setSkel("alert-thresholds", skelRows(5));
       break;
     case "/telegram":
@@ -1396,7 +1393,7 @@ function renderAlerts(data) {
     notices.push({
       level: "warn",
       label: "当前有未恢复告警",
-      message: `${activeCount} 个事件仍处于 active 状态。`,
+      message: `${activeCount} 个事件仍未恢复。`,
       fix: "先查看左侧事件，再决定是否静默或推送。",
     });
   }
@@ -1434,7 +1431,7 @@ function renderAlerts(data) {
         <span><strong>${escapeHtml(item.title)}</strong><br><span class="tiny">${escapeHtml(item.type || item.key)}</span></span>
         <span class="tiny">${escapeHtml(item.last_seen_text || "未记录")}</span>
       </div>`).join("")
-    : `<div class="empty-state">当前无 active 告警。</div>`;
+    : `<div class="empty-state">当前没有未恢复的告警。</div>`;
 
   const thresholds = data.thresholds || {};
   const thresholdRows = [
@@ -1452,14 +1449,17 @@ function renderAlerts(data) {
 async function loadAlerts() {
   setSkel("alerts-summary", skelCards(4));
   setSkel("alerts-body", skelRows(2));
+  setSkel("alert-history-list", skelRows(4));
   setSkel("alert-thresholds", skelRows(5));
   try {
-    const [alerts, config] = await Promise.all([
+    const [alerts, config, history] = await Promise.all([
       api("/api/alerts"),
       api("/api/system/config"),
+      api("/api/alerts/history?limit=50").catch(() => ({ runs: [] })),
     ]);
     renderAlerts(alerts);
     renderAlertConfig(config);
+    renderAlertHistory(history);
   } catch (error) {
     $("alerts-body").innerHTML = `<div class="empty-state">${escapeHtml(friendlyError(error.message))}</div>`;
     $("alert-config-form").innerHTML = `<div class="empty-state">${escapeHtml(friendlyError(error.message))}</div>`;
@@ -1485,7 +1485,7 @@ function renderAlertCheckResult(data) {
   const summary = data.summary || {};
   const level = summary.level === "warn" ? "bad" : "good";
   const title = summary.title || (data.events?.length ? "检查完成，发现事件" : "检查完成，暂无异常");
-  const message = summary.message || `当前 active 告警 ${data.active_count || 0} 个。`;
+  const message = summary.message || `当前未恢复告警 ${data.active_count || 0} 个。`;
   const items = summary.items || [];
   $("alert-result").innerHTML = `
     <div class="alert-check-card ${level}">
@@ -1495,7 +1495,7 @@ function renderAlertCheckResult(data) {
       </div>
       <div class="alert-check-meta">
         <span class="pill ${level}">事件 ${escapeHtml(summary.events_count ?? (data.events || []).length)}</span>
-        <span class="pill">Active ${escapeHtml(summary.active_count ?? data.active_count ?? 0)}</span>
+        <span class="pill">未恢复 ${escapeHtml(summary.active_count ?? data.active_count ?? 0)}</span>
         <span class="pill">${summary.notified ? "已推送" : "未推送"}</span>
       </div>
       ${items.length ? `<ul>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : ""}
@@ -1531,7 +1531,7 @@ function renderAlertHistory(data) {
           <strong>${escapeHtml(run.started_at_text || "未记录时间")}</strong>
           <span class="pill ${runStatusClass(run.status)}">${escapeHtml(runStatusText(run.status))}</span>
           <br>
-          <span class="tiny">事件 ${events} 个 · Active ${activeCount} 个 · ${notified}</span>
+          <span class="tiny">事件 ${events} 个 · 未恢复 ${activeCount} 个 · ${notified}</span>
           ${run.summary ? `<br><span class="tiny">${escapeHtml(run.summary)}</span>` : ""}
           ${run.error ? `<br><span class="tiny error-text">${escapeHtml(run.error)}</span>` : ""}
         </span>
@@ -1540,17 +1540,7 @@ function renderAlertHistory(data) {
   }).join("");
 }
 
-async function loadAlertHistory() {
-  setSkel("alert-history-list", skelRows(6));
-  try {
-    const data = await api("/api/alerts/history?limit=50");
-    renderAlertHistory(data);
-  } catch (error) {
-    $("alert-history-list").innerHTML = `<div class="empty-state">${escapeHtml(friendlyError(error.message))}</div>`;
-  }
-}
-
-function scheduleBody() {
+async function scheduleBody() {
   return {
     enabled: $("schedule-enabled").checked,
     scope: $("schedule-scope").value,
@@ -2207,7 +2197,6 @@ async function loadCurrentRoute(options = {}) {
   if (!hasLoaded) showRouteSkeleton(route);
   try {
     if (route === "/" || includeOverview) await loadOverview();
-    if (route === "/alert-history") await loadAlertHistory();
     if (route === "/nodes") await loadNodes(state.nodesHours);
     if (route === "/alerts") await loadAlerts();
     if (route === "/telegram") await loadTelegramStatus();

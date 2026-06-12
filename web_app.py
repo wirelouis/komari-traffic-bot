@@ -1654,24 +1654,10 @@ async def alerts_unmute(_user: str = Depends(current_user)):
 
 @app.get("/api/alerts/history")
 async def alerts_history(limit: int = 50, _user: str = Depends(current_user)):
-    k.init_traffic_db()
-    with k.traffic_db_session() as conn:
-        rows = conn.execute(
-            "SELECT started_at, status, summary, metadata FROM task_runs WHERE task_type = ? ORDER BY started_at DESC LIMIT ?",
-            ("alert", limit),
-        ).fetchall()
-    runs = []
-    for row in rows:
-        metadata = json.loads(row[3]) if row[3] else {}
-        runs.append({
-            "started_at": int(row[0]),
-            "started_at_text": datetime.fromtimestamp(row[0], k.TZ).strftime("%Y-%m-%d %H:%M:%S"),
-            "status": row[1],
-            "summary": row[2],
-            "events": metadata.get("events", 0),
-            "active_count": metadata.get("active_count", 0),
-            "notify": metadata.get("notify", False),
-        })
+    try:
+        runs = [task_run_response(run) for run in k.list_task_runs(limit=limit, task_type="alert")]
+    except Exception as exc:
+        return api_error(str(exc), status_code=500, code=type(exc).__name__)
     return api_ok({"runs": runs})
 
 
