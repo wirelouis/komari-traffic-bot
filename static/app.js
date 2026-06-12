@@ -8,6 +8,11 @@ const DISPLAY_LIMITS = {
   taskRuns: 6,
 };
 
+// Data is treated as fresh for this long. Within the window, navigating back to
+// a route shows its cached content instantly with no network call; past it, the
+// route is revalidated silently in the background (stale-while-revalidate).
+const ROUTE_REVALIDATE_MS = 30000;
+
 const routeConfig = {
   "/": {
     title: "流量分析工作台",
@@ -60,6 +65,7 @@ const state = {
   requestToken: 0,
   nodeDetailToken: 0,
   routeLoaded: {},
+  routeLoadedAt: {},
   nodeDetail: null,
   exportSuccessTimer: null,
 };
@@ -252,12 +258,27 @@ function setMetricValue(el, finalText) {
     el.textContent = text;
     return;
   }
+  // Glide from the value already on screen rather than always from 0. On the
+  // first paint there's nothing to parse, so it counts up from 0 as before; on a
+  // silent refresh it tweens from the current number, so an unchanged or barely
+  // changed metric stays put instead of snapping down to 0 and back.
+  // Only glide from the previous number when its unit is the same; if the suffix
+  // changed (MiB -> GiB) the old number is on a different scale, so start from 0.
+  const prev = el.dataset.metricValue;
+  const sameUnit = el.dataset.metricSuffix === suffix;
+  const start = sameUnit && prev !== undefined && Number.isFinite(parseFloat(prev)) ? parseFloat(prev) : 0;
+  el.dataset.metricValue = String(target);
+  el.dataset.metricSuffix = suffix;
+  if (start === target) {
+    el.textContent = `${target.toFixed(decimals)}${suffix}`;
+    return;
+  }
   const duration = 650;
   const startTime = performance.now();
   function step(now) {
     const t = Math.min(1, (now - startTime) / duration);
     const eased = 1 - Math.pow(1 - t, 3);
-    el.textContent = `${(target * eased).toFixed(decimals)}${suffix}`;
+    el.textContent = `${(start + (target - start) * eased).toFixed(decimals)}${suffix}`;
     if (t < 1) requestAnimationFrame(step);
     else el.textContent = `${target.toFixed(decimals)}${suffix}`;
   }
@@ -471,6 +492,28 @@ function updateTopbar(route) {
   $("topbar-title").textContent = config.title;
   $("topbar-subtitle").textContent = config.subtitle;
   document.title = `${config.title} - Komari Traffic Console`;
+}
+
+// Mark a route-view as having completed its first successful load. The CSS
+// gates the staggered entrance / bar-grow animations behind
+// `.route-view[data-loaded]`, so they play once on first paint and never replay
+// on later background refreshes — that replay was the "闪一下" flash.
+//
+// We set the flag only AFTER the first-paint entrance animations have had time
+// to finish (longest is ~310ms stagger delay + 360ms, plus 680ms bars). Setting
+// it synchronously would hit the still-running first reveal with
+// `animation: none` and cut it off. Reduced-motion users have no animation to
+// wait for, so flag immediately.
+function markRouteLoaded(route) {
+  const view = document.querySelector(`.route-view[data-route="${CSS.escape(route)}"]`);
+  if (!view || view.dataset.loaded) return;
+  if (prefersReducedMotion()) {
+    view.dataset.loaded = "true";
+    return;
+  }
+  window.setTimeout(() => {
+    view.dataset.loaded = "true";
+  }, 850);
 }
 
 function showRoute(route) {
@@ -1184,6 +1227,18 @@ function renderNodesTable() {
   updateNodeSelectionUi();
 }
 
+// Open the node detail named by the ?node= URL param (or keep the current
+// selection), or collapse if nothing matches. Shared by loadNodes and by the
+// fresh-cache navigation path so jumping to a node still works without a refetch.
+async function syncNodeSelectionFromUrl() {
+  const target = routeSearch().get("node") || state.selectedNodeUuid;
+  if (target && nodeByUuid(target)) {
+    await selectNode(target, { scroll: Boolean(routeSearch().get("node")) });
+  } else {
+    collapseNodeDetail();
+  }
+}
+
 async function loadNodes(hours = state.nodesHours) {
   state.nodesHours = hours;
   const token = ++state.requestToken;
@@ -1195,12 +1250,7 @@ async function loadNodes(hours = state.nodesHours) {
     state.nodes = data.nodes || [];
     state.machines = data.machines || state.machines || [];
     renderNodesTable();
-    const target = routeSearch().get("node") || state.selectedNodeUuid;
-    if (target && nodeByUuid(target)) {
-      await selectNode(target, { scroll: Boolean(routeSearch().get("node")) });
-    } else {
-      collapseNodeDetail();
-    }
+    await syncNodeSelectionFromUrl();
   } catch (error) {
     if (token !== state.requestToken) return;
     $("nodes-table").innerHTML = `<tr><td colspan="5">${escapeHtml(friendlyError(error.message))}</td></tr>`;
@@ -2127,6 +2177,26 @@ async function loadCurrentRoute(options = {}) {
   const routeToken = ++state.routeToken;
   const hasLoaded = Boolean(state.routeLoaded[route]);
   const manual = Boolean(loadOptions.manual);
+  const includeOverview = Boolean(loadOptions.includeOverview);
+  const age = Date.now() - (state.routeLoadedAt[route] || 0);
+  const isFresh = hasLoaded && age < ROUTE_REVALIDATE_MS;
+
+  // Stale-while-revalidate: a route that's already loaded and still fresh is
+  // shown instantly from its existing DOM — no network call, no skeleton, no
+  // re-render flash. We only fetch when the data is missing, gone stale, or the
+  // user explicitly refreshed (manual) / asked to include the overview.
+  if (hasLoaded && isFresh && !manual && !includeOverview) {
+    updateStatus("已同步", true);
+    cancelRouteProgress();
+    // The cached DOM is reused as-is, but node selection is driven by the URL
+    // (?node=) and may differ from when the route was last rendered — e.g. a
+    // "jump to node" from the overview. Re-sync it without any refetch.
+    if (route === "/nodes") syncNodeSelectionFromUrl();
+    return;
+  }
+
+  // A background revalidation (loaded before, just stale) stays silent: keep the
+  // cached content on screen and swap it seamlessly when fresh data arrives.
   const showProgress = manual || !hasLoaded;
   updateStatus(hasLoaded ? "同步中" : "加载中", true);
   if (showProgress) {
@@ -2136,7 +2206,7 @@ async function loadCurrentRoute(options = {}) {
   }
   if (!hasLoaded) showRouteSkeleton(route);
   try {
-    if (route === "/" || loadOptions.includeOverview) await loadOverview();
+    if (route === "/" || includeOverview) await loadOverview();
     if (route === "/alert-history") await loadAlertHistory();
     if (route === "/nodes") await loadNodes(state.nodesHours);
     if (route === "/alerts") await loadAlerts();
@@ -2146,6 +2216,8 @@ async function loadCurrentRoute(options = {}) {
     if (route === "/system") await loadSystemPage();
     if (routeToken !== state.routeToken) return;
     state.routeLoaded[route] = true;
+    state.routeLoadedAt[route] = Date.now();
+    markRouteLoaded(route);
     updateStatus("已同步", true);
   } catch (error) {
     if (routeToken !== state.routeToken) return;

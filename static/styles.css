@@ -2178,9 +2178,34 @@ tbody tr:last-child td {
   }
 }
 
-/* --- Whole-view entrance (pure CSS; replays on every route show) --- */
+/* --- Whole-view entrance: a soft fade on every route show. This is a smooth
+   transition over already-correct content, not a flash, so it stays. --- */
 .route-view:not(.hidden) {
   animation: kt-view-enter 300ms var(--ease-out) both;
+}
+
+/* Once a view has completed its first load (JS sets data-loaded), suppress the
+   per-item staggered entrance and bar-grow animations. They're meant as a
+   first-paint reveal; replaying them when the view is re-shown or its content
+   is swapped during a silent background refresh is what caused the "闪一下"
+   flash. The whole-view fade above still plays for a gentle transition. */
+.route-view[data-loaded] :is(
+    .metric-panel,
+    .mini-card,
+    #top-list li,
+    .stacked > *,
+    .traffic-chart-row,
+    .analytics-group-row,
+    .analytics-node-row,
+    .detail-item,
+    .config-group,
+    #nodes-table tr,
+    .traffic-bar,
+    .bar-fill,
+    .bar-fill-line,
+    .analytics-fill
+  ) {
+  animation: none !important;
 }
 
 .login-panel {
