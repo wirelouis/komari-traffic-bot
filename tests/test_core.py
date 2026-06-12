@@ -135,6 +135,7 @@ class CoreTests(unittest.TestCase):
         self.patch_attr("TRAFFIC_SNAPSHOT_RETENTION_DAYS", 45)
         self.patch_attr("AI_PACK_CACHE_TTL_SECONDS", 3600)
         self.patch_attr("TASK_RUN_RETENTION_DAYS", 90)
+        self.patch_attr("NODE_DAILY_USAGE_RETENTION_DAYS", 365)
 
     def test_parse_bytes_value_supports_units(self):
         self.assertEqual(k.parse_bytes_value(""), 0)
@@ -447,6 +448,75 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(status["ok"])
         self.assertEqual(status["quick_check"], "ok")
         self.assertEqual(status["task_runs"], 1)
+
+    def test_prunes_traffic_segments_with_snapshot_retention(self):
+        old_start = 1000
+        old_end = 1300
+        recent_start = old_start + 2 * 86400
+        recent_end = recent_start + 300
+        k.save_traffic_segments([
+            {"sample_from_ts": old_start, "sample_to_ts": old_end, "nodes": {"n1": {"name": "Old", "up": 1, "down": 2}}},
+            {"sample_from_ts": recent_start, "sample_to_ts": recent_end, "nodes": {"n1": {"name": "Recent", "up": 3, "down": 4}}},
+        ])
+
+        deleted = k.prune_traffic_segments(retention_days=1, now_ts=old_start + 2 * 86400)
+
+        self.assertEqual(deleted, 1)
+        rows = k.traffic_segment_rows_between(0, recent_end + 1)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["name"], "Recent")
+
+    def test_prunes_node_daily_usage_by_retention_window(self):
+        k.upsert_daily_usage("2025-01-01", {"old": {"name": "Old", "up": 1, "down": 1}}, source="test")
+        k.upsert_daily_usage("2026-06-01", {"new": {"name": "New", "up": 2, "down": 2}}, source="test")
+
+        result = k.prune_node_daily_usage(retention_days=365, today_value=date(2026, 6, 12))
+
+        self.assertEqual(result["deleted"], 1)
+        self.assertEqual(result["remaining"], 1)
+        self.assertNotIn("old", k.aggregate_daily_usage(date(2025, 1, 1), date(2025, 1, 1)))
+        self.assertIn("new", k.aggregate_daily_usage(date(2026, 6, 1), date(2026, 6, 1)))
+
+    def test_sample_worker_maintenance_due_after_scheduled_hours(self):
+        monday = datetime(2026, 6, 8, 2, 0, tzinfo=k.TZ)
+        sunday_before_vacuum = datetime(2026, 6, 14, 2, 30, tzinfo=k.TZ)
+        sunday_after_vacuum = datetime(2026, 6, 14, 3, 0, tzinfo=k.TZ)
+
+        self.assertEqual(k.sample_worker_maintenance_due(monday, None, None), (True, False))
+        self.assertEqual(k.sample_worker_maintenance_due(monday, monday.date(), None), (False, False))
+        self.assertEqual(k.sample_worker_maintenance_due(sunday_before_vacuum, None, None), (True, False))
+        self.assertEqual(k.sample_worker_maintenance_due(sunday_after_vacuum, None, None), (True, True))
+
+    def test_period_rollups_legacy_table_can_be_dropped(self):
+        k.init_traffic_db()
+        with k.traffic_db_session() as conn:
+            conn.execute(
+                """
+                CREATE TABLE period_rollups (
+                  period_type TEXT NOT NULL,
+                  period_key TEXT NOT NULL,
+                  uuid TEXT NOT NULL,
+                  name TEXT NOT NULL,
+                  up INTEGER NOT NULL DEFAULT 0,
+                  down INTEGER NOT NULL DEFAULT 0,
+                  total INTEGER NOT NULL DEFAULT 0,
+                  updated_at INTEGER NOT NULL,
+                  PRIMARY KEY (period_type, period_key, uuid)
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO period_rollups(period_type, period_key, uuid, name, up, down, total, updated_at) VALUES('daily','2026-06-01','n1','Node',1,2,3,1000)"
+            )
+
+        before = k.period_rollups_table_status()
+        result = k.drop_period_rollups_table()
+        after = k.period_rollups_table_status()
+
+        self.assertTrue(before["exists"])
+        self.assertEqual(before["rows"], 1)
+        self.assertTrue(result["dropped"])
+        self.assertFalse(after["exists"])
 
         class BadConn:
             def execute(self, _sql):

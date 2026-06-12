@@ -80,6 +80,7 @@ class WebAppTests(unittest.TestCase):
         self.patch_attr(k, "TOP_N", 3)
         self.patch_attr(k, "TASK_RUN_RETENTION_DAYS", 90)
         self.patch_attr(k, "TRAFFIC_SNAPSHOT_RETENTION_DAYS", 45)
+        self.patch_attr(k, "NODE_DAILY_USAGE_RETENTION_DAYS", 365)
 
     def login(self):
         response = self.client.post("/api/auth/login", json={"username": "admin", "password": "test-password"})
@@ -931,10 +932,12 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(k.TOP_N, 8)
         self.assertEqual(k.SAMPLE_INTERVAL_SECONDS, 120)
         self.assertEqual(k.TRAFFIC_SNAPSHOT_RETENTION_DAYS, 120)
+        self.assertEqual(k.NODE_DAILY_USAGE_RETENTION_DAYS, 365)
         self.assertFalse(k.ALERTS_ENABLED)
         saved = k.load_json(str(self.tmp_path / "runtime_config.json"), {})
         self.assertEqual(saved["config"]["task_run_retention_days"], 30)
         self.assertEqual(saved["config"]["traffic_snapshot_retention_days"], 120)
+        self.assertEqual(saved["config"]["node_daily_usage_retention_days"], 365)
         self.assertEqual(saved["config"]["alert_total_window_bytes"], 2 * 1024 ** 3)
         runs = k.list_task_runs(limit=10, task_type="maintenance")
         self.assertEqual(runs[0]["source"], "web:config")
@@ -990,6 +993,35 @@ class WebAppTests(unittest.TestCase):
         runs = k.list_task_runs(limit=10, task_type="maintenance")
         self.assertEqual(len(runs), 1)
         self.assertEqual(runs[0]["source"], "web:vacuum")
+
+    def test_system_maintenance_drops_unused_period_rollups(self):
+        self.login()
+        k.init_traffic_db()
+        with k.traffic_db_session() as conn:
+            conn.execute(
+                """
+                CREATE TABLE period_rollups (
+                  period_type TEXT NOT NULL,
+                  period_key TEXT NOT NULL,
+                  uuid TEXT NOT NULL,
+                  name TEXT NOT NULL,
+                  up INTEGER NOT NULL DEFAULT 0,
+                  down INTEGER NOT NULL DEFAULT 0,
+                  total INTEGER NOT NULL DEFAULT 0,
+                  updated_at INTEGER NOT NULL,
+                  PRIMARY KEY (period_type, period_key, uuid)
+                )
+                """
+            )
+
+        response = self.client.post("/api/system/maintenance/drop-period-rollups")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()["data"]
+        self.assertTrue(payload["result"]["dropped"])
+        self.assertFalse(payload["maintenance"]["period_rollups"]["exists"])
+        runs = k.list_task_runs(limit=10, task_type="maintenance")
+        self.assertEqual(runs[0]["source"], "web:drop-period-rollups")
 
     def test_schedule_run_now_writes_task_run_when_core_runs(self):
         self.login()

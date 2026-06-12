@@ -142,6 +142,7 @@ TRAFFIC_SNAPSHOT_RETENTION_DAYS=45
 HISTORY_HOT_DAYS=60
 HISTORY_RETENTION_DAYS=400
 TASK_RUN_RETENTION_DAYS=90
+NODE_DAILY_USAGE_RETENTION_DAYS=365
 
 # 智能告警
 ALERTS_ENABLED=1
@@ -305,7 +306,7 @@ report_schedules（Web 面板应用内推送计划）
 
 当前周期、最近 Nh、小时分布和告警窗口都基于 `traffic.db` 里的连续快照做相邻差分；如果节点计数器回退或重置，该段负差会按 0 处理，不会把当前累计值误算成窗口流量。`TRAFFIC_SNAPSHOT_RETENTION_DAYS` 控制连续快照保留天数，默认 45 天；采样器会在每次采样时把当天数据持续物化进每日汇总（与是否发送报表无关），因此长期周/月/区间分析不依赖保留全部原始快照。
 
-`TASK_RUN_RETENTION_DAYS` 控制 Web 面板任务运行记录的建议保留天数，默认 `90` 天；设为 `0` 表示关闭清理。系统页的「数据维护」只会清理过旧的 `task_runs` 记录或执行 SQLite 压缩，不会删除每日/每周/月度流量汇总。
+`TASK_RUN_RETENTION_DAYS` 控制 Web 面板任务运行记录的建议保留天数，默认 `90` 天；设为 `0` 表示关闭清理。`NODE_DAILY_USAGE_RETENTION_DAYS` 控制每日节点汇总保留天数，默认 `365` 天；设为 `0` 表示关闭清理。系统页的「数据维护」可手动清理旧运行记录、删除未使用的 `period_rollups` 遗留表或执行 SQLite 压缩。
 
 ## 🚨 智能告警
 

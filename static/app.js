@@ -1865,7 +1865,11 @@ function renderSystemStatus(data) {
 function renderMaintenanceStatus(status) {
   const ok = status.ok !== false;
   const oldRuns = Number(status.old_task_runs || 0);
-  const hasCleanup = ok && oldRuns > 0;
+  const oldSegments = Number(status.old_traffic_segments || 0);
+  const oldDaily = Number(status.old_daily_usage || 0);
+  const periodRollups = status.period_rollups || {};
+  const hasPeriodRollups = Boolean(periodRollups.exists);
+  const hasCleanup = ok && (oldRuns > 0 || oldSegments > 0 || oldDaily > 0 || hasPeriodRollups);
   setInlineBadge("maintenance-status-pill", !ok ? "异常" : (hasCleanup ? "可清理" : ""), !ok ? "bad" : "warn");
   if (!ok) {
     $("maintenance-summary").innerHTML = [
@@ -1875,8 +1879,10 @@ function renderMaintenanceStatus(status) {
   }
   if (hasCleanup) {
     $("maintenance-summary").innerHTML = [
-      miniCard("运行记录", `${oldRuns} 条偏旧`, "可点击下方按钮清理", "warn"),
-      miniCard("保留策略", status.retention_enabled ? `${status.retention_days || 0} 天` : "关闭", "只清理任务运行记录"),
+      miniCard("运行记录", `${oldRuns} 条偏旧`, `保留 ${status.retention_enabled ? `${status.retention_days || 0} 天` : "关闭"}`, oldRuns ? "warn" : ""),
+      miniCard("采样分段", `${oldSegments} 条偏旧`, `保留 ${status.snapshot_retention_days || 0} 天`, oldSegments ? "warn" : ""),
+      miniCard("每日汇总", `${oldDaily} 条偏旧`, `保留 ${status.daily_retention_days || 0} 天`, oldDaily ? "warn" : ""),
+      miniCard("遗留表", hasPeriodRollups ? `${periodRollups.rows || 0} 行` : "不存在", "period_rollups 未被业务使用", hasPeriodRollups ? "warn" : ""),
     ].join("");
     return;
   }
@@ -2015,6 +2021,7 @@ async function saveAlertConfig() {
 
 function setMaintenanceBusy(busy) {
   $("prune-task-runs-btn").disabled = busy;
+  $("drop-period-rollups-btn").disabled = busy;
   $("vacuum-db-btn").disabled = busy;
 }
 
@@ -2040,6 +2047,21 @@ async function vacuumDb() {
     const data = await postJson("/api/system/maintenance/vacuum", {});
     renderMaintenanceStatus(data.maintenance || {});
     $("maintenance-result").textContent = "数据维护完成，长期统计库状态正常。";
+    await loadTaskRuns("system-task-runs", $("task-run-filter").value, DISPLAY_LIMITS.taskRuns);
+  } catch (error) {
+    $("maintenance-result").textContent = friendlyError(error.message);
+  } finally {
+    setMaintenanceBusy(false);
+  }
+}
+
+async function dropPeriodRollups() {
+  $("maintenance-result").textContent = "删除未使用表中...";
+  setMaintenanceBusy(true);
+  try {
+    const data = await postJson("/api/system/maintenance/drop-period-rollups", {});
+    renderMaintenanceStatus(data.maintenance || {});
+    $("maintenance-result").textContent = data.result?.dropped ? "已删除未使用的 period_rollups 表。" : "period_rollups 表不存在，无需删除。";
     await loadTaskRuns("system-task-runs", $("task-run-filter").value, DISPLAY_LIMITS.taskRuns);
   } catch (error) {
     $("maintenance-result").textContent = friendlyError(error.message);
@@ -2492,6 +2514,7 @@ function bindEvents() {
   $("save-config-btn").addEventListener("click", saveSystemConfig);
   $("save-alert-config-btn").addEventListener("click", saveAlertConfig);
   $("prune-task-runs-btn").addEventListener("click", pruneTaskRuns);
+  $("drop-period-rollups-btn").addEventListener("click", dropPeriodRollups);
   $("vacuum-db-btn").addEventListener("click", vacuumDb);
   resetScheduleForm();
   setDefaultRangeDates();

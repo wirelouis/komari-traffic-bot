@@ -1626,6 +1626,33 @@ async def system_vacuum(_user: str = Depends(current_user)):
     return api_ok({"maintenance": build_maintenance_status(), "result": result})
 
 
+@app.post("/api/system/maintenance/drop-period-rollups")
+async def system_drop_period_rollups(_user: str = Depends(current_user)):
+    started = time.time()
+    try:
+        result = k.drop_period_rollups_table()
+        k.safe_record_task_run(
+            "maintenance",
+            "web:drop-period-rollups",
+            "success",
+            started_at=started,
+            finished_at=time.time(),
+            summary="未使用 period_rollups 表已删除" if result.get("dropped") else "period_rollups 表不存在",
+            metadata=result,
+        )
+    except Exception as exc:
+        k.safe_record_task_run(
+            "maintenance",
+            "web:drop-period-rollups",
+            "failed",
+            started_at=started,
+            finished_at=time.time(),
+            error=str(exc),
+        )
+        return api_error(str(exc), status_code=500, code=type(exc).__name__)
+    return api_ok({"maintenance": build_maintenance_status(), "result": result})
+
+
 @app.get("/api/alerts")
 async def alerts(_user: str = Depends(current_user)):
     return api_ok(build_alert_status_struct())

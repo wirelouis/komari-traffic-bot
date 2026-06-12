@@ -189,6 +189,7 @@ GIT_COMMIT = os.environ.get("GIT_COMMIT", "").strip()
 BUILD_DATE = os.environ.get("BUILD_DATE", "").strip()
 IMAGE_SOURCE = os.environ.get("IMAGE_SOURCE", "ghcr.io/wirelouis/komari-traffic-hub").strip()
 TASK_RUN_RETENTION_DAYS = max(0, int(os.environ.get("TASK_RUN_RETENTION_DAYS", "90")))
+NODE_DAILY_USAGE_RETENTION_DAYS = max(0, int(os.environ.get("NODE_DAILY_USAGE_RETENTION_DAYS", "365")))
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 LOG_FILE = os.environ.get("LOG_FILE", "").strip()
@@ -519,6 +520,7 @@ def validate_runtime_config(payload: dict) -> dict:
         "traffic_snapshot_retention_days": _parse_editable_int(payload, "traffic_snapshot_retention_days", TRAFFIC_SNAPSHOT_RETENTION_DAYS, 1, 3650),
         "ai_pack_cache_ttl_seconds": _parse_editable_int(payload, "ai_pack_cache_ttl_seconds", AI_PACK_CACHE_TTL_SECONDS, 0, 86400),
         "task_run_retention_days": _parse_editable_int(payload, "task_run_retention_days", TASK_RUN_RETENTION_DAYS, 0, 3650),
+        "node_daily_usage_retention_days": _parse_editable_int(payload, "node_daily_usage_retention_days", NODE_DAILY_USAGE_RETENTION_DAYS, 0, 3650),
         "alerts_enabled": _parse_editable_bool(payload, "alerts_enabled", ALERTS_ENABLED),
         "alert_recovery_notify": _parse_editable_bool(payload, "alert_recovery_notify", ALERT_RECOVERY_NOTIFY),
         "alert_cooldown_seconds": _parse_editable_int(payload, "alert_cooldown_seconds", ALERT_COOLDOWN_SECONDS, 0, 86400),
@@ -534,7 +536,7 @@ def validate_runtime_config(payload: dict) -> dict:
 
 def apply_runtime_config(config: dict) -> dict:
     global BOT_INSTANCE_NAME, TOP_N, TIMEOUT, KOMARI_FETCH_WORKERS, SAMPLE_INTERVAL_SECONDS, SAMPLE_RETENTION_HOURS
-    global TRAFFIC_SNAPSHOT_RETENTION_DAYS, AI_PACK_CACHE_TTL_SECONDS, TASK_RUN_RETENTION_DAYS
+    global TRAFFIC_SNAPSHOT_RETENTION_DAYS, AI_PACK_CACHE_TTL_SECONDS, TASK_RUN_RETENTION_DAYS, NODE_DAILY_USAGE_RETENTION_DAYS
     global KOMARI_BASE_URL, TELEGRAM_CHAT_ID, TELEGRAM_ALERT_CHAT_ID, AI_API_BASE, AI_MODEL
     global ALERTS_ENABLED, ALERT_RECOVERY_NOTIFY, ALERT_COOLDOWN_SECONDS, ALERT_WINDOW_MINUTES, ALERT_NODE_MISSING_SAMPLES
     global ALERT_SILENCE_WINDOWS, ALERT_TOTAL_WINDOW_BYTES, ALERT_NODE_WINDOW_BYTES, ALERT_DAILY_TOTAL_BYTES, ALERT_DAILY_NODE_BYTES
@@ -553,6 +555,7 @@ def apply_runtime_config(config: dict) -> dict:
     TRAFFIC_SNAPSHOT_RETENTION_DAYS = clean["traffic_snapshot_retention_days"]
     AI_PACK_CACHE_TTL_SECONDS = clean["ai_pack_cache_ttl_seconds"]
     TASK_RUN_RETENTION_DAYS = clean["task_run_retention_days"]
+    NODE_DAILY_USAGE_RETENTION_DAYS = clean["node_daily_usage_retention_days"]
     ALERTS_ENABLED = clean["alerts_enabled"]
     ALERT_RECOVERY_NOTIFY = clean["alert_recovery_notify"]
     ALERT_COOLDOWN_SECONDS = clean["alert_cooldown_seconds"]
@@ -598,6 +601,7 @@ def current_runtime_config() -> dict:
         "traffic_snapshot_retention_days": stored_config.get("traffic_snapshot_retention_days", TRAFFIC_SNAPSHOT_RETENTION_DAYS),
         "ai_pack_cache_ttl_seconds": stored_config.get("ai_pack_cache_ttl_seconds", AI_PACK_CACHE_TTL_SECONDS),
         "task_run_retention_days": stored_config.get("task_run_retention_days", TASK_RUN_RETENTION_DAYS),
+        "node_daily_usage_retention_days": stored_config.get("node_daily_usage_retention_days", NODE_DAILY_USAGE_RETENTION_DAYS),
         "alerts_enabled": stored_config.get("alerts_enabled", ALERTS_ENABLED),
         "alert_recovery_notify": stored_config.get("alert_recovery_notify", ALERT_RECOVERY_NOTIFY),
         "alert_cooldown_seconds": stored_config.get("alert_cooldown_seconds", ALERT_COOLDOWN_SECONDS),
@@ -635,6 +639,7 @@ def current_runtime_config() -> dict:
             field("traffic_snapshot_retention_days", "连续快照保留天数", "number", "用于最近窗口、小时分布和当前周期统计。", min=1, max=3650, group="基础"),
             field("ai_pack_cache_ttl_seconds", "AI 缓存 TTL（秒）", "number", "0 表示每次实时生成。", min=0, max=86400, group="基础"),
             field("task_run_retention_days", "任务记录保留天数", "number", "0 表示关闭清理。", min=0, max=3650, group="基础"),
+            field("node_daily_usage_retention_days", "每日汇总保留天数", "number", "0 表示关闭清理；默认保留 365 天。", min=0, max=3650, group="基础"),
             field("alerts_enabled", "启用告警", "boolean", "关闭后不会产生新的告警事件。", group="告警"),
             field("alert_recovery_notify", "恢复后通知", "boolean", "异常恢复时是否发送恢复提示。", group="告警"),
             field("alert_cooldown_seconds", "重复提醒冷却（秒）", "number", "同一个异常多久后才再次提醒。", min=0, max=86400, group="告警"),
@@ -713,21 +718,6 @@ def init_traffic_db():
               skipped TEXT NOT NULL DEFAULT '[]',
               updated_at INTEGER NOT NULL,
               PRIMARY KEY (day, uuid)
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS period_rollups (
-              period_type TEXT NOT NULL,
-              period_key TEXT NOT NULL,
-              uuid TEXT NOT NULL,
-              name TEXT NOT NULL,
-              up INTEGER NOT NULL DEFAULT 0,
-              down INTEGER NOT NULL DEFAULT 0,
-              total INTEGER NOT NULL DEFAULT 0,
-              updated_at INTEGER NOT NULL,
-              PRIMARY KEY (period_type, period_key, uuid)
             )
             """
         )
@@ -987,9 +977,38 @@ def traffic_db_table_counts() -> dict:
     counts = {}
     with traffic_db_session() as conn:
         for table in tables:
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            if not exists:
+                counts[table] = 0
+                continue
             row = conn.execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()
             counts[table] = int(row["c"] or 0)
     return counts
+
+
+def period_rollups_table_status() -> dict:
+    init_traffic_db()
+    with traffic_db_session() as conn:
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='period_rollups'"
+        ).fetchone() is not None
+        rows = 0
+        if exists:
+            row = conn.execute("SELECT COUNT(*) AS c FROM period_rollups").fetchone()
+            rows = int(row["c"] or 0)
+    return {"exists": exists, "rows": rows, "unused": True}
+
+
+def drop_period_rollups_table() -> dict:
+    init_traffic_db()
+    before = period_rollups_table_status()
+    with traffic_db_session() as conn:
+        conn.execute("DROP TABLE IF EXISTS period_rollups")
+    after = period_rollups_table_status()
+    return {"before": before, "after": after, "dropped": before.get("exists", False)}
 
 
 def traffic_db_healthcheck() -> dict:
@@ -1037,13 +1056,32 @@ def traffic_db_maintenance_status(retention_days: int | None = None, now_ts: int
     cutoff = now_value - days * 86400 if days else 0
     size = os.path.getsize(TRAFFIC_DB_PATH) if os.path.exists(TRAFFIC_DB_PATH) else 0
     counts = traffic_db_table_counts()
+    daily_days = NODE_DAILY_USAGE_RETENTION_DAYS
+    daily_cutoff = (datetime.fromtimestamp(now_value, TZ).date() - timedelta(days=daily_days)).strftime("%Y-%m-%d") if daily_days else ""
+    segment_cutoff = now_value - TRAFFIC_SNAPSHOT_RETENTION_DAYS * 86400
+    period_rollups = period_rollups_table_status()
+    with traffic_db_session() as conn:
+        old_segments = conn.execute(
+            "SELECT COUNT(*) AS c FROM traffic_segments WHERE sample_from_ts < ?",
+            (segment_cutoff,),
+        ).fetchone()
+        old_daily = 0
+        if daily_cutoff:
+            row = conn.execute("SELECT COUNT(*) AS c FROM node_daily_usage WHERE day < ?", (daily_cutoff,)).fetchone()
+            old_daily = int(row["c"] or 0)
     return {
         "retention_days": days,
         "retention_enabled": days > 0,
+        "snapshot_retention_days": TRAFFIC_SNAPSHOT_RETENTION_DAYS,
+        "daily_retention_days": daily_days,
         "cutoff": cutoff,
         "cutoff_text": datetime.fromtimestamp(cutoff, TZ).strftime("%Y-%m-%d %H:%M:%S %Z") if cutoff else "",
+        "daily_cutoff_day": daily_cutoff,
         "old_task_runs": count_task_runs(before_ts=cutoff) if cutoff else 0,
+        "old_traffic_segments": int(old_segments["c"] or 0),
+        "old_daily_usage": old_daily,
         "task_runs": counts.get("task_runs", 0),
+        "period_rollups": period_rollups,
         "table_counts": counts,
         "db_size": size,
         "db_size_human": human_bytes(size),
@@ -1158,6 +1196,17 @@ def prune_traffic_snapshots(now_ts: int | float | None = None, retention_days: i
     cutoff = int(now_ts if now_ts is not None else time.time()) - days * 86400
     with traffic_db_session() as conn:
         cur = conn.execute("DELETE FROM traffic_snapshots WHERE ts < ?", (cutoff,))
+        return int(cur.rowcount or 0)
+
+
+def prune_traffic_segments(retention_days: int | None = None, now_ts: int | float | None = None) -> int:
+    init_traffic_db()
+    days = TRAFFIC_SNAPSHOT_RETENTION_DAYS if retention_days is None else int(retention_days)
+    if days <= 0:
+        return 0
+    cutoff = int(now_ts if now_ts is not None else time.time()) - days * 86400
+    with traffic_db_session() as conn:
+        cur = conn.execute("DELETE FROM traffic_segments WHERE sample_from_ts < ?", (cutoff,))
         return int(cur.rowcount or 0)
 
 
@@ -2001,6 +2050,36 @@ def traffic_db_has_day(day_str: str) -> bool:
     with traffic_db_session() as conn:
         row = conn.execute("SELECT 1 FROM node_daily_usage WHERE day = ? LIMIT 1", (day_str,)).fetchone()
     return row is not None
+
+
+def prune_node_daily_usage(retention_days: int | None = None, today_value: date | None = None) -> dict:
+    init_traffic_db()
+    days = NODE_DAILY_USAGE_RETENTION_DAYS if retention_days is None else int(retention_days)
+    if days < 0:
+        raise RuntimeError("retention_days must be >= 0")
+    if days == 0:
+        with traffic_db_session() as conn:
+            row = conn.execute("SELECT COUNT(*) AS c FROM node_daily_usage").fetchone()
+        return {
+            "enabled": False,
+            "retention_days": 0,
+            "cutoff_day": "",
+            "deleted": 0,
+            "remaining": int(row["c"] or 0),
+        }
+    cutoff_day = (today_value or today_date()) - timedelta(days=days)
+    cutoff_text = cutoff_day.strftime("%Y-%m-%d")
+    with traffic_db_session() as conn:
+        cur = conn.execute("DELETE FROM node_daily_usage WHERE day < ?", (cutoff_text,))
+        deleted = int(cur.rowcount or 0)
+        row = conn.execute("SELECT COUNT(*) AS c FROM node_daily_usage").fetchone()
+    return {
+        "enabled": True,
+        "retention_days": days,
+        "cutoff_day": cutoff_text,
+        "deleted": deleted,
+        "remaining": int(row["c"] or 0),
+    }
 
 
 def aggregate_daily_usage(from_day: date, to_day: date) -> dict:
@@ -3807,7 +3886,15 @@ def take_sample_if_due(force: bool = False, record: bool = True, source: str = "
 
         save_traffic_snapshot(now_ts, nodes_map, skipped)
         segment_result = materialize_latest_traffic_segment(now_ts)
-        prune_traffic_snapshots(now_ts)
+        cleanup_result = {}
+        try:
+            cleanup_result["snapshots_deleted"] = prune_traffic_snapshots(now_ts)
+        except Exception:
+            logging.exception("failed to prune traffic_snapshots")
+        try:
+            cleanup_result["segments_deleted"] = prune_traffic_segments(TRAFFIC_SNAPSHOT_RETENTION_DAYS, now_ts)
+        except Exception:
+            logging.exception("failed to prune traffic_segments")
 
         samples.append({"ts": now_ts, "nodes": nodes_map, "skipped": skipped})
         samples = prune_samples(samples, now_ts)
@@ -3820,7 +3907,7 @@ def take_sample_if_due(force: bool = False, record: bool = True, source: str = "
                 started_at=started,
                 finished_at=time.time(),
                 summary=f"采样 {len(nodes_map)} 个节点，跳过 {len(skipped)} 个",
-                metadata={"nodes": len(nodes_map), "skipped": skipped, "force": bool(force), "segments": segment_result},
+                metadata={"nodes": len(nodes_map), "skipped": skipped, "force": bool(force), "segments": segment_result, "cleanup": cleanup_result},
             )
     except Exception as exc:
         if record:
@@ -3837,12 +3924,96 @@ def take_sample_if_due(force: bool = False, record: bool = True, source: str = "
         raise
 
 
+def sample_worker_maintenance_due(
+    current: datetime | None = None,
+    last_prune_date: date | None = None,
+    last_vacuum_date: date | None = None,
+) -> tuple[bool, bool]:
+    now_value = current or now_dt()
+    today_value = now_value.date()
+    prune_due = now_value.hour >= 2 and last_prune_date != today_value
+    vacuum_due = now_value.weekday() == 6 and now_value.hour >= 3 and last_vacuum_date != today_value
+    return prune_due, vacuum_due
+
+
+def run_sample_worker_daily_prune(now_value: datetime | None = None) -> dict:
+    current = now_value or now_dt()
+    started = time.time()
+    result = {"task_runs": None, "node_daily_usage": None}
+    try:
+        result["task_runs"] = prune_task_runs()
+    except Exception as exc:
+        logging.exception("sample worker task_runs prune failed")
+        result["task_runs"] = {"ok": False, "error": str(exc)}
+    try:
+        result["node_daily_usage"] = prune_node_daily_usage(today_value=current.date())
+    except Exception as exc:
+        logging.exception("sample worker node_daily_usage prune failed")
+        result["node_daily_usage"] = {"ok": False, "error": str(exc)}
+    ok = not any(isinstance(item, dict) and item.get("ok") is False for item in result.values())
+    safe_record_task_run(
+        "maintenance",
+        "sample-worker:daily-prune",
+        "success" if ok else "failed",
+        started_at=started,
+        finished_at=time.time(),
+        summary=(
+            f"task_runs 清理 {((result.get('task_runs') or {}).get('deleted') or 0)} 条；"
+            f"daily_usage 清理 {((result.get('node_daily_usage') or {}).get('deleted') or 0)} 条"
+        ),
+        error="; ".join(str(item.get("error")) for item in result.values() if isinstance(item, dict) and item.get("ok") is False),
+        metadata=result,
+    )
+    return result
+
+
+def run_sample_worker_weekly_vacuum() -> dict:
+    started = time.time()
+    try:
+        result = vacuum_traffic_db()
+        safe_record_task_run(
+            "maintenance",
+            "sample-worker:weekly-vacuum",
+            "success",
+            started_at=started,
+            finished_at=time.time(),
+            summary=f"SQLite 已压缩，释放 {result.get('saved_human', '0 B')}",
+            metadata={
+                "before_size": result.get("before_size"),
+                "after_size": result.get("after_size"),
+                "saved_bytes": result.get("saved_bytes"),
+            },
+        )
+        return result
+    except Exception as exc:
+        logging.exception("sample worker weekly vacuum failed")
+        safe_record_task_run(
+            "maintenance",
+            "sample-worker:weekly-vacuum",
+            "failed",
+            started_at=started,
+            finished_at=time.time(),
+            error=str(exc),
+        )
+        return {"ok": False, "error": str(exc)}
+
+
 def sample_worker_loop():
     logging.info("sample worker started, interval=%ss", SAMPLE_INTERVAL_SECONDS)
+    last_prune_date = None
+    last_vacuum_date = None
     while not SAMPLE_STOP_EVENT.is_set():
         try:
             take_sample_if_due(force=False)
             run_alert_check(dry_run=False, notify=telegram_configured(), force_sample=False)
+            now_value = now_dt()
+            prune_due, vacuum_due = sample_worker_maintenance_due(now_value, last_prune_date, last_vacuum_date)
+            if prune_due:
+                run_sample_worker_daily_prune(now_value)
+                last_prune_date = now_value.date()
+            if vacuum_due:
+                run_sample_worker_weekly_vacuum()
+                last_vacuum_date = now_value.date()
         except Exception:
             logging.exception("sample worker error")
         SAMPLE_STOP_EVENT.wait(timeout=max(1, SAMPLE_INTERVAL_SECONDS))
