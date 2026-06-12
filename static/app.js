@@ -7,6 +7,7 @@ const DISPLAY_LIMITS = {
   analyticsGroups: 18,
   taskRuns: 6,
 };
+const ALERT_HISTORY_PAGE_LIMIT = 10;
 
 // Data is treated as fresh for this long. Within the window, navigating back to
 // a route shows its cached content instantly with no network call; past it, the
@@ -64,6 +65,8 @@ const state = {
   routeLoaded: {},
   routeLoadedAt: {},
   nodeDetail: null,
+  taskRuns: {},
+  alertHistory: { runs: [], offset: 0, limit: 10, totalCount: 0 },
   exportSuccessTimer: null,
 };
 
@@ -890,11 +893,49 @@ function taskRunNote(run) {
   return "任务状态未记录完整。";
 }
 
-function renderTaskRuns(targetId, runs) {
+function loadedCountLabel(loaded, total) {
+  return `已加载 ${Number(loaded || 0)} / 总计 ${Number(total || 0)} 条`;
+}
+
+function normalizeTaskRunsPage(page, fallbackLimit = DISPLAY_LIMITS.taskRuns, fallbackType = "") {
+  if (Array.isArray(page)) {
+    return {
+      runs: page,
+      limit: fallbackLimit,
+      offset: 0,
+      total_count: page.length,
+      type: fallbackType,
+    };
+  }
+  return {
+    runs: Array.isArray(page?.runs) ? page.runs : [],
+    limit: Number(page?.limit || fallbackLimit),
+    offset: Number(page?.offset || 0),
+    total_count: Number(page?.total_count ?? page?.runs?.length ?? 0),
+    type: page?.type ?? fallbackType,
+  };
+}
+
+function renderTaskRuns(targetId, page, options = {}) {
   const target = $(targetId);
-  const rawItems = runs || [];
-  const items = rawItems.slice(0, DISPLAY_LIMITS.taskRuns);
-  const hidden = Math.max(0, rawItems.length - items.length);
+  const payload = normalizeTaskRunsPage(page, DISPLAY_LIMITS.taskRuns, options.type || "");
+  const append = Boolean(options.append);
+  const previous = append ? (state.taskRuns[targetId]?.runs || []) : [];
+  const items = previous.concat(payload.runs);
+  const totalCount = Math.max(payload.total_count, items.length);
+  state.taskRuns[targetId] = {
+    runs: items,
+    limit: payload.limit,
+    offset: items.length,
+    totalCount,
+    type: payload.type || options.type || "",
+  };
+  const more = items.length < totalCount;
+  const footer = `
+    <div class="pagination-row">
+      <span class="pagination-info">${loadedCountLabel(items.length, totalCount)}</span>
+      ${more ? `<button class="text-btn" type="button" data-task-runs-more="${escapeHtml(targetId)}">加载更多</button>` : ""}
+    </div>`;
   target.innerHTML = items.length
     ? `${items.map((run) => `
       <div class="task-run-row ${run.status === "failed" ? "failed" : ""}">
@@ -904,16 +945,19 @@ function renderTaskRuns(targetId, runs) {
           <span class="tiny">${escapeHtml(run.started_at_text || "未记录时间")} · 耗时 ${escapeHtml(run.duration_text || "--")}</span>
         </span>
         <span class="pill ${runStatusClass(run.status)}">${escapeHtml(runStatusText(run.status))}</span>
-      </div>`).join("")}${hidden ? `<div class="compact-note">还有 ${hidden} 条较早记录未展开。</div>` : ""}`
-    : `<div class="empty-state">最近没有需要展示的任务记录。</div>`;
+      </div>`).join("")}${footer}`
+    : `<div class="empty-state">最近没有需要展示的任务记录。</div>${footer}`;
 }
 
-async function loadTaskRuns(targetId, type = "", limit = DISPLAY_LIMITS.taskRuns) {
-  const query = new URLSearchParams({ limit: String(limit) });
+async function loadTaskRuns(targetId, type = "", limit = DISPLAY_LIMITS.taskRuns, options = {}) {
+  const append = Boolean(options.append);
+  const existing = state.taskRuns[targetId] || {};
+  const offset = append ? Number(existing.offset || existing.runs?.length || 0) : 0;
+  const query = new URLSearchParams({ limit: String(limit), offset: String(offset) });
   if (type) query.set("type", type);
   const data = await api(`/api/tasks/runs?${query.toString()}`);
-  renderTaskRuns(targetId, data.runs || []);
-  return data.runs || [];
+  renderTaskRuns(targetId, data, { append, type });
+  return state.taskRuns[targetId]?.runs || [];
 }
 
 function nodeByUuid(uuid) {
@@ -1464,11 +1508,11 @@ async function loadAlerts() {
     const [alerts, config, history] = await Promise.all([
       api("/api/alerts"),
       api("/api/system/config"),
-      api("/api/alerts/history?limit=50").catch(() => ({ runs: [] })),
+      fetchAlertHistoryPage(0).catch(() => ({ runs: [], limit: ALERT_HISTORY_PAGE_LIMIT, offset: 0, total_count: 0 })),
     ]);
     renderAlerts(alerts);
     renderAlertConfig(config);
-    renderAlertHistory(history);
+    renderAlertHistory(history, { append: false });
   } catch (error) {
     $("alerts-body").innerHTML = `<div class="empty-state">${escapeHtml(friendlyError(error.message))}</div>`;
     $("alert-config-form").innerHTML = `<div class="empty-state">${escapeHtml(friendlyError(error.message))}</div>`;
@@ -1522,23 +1566,43 @@ async function muteAlerts(hours) {
   }
 }
 
-function renderAlertHistory(data) {
-  const runs = data.runs || [];
+async function fetchAlertHistoryPage(offset = 0) {
+  const query = new URLSearchParams({
+    limit: String(ALERT_HISTORY_PAGE_LIMIT),
+    offset: String(Math.max(0, Number(offset || 0))),
+  });
+  return api(`/api/alerts/history?${query.toString()}`);
+}
+
+async function loadAlertHistory(options = {}) {
+  const append = Boolean(options.append);
+  const offset = append ? state.alertHistory.runs.length : 0;
+  const data = await fetchAlertHistoryPage(offset);
+  renderAlertHistory(data, { append });
+}
+
+function renderAlertHistory(data, options = {}) {
+  const append = Boolean(options.append);
+  const incoming = Array.isArray(data?.runs) ? data.runs : [];
+  const runs = append ? state.alertHistory.runs.concat(incoming) : incoming;
+  const totalCount = Math.max(Number(data?.total_count ?? runs.length), runs.length);
+  state.alertHistory = {
+    runs,
+    offset: runs.length,
+    limit: Number(data?.limit || ALERT_HISTORY_PAGE_LIMIT),
+    totalCount,
+  };
   const target = $("alert-history-list");
+  const footer = `
+    <div class="pagination-row">
+      <span class="pagination-info">${loadedCountLabel(runs.length, totalCount)}</span>
+      ${runs.length < totalCount ? `<button class="text-btn" id="alert-history-more-btn" type="button">加载更多</button>` : ""}
+    </div>`;
   if (!runs.length) {
-    target.innerHTML = `<div class="empty-state">暂无告警历史记录。</div>`;
+    target.innerHTML = `<div class="empty-state">暂无告警历史记录。</div>${footer}`;
     return;
   }
-  const PAGE_SIZE = 10;
-  const currentPage = Number(target.dataset.historyPage || 1);
-  const totalPages = Math.ceil(runs.length / PAGE_SIZE);
-  const page = Math.max(1, Math.min(currentPage, totalPages));
-  const start = (page - 1) * PAGE_SIZE;
-  const end = start + PAGE_SIZE;
-  const visible = runs.slice(start, end);
-
-  target.dataset.historyPage = String(page);
-  target.innerHTML = visible.map((run) => {
+  target.innerHTML = runs.map((run) => {
     const meta = run.metadata || {};
     const events = meta.events || 0;
     const activeCount = meta.active_count || 0;
@@ -1555,12 +1619,7 @@ function renderAlertHistory(data) {
         </span>
         <span class="tiny">${escapeHtml(run.duration_text || "--")}</span>
       </div>`;
-  }).join("") + (totalPages > 1 ? `
-    <div class="pagination-row">
-      <button class="text-btn" id="history-prev-btn" ${page === 1 ? "disabled" : ""}>上一页</button>
-      <span class="pagination-info">${page} / ${totalPages}</span>
-      <button class="text-btn" id="history-next-btn" ${page === totalPages ? "disabled" : ""}>下一页</button>
-    </div>` : "");
+  }).join("") + footer;
 }
 
 async function scheduleBody() {
@@ -2427,15 +2486,30 @@ function bindEvents() {
       return;
     }
 
-    // Alert history pagination buttons
-    const historyPrevBtn = e.target.closest("#history-prev-btn");
-    const historyNextBtn = e.target.closest("#history-next-btn");
-    if (historyPrevBtn || historyNextBtn) {
-      const target = $("alert-history-list");
-      const currentPage = Number(target.dataset.historyPage || 1);
-      if (historyPrevBtn) target.dataset.historyPage = String(currentPage - 1);
-      if (historyNextBtn) target.dataset.historyPage = String(currentPage + 1);
-      loadAlerts();
+    const taskRunsMoreBtn = e.target.closest("[data-task-runs-more]");
+    if (taskRunsMoreBtn) {
+      const targetId = taskRunsMoreBtn.dataset.taskRunsMore;
+      const snapshot = state.taskRuns[targetId] || {};
+      taskRunsMoreBtn.disabled = true;
+      taskRunsMoreBtn.textContent = "加载中...";
+      loadTaskRuns(targetId, snapshot.type || "", snapshot.limit || DISPLAY_LIMITS.taskRuns, { append: true })
+        .catch((error) => {
+          taskRunsMoreBtn.disabled = false;
+          taskRunsMoreBtn.textContent = "加载更多";
+          updateStatus(friendlyError(error.message), false);
+        });
+      return;
+    }
+
+    const alertHistoryMoreBtn = e.target.closest("#alert-history-more-btn");
+    if (alertHistoryMoreBtn) {
+      alertHistoryMoreBtn.disabled = true;
+      alertHistoryMoreBtn.textContent = "加载中...";
+      loadAlertHistory({ append: true }).catch((error) => {
+        alertHistoryMoreBtn.disabled = false;
+        alertHistoryMoreBtn.textContent = "加载更多";
+        updateStatus(friendlyError(error.message), false);
+      });
       return;
     }
   });

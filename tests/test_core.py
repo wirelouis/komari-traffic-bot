@@ -410,16 +410,23 @@ class CoreTests(unittest.TestCase):
             metadata={"scope": "today"},
         )
         k.record_task_run("alert", "web:alerts-check", "failed", started_at=1003, finished_at=1004, error="boom")
+        k.record_task_run("report", "schedule:daily", "success", started_at=1005, finished_at=1006, summary="scheduled")
 
         report_runs = k.list_task_runs(limit=10, task_type="report")
         all_runs = k.list_task_runs(limit=10)
+        second_run = k.list_task_runs(limit=1, offset=1)
 
-        self.assertEqual(len(report_runs), 1)
-        self.assertEqual(report_runs[0]["summary"], "sent")
-        self.assertEqual(report_runs[0]["metadata"]["scope"], "today")
-        self.assertEqual(report_runs[0]["duration_ms"], 2500)
-        self.assertEqual(len(all_runs), 2)
-        self.assertEqual(all_runs[0]["status"], "failed")
+        self.assertEqual(len(report_runs), 2)
+        self.assertEqual(report_runs[0]["summary"], "scheduled")
+        self.assertEqual(report_runs[1]["summary"], "sent")
+        self.assertEqual(report_runs[1]["metadata"]["scope"], "today")
+        self.assertEqual(report_runs[1]["duration_ms"], 2500)
+        self.assertEqual(len(all_runs), 3)
+        self.assertEqual(all_runs[0]["summary"], "scheduled")
+        self.assertEqual(second_run[0]["status"], "failed")
+        self.assertEqual(k.count_task_runs(), 3)
+        self.assertEqual(k.count_task_runs(task_type="report"), 2)
+        self.assertEqual(k.count_task_runs(source_prefix="web:"), 2)
 
     def test_task_run_prune_and_vacuum_keep_traffic_rollups(self):
         k.upsert_daily_usage("2026-06-01", {

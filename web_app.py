@@ -1551,12 +1551,15 @@ def traffic_range_export_csv(
 
 
 @app.get("/api/tasks/runs")
-async def task_runs(limit: int = 50, task_type: str = Query("", alias="type"), _user: str = Depends(current_user)):
+async def task_runs(limit: int = 50, offset: int = 0, task_type: str = Query("", alias="type"), _user: str = Depends(current_user)):
+    safe_limit = min(200, max(1, int(limit or 50)))
+    safe_offset = max(0, int(offset or 0))
     try:
-        runs = [task_run_response(run) for run in k.list_task_runs(limit=limit, task_type=task_type)]
+        runs = [task_run_response(run) for run in k.list_task_runs(limit=safe_limit, offset=safe_offset, task_type=task_type)]
+        total_count = k.count_task_runs(task_type=task_type)
     except Exception as exc:
         return api_error(str(exc), status_code=500, code=type(exc).__name__)
-    return api_ok({"runs": runs, "limit": min(200, max(1, int(limit or 50))), "type": task_type})
+    return api_ok({"runs": runs, "limit": safe_limit, "offset": safe_offset, "total_count": total_count, "type": task_type})
 
 
 @app.get("/api/system/status")
@@ -1719,12 +1722,15 @@ async def alerts_unmute(_user: str = Depends(current_user)):
 
 
 @app.get("/api/alerts/history")
-async def alerts_history(limit: int = 50, _user: str = Depends(current_user)):
+async def alerts_history(limit: int = 10, offset: int = 0, _user: str = Depends(current_user)):
+    safe_limit = min(200, max(1, int(limit or 10)))
+    safe_offset = max(0, int(offset or 0))
     try:
-        runs = [task_run_response(run) for run in k.list_task_runs(limit=limit, task_type="alert")]
+        runs = [task_run_response(run) for run in k.list_task_runs(limit=safe_limit, offset=safe_offset, task_type="alert")]
+        total_count = k.count_task_runs(task_type="alert")
     except Exception as exc:
         return api_error(str(exc), status_code=500, code=type(exc).__name__)
-    return api_ok({"runs": runs})
+    return api_ok({"runs": runs, "limit": safe_limit, "offset": safe_offset, "total_count": total_count})
 
 
 @app.post("/api/telegram/test")

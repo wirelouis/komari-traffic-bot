@@ -877,9 +877,7 @@ def safe_record_task_run(*args, **kwargs) -> dict | None:
         return None
 
 
-def list_task_runs(limit: int = 50, task_type: str | None = None, source_prefix: str | None = None, metadata_key: str | None = None, metadata_value=None) -> list[dict]:
-    init_traffic_db()
-    limit = min(200, max(1, int(limit or 50)))
+def _task_run_filters(task_type: str | None = None, source_prefix: str | None = None, metadata_key: str | None = None, metadata_value=None) -> tuple[str, list]:
     task_type = str(task_type or "").strip().lower()
     params: list = []
     where_clauses = []
@@ -894,7 +892,16 @@ def list_task_runs(limit: int = 50, task_type: str | None = None, source_prefix:
         params.append(f"$.{metadata_key}")
         params.append(str(metadata_value))
     where = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
+    return where, params
+
+
+def list_task_runs(limit: int = 50, task_type: str | None = None, source_prefix: str | None = None, metadata_key: str | None = None, metadata_value=None, offset: int = 0) -> list[dict]:
+    init_traffic_db()
+    limit = min(200, max(1, int(limit or 50)))
+    offset = max(0, int(offset or 0))
+    where, params = _task_run_filters(task_type, source_prefix, metadata_key, metadata_value)
     params.append(limit)
+    params.append(offset)
     with traffic_db_session() as conn:
         rows = conn.execute(
             f"""
@@ -903,6 +910,7 @@ def list_task_runs(limit: int = 50, task_type: str | None = None, source_prefix:
             {where}
             ORDER BY started_at DESC, id DESC
             LIMIT ?
+            OFFSET ?
             """,
             params,
         ).fetchall()
@@ -923,18 +931,18 @@ def list_task_runs(limit: int = 50, task_type: str | None = None, source_prefix:
     return runs
 
 
-def count_task_runs(task_type: str | None = None, before_ts: int | float | None = None) -> int:
+def count_task_runs(
+    task_type: str | None = None,
+    before_ts: int | float | None = None,
+    source_prefix: str | None = None,
+    metadata_key: str | None = None,
+    metadata_value=None,
+) -> int:
     init_traffic_db()
-    task_type = str(task_type or "").strip().lower()
-    clauses = []
-    params: list = []
-    if task_type:
-        clauses.append("type = ?")
-        params.append(task_type)
+    where, params = _task_run_filters(task_type, source_prefix, metadata_key, metadata_value)
     if before_ts is not None:
-        clauses.append("started_at < ?")
+        where = f"{where} AND started_at < ?" if where else "WHERE started_at < ?"
         params.append(int(before_ts))
-    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     with traffic_db_session() as conn:
         row = conn.execute(f"SELECT COUNT(*) AS c FROM task_runs {where}", params).fetchone()
     return int(row["c"] or 0)

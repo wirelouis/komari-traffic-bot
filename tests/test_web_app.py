@@ -879,16 +879,28 @@ class WebAppTests(unittest.TestCase):
     def test_task_runs_api_filters_and_formats(self):
         self.login()
         k.record_task_run("report", "web:composer", "success", started_at=1000, finished_at=1001, summary="sent")
+        k.record_task_run("report", "schedule:daily", "success", started_at=1001, finished_at=1002, summary="scheduled")
         k.record_task_run("alert", "web:alerts-check", "failed", started_at=1002, finished_at=1003, error="boom")
 
-        response = self.client.get("/api/tasks/runs?type=report&limit=10")
+        response = self.client.get("/api/tasks/runs?type=report&limit=1")
 
         self.assertEqual(response.status_code, 200, response.text)
-        runs = response.json()["data"]["runs"]
+        payload = response.json()["data"]
+        runs = payload["runs"]
         self.assertEqual(len(runs), 1)
+        self.assertEqual(payload["limit"], 1)
+        self.assertEqual(payload["offset"], 0)
+        self.assertEqual(payload["total_count"], 2)
         self.assertEqual(runs[0]["type"], "report")
-        self.assertEqual(runs[0]["summary"], "sent")
+        self.assertEqual(runs[0]["summary"], "scheduled")
         self.assertIn("started_at_text", runs[0])
+
+        second_response = self.client.get("/api/tasks/runs?type=report&limit=1&offset=1")
+        self.assertEqual(second_response.status_code, 200, second_response.text)
+        second_payload = second_response.json()["data"]
+        self.assertEqual(second_payload["offset"], 1)
+        self.assertEqual(second_payload["total_count"], 2)
+        self.assertEqual(second_payload["runs"][0]["summary"], "sent")
 
     def test_alerts_history_returns_alert_runs(self):
         self.login()
@@ -902,19 +914,30 @@ class WebAppTests(unittest.TestCase):
             summary="检查完成",
             metadata={"events": 2, "active_count": 1, "notify": True},
         )
+        k.record_task_run("alert", "web:alerts-check", "success", started_at=2010, finished_at=2012, summary="再次检查")
 
-        response = self.client.get("/api/alerts/history?limit=50")
+        response = self.client.get("/api/alerts/history?limit=1")
 
         self.assertEqual(response.status_code, 200, response.text)
-        runs = response.json()["data"]["runs"]
-        # Only the alert run is returned, not the report run.
+        payload = response.json()["data"]
+        runs = payload["runs"]
+        self.assertEqual(payload["limit"], 1)
+        self.assertEqual(payload["offset"], 0)
+        self.assertEqual(payload["total_count"], 2)
         self.assertEqual(len(runs), 1)
         self.assertEqual(runs[0]["type"], "alert")
-        self.assertEqual(runs[0]["summary"], "检查完成")
-        self.assertEqual(runs[0]["metadata"]["events"], 2)
-        self.assertEqual(runs[0]["metadata"]["active_count"], 1)
-        self.assertTrue(runs[0]["metadata"]["notify"])
+        self.assertEqual(runs[0]["summary"], "再次检查")
         self.assertIn("started_at_text", runs[0])
+
+        second_response = self.client.get("/api/alerts/history?limit=1&offset=1")
+        self.assertEqual(second_response.status_code, 200, second_response.text)
+        second_payload = second_response.json()["data"]
+        self.assertEqual(second_payload["offset"], 1)
+        self.assertEqual(second_payload["total_count"], 2)
+        self.assertEqual(second_payload["runs"][0]["summary"], "检查完成")
+        self.assertEqual(second_payload["runs"][0]["metadata"]["events"], 2)
+        self.assertEqual(second_payload["runs"][0]["metadata"]["active_count"], 1)
+        self.assertTrue(second_payload["runs"][0]["metadata"]["notify"])
 
     def test_system_status_is_masked_and_reports_db(self):
         self.login()
