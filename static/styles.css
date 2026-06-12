@@ -1555,10 +1555,19 @@ tbody tr:last-child td {
   border-color: var(--bad-border);
 }
 
-.show-more-row {
+.pagination-row {
   display: flex;
   justify-content: center;
+  align-items: center;
+  gap: 12px;
   margin-top: 8px;
+}
+
+.pagination-info {
+  font-size: 13px;
+  color: var(--muted);
+  min-width: 50px;
+  text-align: center;
 }
 
 .source-row.bad {

@@ -1520,11 +1520,15 @@ function renderAlertHistory(data) {
     target.innerHTML = `<div class="empty-state">暂无告警历史记录。</div>`;
     return;
   }
-  const INITIAL_LIMIT = 5;
-  const showAll = target.dataset.showAll === "true";
-  const visible = showAll ? runs : runs.slice(0, INITIAL_LIMIT);
-  const hasMore = runs.length > INITIAL_LIMIT;
+  const PAGE_SIZE = 10;
+  const currentPage = Number(target.dataset.historyPage || 1);
+  const totalPages = Math.ceil(runs.length / PAGE_SIZE);
+  const page = Math.max(1, Math.min(currentPage, totalPages));
+  const start = (page - 1) * PAGE_SIZE;
+  const end = start + PAGE_SIZE;
+  const visible = runs.slice(start, end);
 
+  target.dataset.historyPage = String(page);
   target.innerHTML = visible.map((run) => {
     const meta = run.metadata || {};
     const events = meta.events || 0;
@@ -1542,9 +1546,11 @@ function renderAlertHistory(data) {
         </span>
         <span class="tiny">${escapeHtml(run.duration_text || "--")}</span>
       </div>`;
-  }).join("") + (hasMore && !showAll ? `
-    <div class="show-more-row">
-      <button class="text-btn" id="show-more-history-btn">查看更多 (${runs.length - INITIAL_LIMIT} 条)</button>
+  }).join("") + (totalPages > 1 ? `
+    <div class="pagination-row">
+      <button class="text-btn" id="history-prev-btn" ${page === 1 ? "disabled" : ""}>上一页</button>
+      <span class="pagination-info">${page} / ${totalPages}</span>
+      <button class="text-btn" id="history-next-btn" ${page === totalPages ? "disabled" : ""}>下一页</button>
     </div>` : "");
 }
 
@@ -2375,11 +2381,14 @@ function bindEvents() {
       return;
     }
 
-    // Alert history "show more" button
-    const showMoreHistoryBtn = e.target.closest("#show-more-history-btn");
-    if (showMoreHistoryBtn) {
+    // Alert history pagination buttons
+    const historyPrevBtn = e.target.closest("#history-prev-btn");
+    const historyNextBtn = e.target.closest("#history-next-btn");
+    if (historyPrevBtn || historyNextBtn) {
       const target = $("alert-history-list");
-      target.dataset.showAll = "true";
+      const currentPage = Number(target.dataset.historyPage || 1);
+      if (historyPrevBtn) target.dataset.historyPage = String(currentPage - 1);
+      if (historyNextBtn) target.dataset.historyPage = String(currentPage + 1);
       loadAlerts();
       return;
     }
