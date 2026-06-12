@@ -1555,6 +1555,12 @@ tbody tr:last-child td {
   border-color: var(--bad-border);
 }
 
+.show-more-row {
+  display: flex;
+  justify-content: center;
+  margin-top: 8px;
+}
+
 .source-row.bad {
   border-color: var(--bad-border);
   background: color-mix(in srgb, var(--paper-soft) 84%, var(--red) 16%);

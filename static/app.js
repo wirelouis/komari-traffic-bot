@@ -1520,7 +1520,12 @@ function renderAlertHistory(data) {
     target.innerHTML = `<div class="empty-state">暂无告警历史记录。</div>`;
     return;
   }
-  target.innerHTML = runs.map((run) => {
+  const INITIAL_LIMIT = 5;
+  const showAll = target.dataset.showAll === "true";
+  const visible = showAll ? runs : runs.slice(0, INITIAL_LIMIT);
+  const hasMore = runs.length > INITIAL_LIMIT;
+
+  target.innerHTML = visible.map((run) => {
     const meta = run.metadata || {};
     const events = meta.events || 0;
     const activeCount = meta.active_count || 0;
@@ -1537,7 +1542,10 @@ function renderAlertHistory(data) {
         </span>
         <span class="tiny">${escapeHtml(run.duration_text || "--")}</span>
       </div>`;
-  }).join("");
+  }).join("") + (hasMore && !showAll ? `
+    <div class="show-more-row">
+      <button class="text-btn" id="show-more-history-btn">查看更多 (${runs.length - INITIAL_LIMIT} 条)</button>
+    </div>` : "");
 }
 
 async function scheduleBody() {
@@ -2364,6 +2372,15 @@ function bindEvents() {
       if (action === "edit") editSchedule(id);
       if (action === "delete") deleteSchedule(id);
       if (action === "run") runScheduleNow(id);
+      return;
+    }
+
+    // Alert history "show more" button
+    const showMoreHistoryBtn = e.target.closest("#show-more-history-btn");
+    if (showMoreHistoryBtn) {
+      const target = $("alert-history-list");
+      target.dataset.showAll = "true";
+      loadAlerts();
       return;
     }
   });
